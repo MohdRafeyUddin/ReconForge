@@ -45,6 +45,27 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def merge_asset_metadata(existing_metadata: Dict[str, Any], incoming_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge metadata without overwriting existing values with empty objects."""
+    merged = dict(existing_metadata or {})
+    incoming = incoming_metadata or {}
+
+    if not incoming:
+        return merged
+
+    for key, value in incoming.items():
+        if value is None:
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict) and value:
+            merged[key] = {**merged[key], **value}
+        elif value == {}:
+            continue
+        else:
+            merged[key] = value
+
+    return merged
+
+
 @router.get("/providers")
 async def get_registered_providers(current_user: dict = Depends(get_current_user)):
     return [
@@ -120,9 +141,9 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                 })
 
                 if existing:
-                    # Merge ports, metadata, and sources
+                    # Merge ports, metadata, and sources while preserving existing metadata.
                     merged_ports = list(set(existing.get("open_ports", []) + asset_data.get("open_ports", [])))
-                    merged_metadata = {**existing.get("metadata", {}), **asset_data.get("metadata", {})}
+                    merged_metadata = merge_asset_metadata(existing.get("metadata", {}), asset_data.get("metadata", {}))
                     merged_sources = list(set(existing.get("sources", []) + incoming_sources))
 
                     await db.assets.update_one(

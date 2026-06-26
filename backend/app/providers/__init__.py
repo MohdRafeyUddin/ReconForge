@@ -6,13 +6,9 @@ from app.providers.assetfinder_provider import AssetfinderProvider
 from app.providers.amass_provider import AmassProvider
 from app.providers.chaos_provider import ChaosProvider
 from app.providers.unified_discovery_provider import UnifiedDiscoveryProvider
+# HTTPX is intentionally NOT registered as a frontend-facing discovery provider.
+# It is executed internally as part of the Unified Discovery pipeline.
 
-# NOTE:
-# Providers like Certificate Transparency / DNS Resolver / Asset Inventory Import
-# are intentionally unregistered from the frontend-facing provider list so they
-# do not appear in the Discovery Provider dropdown.
-#
-# Their backend implementations remain in the codebase.
 PROVIDERS = {
     "Subfinder": SubfinderProvider(),
     "Assetfinder": AssetfinderProvider(),
@@ -20,4 +16,6 @@ PROVIDERS = {
     "Chaos": ChaosProvider(),
     "Unified Discovery": UnifiedDiscoveryProvider(),
 }
+
+
 

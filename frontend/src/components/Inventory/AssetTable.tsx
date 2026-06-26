@@ -227,37 +227,78 @@ export const AssetTable: React.FC<AssetTableProps> = ({ assets }) => {
                               </div>
                             </div>
 
-                            {/* Right Side: SSL/TLS Meta */}
+                            {/* Right Side: HTTPX / SSL Meta */}
                             <div className="bg-dark-card border border-dark-border rounded-lg p-4">
                               <h5 className="font-bold text-cyber-accent border-b border-dark-border pb-1.5 mb-2.5 uppercase tracking-wider text-[10px]">
-                                SSL/TLS Security Status
+                                HTTPX Probe Results
                               </h5>
-                              {asset.metadata.ssl_info ? (
-                                <div className="space-y-1.5">
+                              <div className="space-y-1.5">
+                                {asset.metadata.url && (
                                   <div>
-                                    <span className="text-slate-500">ISSUER CA:</span>{" "}
-                                    <span className="text-slate-200">{asset.metadata.ssl_info.issuer}</span>
+                                    <span className="text-slate-500">URL:</span>{" "}
+                                    <span className="text-slate-200 break-all">{asset.metadata.url}</span>
                                   </div>
+                                )}
+                                {asset.metadata.status_code !== undefined && (
                                   <div>
-                                    <span className="text-slate-500">SERIAL NUMBER:</span>{" "}
-                                    <span className="text-slate-300 font-mono">{asset.metadata.ssl_info.serial_number}</span>
+                                    <span className="text-slate-500">STATUS CODE:</span>{" "}
+                                    <span className="text-slate-300">{asset.metadata.status_code}</span>
                                   </div>
-                                  <div className="flex space-x-4">
-                                    <div>
-                                      <span className="text-slate-500">VALID FROM:</span>{" "}
-                                      <span className="text-slate-300">{new Date(asset.metadata.ssl_info.valid_from).toLocaleDateString()}</span>
-                                    </div>
-                                    <div>
-                                      <span className="text-slate-500">VALID TO:</span>{" "}
-                                      <span className="text-slate-300">{new Date(asset.metadata.ssl_info.valid_to).toLocaleDateString()}</span>
-                                    </div>
+                                )}
+                                {asset.metadata.title && (
+                                  <div>
+                                    <span className="text-slate-500">TITLE:</span>{" "}
+                                    <span className="text-slate-300">{asset.metadata.title}</span>
                                   </div>
-                                </div>
-                              ) : (
-                                <div className="text-slate-500 italic py-2">
-                                  No TLS/SSL metadata discovered. Active probe needed.
-                                </div>
-                              )}
+                                )}
+                                {asset.metadata.technologies?.length > 0 && (
+                                  <div>
+                                    <span className="text-slate-500">TECHNOLOGIES:</span>{" "}
+                                    <span className="text-slate-300">{asset.metadata.technologies.join(", ")}</span>
+                                  </div>
+                                )}
+                                {(asset.metadata.server || asset.metadata.web_server) && (
+                                  <div>
+                                    <span className="text-slate-500">WEB SERVER:</span>{" "}
+                                    <span className="text-slate-300">{asset.metadata.server || asset.metadata.web_server}</span>
+                                  </div>
+                                )}
+                                {(asset.metadata.ip || asset.metadata.ip_address) && (
+                                  <div>
+                                    <span className="text-slate-500">IP ADDRESS:</span>{" "}
+                                    <span className="text-slate-300">{asset.metadata.ip || asset.metadata.ip_address}</span>
+                                  </div>
+                                )}
+                                {asset.metadata.response_time !== undefined && (
+                                  <div>
+                                    <span className="text-slate-500">RESPONSE TIME:</span>{" "}
+                                    <span className="text-slate-300">{asset.metadata.response_time} ms</span>
+                                  </div>
+                                )}
+                                {asset.metadata.content_length !== undefined && (
+                                  <div>
+                                    <span className="text-slate-500">CONTENT LENGTH:</span>{" "}
+                                    <span className="text-slate-300">{asset.metadata.content_length}</span>
+                                  </div>
+                                )}
+                                {asset.metadata.redirect_location && (
+                                  <div>
+                                    <span className="text-slate-500">REDIRECT:</span>{" "}
+                                    <span className="text-slate-300 break-all">{asset.metadata.redirect_location}</span>
+                                  </div>
+                                )}
+                                {(asset.metadata.tls_info || asset.metadata.ssl_info) && (
+                                  <div>
+                                    <span className="text-slate-500">TLS:</span>{" "}
+                                    <span className="text-slate-300">{asset.metadata.tls_info?.issuer || asset.metadata.ssl_info?.issuer || "Available"}</span>
+                                  </div>
+                                )}
+                                {!asset.metadata.url && asset.metadata.status_code === undefined && !asset.metadata.title && !asset.metadata.technologies?.length && !asset.metadata.server && !asset.metadata.web_server && !(asset.metadata.ip || asset.metadata.ip_address) && asset.metadata.response_time === undefined && asset.metadata.content_length === undefined && !asset.metadata.redirect_location && !(asset.metadata.tls_info || asset.metadata.ssl_info) && (
+                                  <div className="text-slate-500 italic py-2">
+                                    No HTTPX metadata available for this asset yet.
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           </div>
                         </td>

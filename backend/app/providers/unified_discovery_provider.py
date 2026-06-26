@@ -14,15 +14,17 @@ overall scan.
 import asyncio
 import logging
 import re
-from typing import AsyncGenerator, Dict, Any, List, Set
+from typing import AsyncGenerator, Dict, Any, List
 
 from app.providers.base import BaseProvider
 from app.providers.subfinder_provider import SubfinderProvider
 from app.providers.assetfinder_provider import AssetfinderProvider
 from app.providers.amass_provider import AmassProvider
 from app.providers.chaos_provider import ChaosProvider
+from app.providers.httpx_provider import HttpxProvider
 
 logger = logging.getLogger("reconforge.providers.unified")
+
 
 # Simple hostname validation: must look like host.tld (no wildcards, no IPs)
 _VALID_HOSTNAME_RE = re.compile(
@@ -76,15 +78,16 @@ class UnifiedDiscoveryProvider(BaseProvider):
         yield {"type": "log", "message": start_msg}
 
         # ---------------------------------------------------------------
-        # Collect all raw results from every provider concurrently.
-        # results_map: domain -> set(source_labels)
+        # PHASE 1: Concurrent execution of discovery providers.
+        # - Stream asset events immediately as they arrive.
+        # - Collect discovered subdomains for later global dedup + HTTPX stage.
         # ---------------------------------------------------------------
-        results_map: Dict[str, Set[str]] = {}   # domain -> set of sources
-        provider_counts: Dict[str, int] = {}    # label -> count
+        provider_counts: Dict[str, int] = {}
+        discovered_subdomains: List[str] = []
 
-        # We use an asyncio.Queue to let provider coroutines push events while
-        # we centralise dedup logic here.
-        event_queue: asyncio.Queue = asyncio.Queue()
+        event_queue: asyncio.Queue = asyncio.Queue()  # (kind, ...)
+
+
 
         async def run_provider(provider: BaseProvider, label: str) -> None:
             logger.info(f"[*] Launching {label}...")
@@ -96,7 +99,9 @@ class UnifiedDiscoveryProvider(BaseProvider):
                         normalised = _normalise(raw)
                         if _is_valid(normalised):
                             await event_queue.put(("asset", normalised, label))
+                            discovered_subdomains.append(normalised)
                             count += 1
+
                     # Log events from individual providers are suppressed in the
                     # frontend; they still appear on the backend terminal via the
                     # provider's own logger.
@@ -118,6 +123,7 @@ class UnifiedDiscoveryProvider(BaseProvider):
         remaining_providers = len(tasks)
 
         while remaining_providers > 0 or not event_queue.empty():
+
             try:
                 item = await asyncio.wait_for(event_queue.get(), timeout=0.2)
             except asyncio.TimeoutError:
@@ -129,9 +135,21 @@ class UnifiedDiscoveryProvider(BaseProvider):
 
             if kind == "asset":
                 _, domain, source = item
-                if domain not in results_map:
-                    results_map[domain] = set()
-                results_map[domain].add(source)
+                # PHASE 1: stream immediately, no global deduplication.
+                yield {
+                    "type": "asset",
+                    "data": {
+                        "domain": domain,
+                        "type": "subdomain",
+                        "status": "unknown",
+                        "open_ports": [],
+                        "metadata": {"source": "unified_discovery"},
+                        "discovered_by": "Unified Discovery",
+                        # Phase 1: single source list (no merging yet).
+                        "sources": [source],
+                    },
+                }
+
 
             elif kind == "provider_done":
                 _, label, count = item
@@ -156,11 +174,14 @@ class UnifiedDiscoveryProvider(BaseProvider):
         await asyncio.gather(*tasks, return_exceptions=True)
 
         # ---------------------------------------------------------------
-        # Emit deduplicated asset events
+        # Stage 1 summary: global deduplication + Stage 2 prep
         # ---------------------------------------------------------------
-        total_unique = len(results_map)
+
+        unique_subdomains = sorted(set(discovered_subdomains))
+        total_unique = len(unique_subdomains)
+
         summary_msg = (
-            f"\n[√] Unified Discovery complete.\n"
+            f"\n[√] Unified Discovery Phase 1 complete.\n"
             f"    Subfinder   : {provider_counts.get('subfinder', 0)}\n"
             f"    Assetfinder : {provider_counts.get('assetfinder', 0)}\n"
             f"    Amass       : {provider_counts.get('amass', 0)}\n"
@@ -171,21 +192,65 @@ class UnifiedDiscoveryProvider(BaseProvider):
         logger.info(summary_msg)
         yield {"type": "log", "message": summary_msg}
 
-        for domain, sources in sorted(results_map.items()):
-            sources_list = sorted(sources)
-            yield {
-                "type": "asset",
-                "data": {
-                    "domain": domain,
-                    "type": "subdomain",
-                    "status": "unknown",
-                    "open_ports": [],
-                    "metadata": {"source": "unified_discovery"},
-                    "discovered_by": "Unified Discovery",
-                    # Extra field used by jobs.py for source attribution upsert
-                    "sources": sources_list,
-                },
-            }
+        # ---------------------------------------------------------------
+        # PHASE 2: HTTPX probing on deduplicated subdomains
+        # ---------------------------------------------------------------
+
+        live_hosts = 0
+        httpx_error = None
+
+        if total_unique > 0:
+            # Announce HTTPX phase
+            httpx_start_msg = (
+                f"\n========== HTTPX Probing ==========\n"
+                f"[*] Launching HTTPX on {total_unique} unique subdomains..."
+            )
+            logger.info(httpx_start_msg)
+            yield {"type": "log", "message": httpx_start_msg}
+
+            # Instantiate and run HTTPX
+            httpx_provider = HttpxProvider()
+            try:
+                async for event in httpx_provider.discover(unique_subdomains):
+                    event_type = event.get("type")
+
+                    # Track live hosts for final summary
+                    if event_type == "asset":
+                        asset = event.get("data", {})
+                        if asset.get("status") == "live":
+                            live_hosts += 1
+                        # Stream the asset immediately (with HTTPX metadata)
+                        yield event
+
+                    # Stream logs and other events
+                    elif event_type in ("log", "scan_summary"):
+                        yield event
+
+            except Exception as exc:
+                httpx_error = str(exc)
+                err_msg = f"[-] HTTPX probing failed: {httpx_error}"
+                logger.error(err_msg)
+                yield {"type": "log", "message": err_msg}
+                # Continue—don't fail the entire scan
+        else:
+            no_hosts_msg = "[*] No unique subdomains to probe; skipping HTTPX."
+            logger.info(no_hosts_msg)
+            yield {"type": "log", "message": no_hosts_msg}
+
+        # ---------------------------------------------------------------
+        # Final summary: combined results
+        # ---------------------------------------------------------------
+
+        final_summary_msg = (
+            f"\n========== Pipeline Complete ==========\n"
+            f"[√] Unified Discovery Pipeline finished.\n"
+            f"    Discovery Results  : {total_unique} unique subdomains\n"
+            f"    HTTPX Results      : {live_hosts} live hosts"
+        )
+        if httpx_error:
+            final_summary_msg += f"\n    ⚠️  HTTPX Error    : {httpx_error} (non-fatal)"
+        logger.info(final_summary_msg)
+        yield {"type": "log", "message": final_summary_msg}
 
         yield {
             "type": "scan_summary",
@@ -196,4 +261,5 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 "chaos": provider_counts.get("chaos", 0),
             },
             "total_unique": total_unique,
+            "live_hosts": live_hosts,
         }

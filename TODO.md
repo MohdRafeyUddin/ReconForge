@@ -1,11 +1,8 @@
-# TODO - AmassProvider streaming refactor (ReconForge)
+# TODO
 
-- [x] Update `backend/app/providers/amass_provider.py` to replace `subprocess.run()` with `subprocess.Popen()`.
-- [x] Stream `stdout` line-by-line while Amass is running; yield `type: "asset"` events immediately.
-- [x] Preserve deduplication via `seen_subdomains`.
-- [x] Preserve existing `type: "log"` yields and logging messages as closely as possible.
-- [x] Ensure Windows+WSL command structure remains unchanged.
-- [x] Wait for process completion via `process.wait()` and check exit code; raise on non-zero.
-- [ ] Quick local test commands to validate streaming + runtime.
-- [ ] Verify MongoDB compatibility path by ensuring asset event schema remains unchanged.
+## Unified Discovery Refactor - Phase 1
+
+- [ ] Inspect current UnifiedDiscoveryProvider implementation and verify it meets Phase 1 requirements (concurrent execution, streaming, error isolation, preserved events).
+- [ ] If any requirement is not met, update **only** `backend/app/providers/unified_discovery_provider.py`.
+- [ ] Test Phase 1 by launching Unified Discovery job and verifying websocket stream receives `asset` events immediately as providers produce them, while failures don’t cancel other providers.
 
