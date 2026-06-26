@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+*.manifest
+*.spec
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+
+# FastAPI / API
+.env
+.env.*
+*.local
+*.local.json
+*.local.yaml
+*.local.yml
+*.pem
+*.key
+*.p12
+*.crt
+*.cer
+config.local.py
+secrets.json
+credentials.json
+api_keys.txt
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+backend/venv/
+frontend/node_modules/
+
+# Node / React
+node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+frontend/coverage/
+
+# VS Code
+.vscode/
+
+# MongoDB local data
+mongodb-data/
+*.lock
+*.db
+*.sqlite3
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# JetBrains / editors
+.idea/
