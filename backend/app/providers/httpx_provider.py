@@ -221,6 +221,9 @@ class HttpxProvider(BaseProvider):
             return asset
 
         try:
+            from app.job_control import register_process, unregister_process, check_job_status
+            await check_job_status()
+
             # Stream stdout line-by-line.
             # Use Popen because httpx is interactive/streaming.
             if is_windows:
@@ -230,6 +233,8 @@ class HttpxProvider(BaseProvider):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
                 )
             else:
@@ -238,31 +243,41 @@ class HttpxProvider(BaseProvider):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
                 )
+            register_process(process)
 
-            assert process.stdout is not None
+            try:
+                assert process.stdout is not None
 
-            for raw_line in process.stdout:
-                parsed = parse_json_line(raw_line)
-                if not parsed:
-                    continue
+                for raw_line in process.stdout:
+                    await check_job_status()
+                    parsed = parse_json_line(raw_line)
+                    if not parsed:
+                        continue
 
-                asset = build_asset(parsed)
-                if not asset:
-                    continue
+                    asset = build_asset(parsed)
+                    if not asset:
+                        continue
 
-                hosts_processed += 1
-                if asset["status"] == "live":
-                    live_hosts += 1
-                    logger.info(f"[+] Live host: {asset['domain']} ({asset['metadata'].get('url')})")
-                else:
-                    logger.info(f"[*] Dead host: {asset['domain']} ({asset['metadata'].get('url')})")
+                    hosts_processed += 1
+                    if asset["status"] == "live":
+                        live_hosts += 1
+                        logger.info(f"[+] Live host: {asset['domain']} ({asset['metadata'].get('url')})")
+                    else:
+                        logger.info(f"[*] Dead host: {asset['domain']} ({asset['metadata'].get('url')})")
 
-                # Emit asset immediately so router->websocket->frontend updates.
-                yield {"type": "asset", "data": asset}
+                    # Emit asset immediately so router->websocket->frontend updates.
+                    yield {"type": "asset", "data": asset}
 
-                await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+            finally:
+                unregister_process(process)
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait()
 
             # Best-effort stderr logging
             stderr_out = ""

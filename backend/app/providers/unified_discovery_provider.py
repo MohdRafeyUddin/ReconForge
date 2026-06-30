@@ -21,7 +21,11 @@ from app.providers.subfinder_provider import SubfinderProvider
 from app.providers.assetfinder_provider import AssetfinderProvider
 from app.providers.amass_provider import AmassProvider
 from app.providers.chaos_provider import ChaosProvider
+from collections import defaultdict
 from app.providers.httpx_provider import HttpxProvider
+from app.providers.naabu_provider import NaabuProvider
+from app.providers.katana_provider import KatanaProvider
+from app.providers.nuclei_provider import NucleiProvider
 
 logger = logging.getLogger("reconforge.providers.unified")
 
@@ -197,7 +201,19 @@ class UnifiedDiscoveryProvider(BaseProvider):
         # ---------------------------------------------------------------
 
         live_hosts = 0
+        live_host_targets: List[str] = []
+        live_host_urls: List[str] = []
+        host_to_live_url: Dict[str, str] = {}
+        host_to_urls = defaultdict(list)
         httpx_error = None
+        naabu_error = None
+        katana_error = None
+        nuclei_error = None
+        naabu_hosts_with_ports = 0
+        naabu_open_ports = 0
+        katana_hosts_scanned = 0
+        katana_urls_discovered = 0
+        nuclei_findings_count = 0
 
         if total_unique > 0:
             # Announce HTTPX phase
@@ -207,6 +223,9 @@ class UnifiedDiscoveryProvider(BaseProvider):
             )
             logger.info(httpx_start_msg)
             yield {"type": "log", "message": httpx_start_msg}
+
+            from app.job_control import check_job_status
+            await check_job_status()
 
             # Instantiate and run HTTPX
             httpx_provider = HttpxProvider()
@@ -219,6 +238,12 @@ class UnifiedDiscoveryProvider(BaseProvider):
                         asset = event.get("data", {})
                         if asset.get("status") == "live":
                             live_hosts += 1
+                            domain_norm = _normalise(asset.get("domain", ""))
+                            live_host_targets.append(domain_norm)
+                            url = asset.get("metadata", {}).get("url")
+                            resolved_url = url if url else f"http://{asset.get('domain')}"
+                            host_to_live_url[domain_norm] = resolved_url
+                            live_host_urls.append(resolved_url)
                         # Stream the asset immediately (with HTTPX metadata)
                         yield event
 
@@ -238,6 +263,110 @@ class UnifiedDiscoveryProvider(BaseProvider):
             yield {"type": "log", "message": no_hosts_msg}
 
         # ---------------------------------------------------------------
+        # PHASE 3: Naabu open-port scanning on deduplicated LIVE hosts
+        # ---------------------------------------------------------------
+
+        unique_live_hosts = sorted({host for host in live_host_targets if _is_valid(host)})
+
+        if unique_live_hosts:
+            from app.job_control import check_job_status
+            await check_job_status()
+
+            naabu_provider = NaabuProvider()
+            try:
+                async for event in naabu_provider.discover(unique_live_hosts):
+                    if event.get("type") == "scan_summary":
+                        naabu_hosts_with_ports = event.get("hosts_with_open_ports", 0)
+                        naabu_open_ports = event.get("open_ports", 0)
+
+                    yield event
+
+            except Exception as exc:
+                naabu_error = str(exc)
+                err_msg = f"[-] Naabu scanning failed: {naabu_error}"
+                logger.error(err_msg)
+                yield {"type": "log", "message": err_msg}
+                # Open-port enrichment is non-fatal to Unified Discovery.
+        elif total_unique > 0:
+            no_live_msg = "[*] No LIVE hosts from HTTPX; skipping Naabu."
+            logger.info(no_live_msg)
+            yield {"type": "log", "message": no_live_msg}
+
+        # ---------------------------------------------------------------
+        # PHASE 4: Katana web crawling on deduplicated LIVE URLs
+        # ---------------------------------------------------------------
+
+        unique_live_urls = sorted(list(set(live_host_urls)))
+
+        if unique_live_urls:
+            from app.job_control import check_job_status
+            await check_job_status()
+
+            katana_provider = KatanaProvider()
+            try:
+                async for event in katana_provider.discover(unique_live_urls):
+                    if event.get("type") == "scan_summary":
+                        katana_hosts_scanned = event.get("hosts_scanned", 0)
+                        katana_urls_discovered = event.get("urls_discovered", 0)
+                    elif event.get("type") == "asset":
+                        asset_data = event.get("data", {})
+                        domain = _normalise(asset_data.get("domain", ""))
+                        k_meta = asset_data.get("metadata", {}).get("katana", {})
+                        k_urls = k_meta.get("urls", [])
+                        if k_urls:
+                            host_to_urls[domain].extend(k_urls)
+
+                    yield event
+
+            except Exception as exc:
+                katana_error = str(exc)
+                err_msg = f"[-] Katana crawling failed: {katana_error}"
+                logger.error(err_msg)
+                yield {"type": "log", "message": err_msg}
+                # Crawling enrichment is non-fatal to Unified Discovery.
+        elif total_unique > 0:
+            no_live_msg = "[*] No LIVE URLs from HTTPX; skipping Katana."
+            logger.info(no_live_msg)
+            yield {"type": "log", "message": no_live_msg}
+
+        # ---------------------------------------------------------------
+        # PHASE 5: Nuclei scanning on deduplicated target URLs
+        # ---------------------------------------------------------------
+        nuclei_targets = []
+        for host in unique_live_hosts:
+            host_urls = host_to_urls.get(host, [])
+            if not host_urls:
+                live_url = host_to_live_url.get(host)
+                if live_url:
+                    host_urls = [live_url]
+                else:
+                    host_urls = [f"http://{host}"]
+            nuclei_targets.extend(host_urls)
+
+        unique_nuclei_targets = sorted(list(set(nuclei_targets)))
+
+        if unique_nuclei_targets:
+            from app.job_control import check_job_status
+            await check_job_status()
+
+            nuclei_provider = NucleiProvider()
+            try:
+                async for event in nuclei_provider.discover(unique_nuclei_targets):
+                    if event.get("type") == "scan_summary":
+                        nuclei_findings_count = event.get("findings_found", 0)
+                    yield event
+            except Exception as exc:
+                nuclei_error = str(exc)
+                err_msg = f"[-] Nuclei scanning failed: {nuclei_error}"
+                logger.error(err_msg)
+                yield {"type": "log", "message": err_msg}
+                # Nuclei scanning is non-fatal to Unified Discovery.
+        elif total_unique > 0:
+            no_live_msg = "[*] No LIVE URLs from HTTPX or Katana; skipping Nuclei."
+            logger.info(no_live_msg)
+            yield {"type": "log", "message": no_live_msg}
+
+        # ---------------------------------------------------------------
         # Final summary: combined results
         # ---------------------------------------------------------------
 
@@ -245,10 +374,19 @@ class UnifiedDiscoveryProvider(BaseProvider):
             f"\n========== Pipeline Complete ==========\n"
             f"[√] Unified Discovery Pipeline finished.\n"
             f"    Discovery Results  : {total_unique} unique subdomains\n"
-            f"    HTTPX Results      : {live_hosts} live hosts"
+            f"    HTTPX Results      : {live_hosts} live hosts\n"
+            f"    Naabu Results      : {naabu_open_ports} open ports across {naabu_hosts_with_ports} hosts\n"
+            f"    Katana Results     : {katana_urls_discovered} URLs discovered across {katana_hosts_scanned} hosts\n"
+            f"    Nuclei Results     : {nuclei_findings_count} findings discovered across {len(unique_nuclei_targets)} URLs"
         )
         if httpx_error:
             final_summary_msg += f"\n    ⚠️  HTTPX Error    : {httpx_error} (non-fatal)"
+        if naabu_error:
+            final_summary_msg += f"\n    Naabu Error       : {naabu_error} (non-fatal)"
+        if katana_error:
+            final_summary_msg += f"\n    Katana Error      : {katana_error} (non-fatal)"
+        if nuclei_error:
+            final_summary_msg += f"\n    Nuclei Error      : {nuclei_error} (non-fatal)"
         logger.info(final_summary_msg)
         yield {"type": "log", "message": final_summary_msg}
 
@@ -262,4 +400,9 @@ class UnifiedDiscoveryProvider(BaseProvider):
             },
             "total_unique": total_unique,
             "live_hosts": live_hosts,
+            "naabu_hosts_with_open_ports": naabu_hosts_with_ports,
+            "naabu_open_ports": naabu_open_ports,
+            "katana_hosts_scanned": katana_hosts_scanned,
+            "katana_urls_discovered": katana_urls_discovered,
+            "nuclei_findings_count": nuclei_findings_count,
         }

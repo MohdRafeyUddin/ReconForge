@@ -57,7 +57,27 @@ def merge_asset_metadata(existing_metadata: Dict[str, Any], incoming_metadata: D
         if value is None:
             continue
         if isinstance(value, dict) and isinstance(merged.get(key), dict) and value:
-            merged[key] = {**merged[key], **value}
+            if key == "nuclei" and "findings" in value:
+                existing_nuclei = merged.get("nuclei") or {}
+                existing_findings = existing_nuclei.get("findings") or []
+                incoming_findings = value.get("findings") or []
+                
+                # Deduplicate by: template_id + matched_url
+                finding_map = {}
+                for f in existing_findings:
+                    k = (f.get("template_id"), f.get("matched_url"))
+                    finding_map[k] = f
+                for f in incoming_findings:
+                    k = (f.get("template_id"), f.get("matched_url"))
+                    finding_map[k] = f
+                
+                merged["nuclei"] = {
+                    **existing_nuclei,
+                    **value,
+                    "findings": list(finding_map.values())
+                }
+            else:
+                merged[key] = {**merged[key], **value}
         elif value == {}:
             continue
         else:
@@ -78,6 +98,9 @@ async def get_registered_providers(current_user: dict = Depends(get_current_user
 
 
 async def run_discovery_job(job_id: str, project_id: str, provider_name: str, seed_domains: List[str]):
+    from app.job_control import current_job_id
+    current_job_id.set(job_id)
+
     db = get_database()
     if db is None:
         logger.error("Database is not initialized. Cannot run job.")
@@ -145,19 +168,32 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                     merged_ports = list(set(existing.get("open_ports", []) + asset_data.get("open_ports", [])))
                     merged_metadata = merge_asset_metadata(existing.get("metadata", {}), asset_data.get("metadata", {}))
                     merged_sources = list(set(existing.get("sources", []) + incoming_sources))
+                    new_status = asset_data["status"] if asset_data["status"] != "unknown" else existing["status"]
+                    last_seen_time = datetime.utcnow()
 
                     await db.assets.update_one(
                         {"_id": existing["_id"]},
                         {"$set": {
-                            "status": asset_data["status"] if asset_data["status"] != "unknown" else existing["status"],
+                            "status": new_status,
                             "open_ports": merged_ports,
                             "metadata": merged_metadata,
                             "sources": merged_sources,
-                            "last_seen": datetime.utcnow(),
-                            "updated_at": datetime.utcnow(),
+                            "last_seen": last_seen_time,
+                            "updated_at": last_seen_time,
                         }}
                     )
                     alert_msg = f"[!] Updated existing asset: {asset_data['domain']} (sources: {merged_sources})"
+                    
+                    # Prepare fully merged asset for real-time WebSocket broadcast
+                    broadcast_asset = {
+                        **existing,
+                        "status": new_status,
+                        "open_ports": merged_ports,
+                        "metadata": merged_metadata,
+                        "sources": merged_sources,
+                        "last_seen": last_seen_time,
+                        "updated_at": last_seen_time,
+                    }
                 else:
                     asset_data["sources"] = incoming_sources
                     asset_data["first_seen"] = datetime.utcnow()
@@ -165,19 +201,23 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                     asset_data["created_at"] = datetime.utcnow()
                     await db.assets.insert_one(asset_data)
                     alert_msg = f"[+] New asset stored: {asset_data['domain']} (sources: {incoming_sources})"
+                    broadcast_asset = asset_data
 
                 logger.info(alert_msg)
                 await db.jobs.update_one({"_id": ObjectId(job_id)}, {"$push": {"logs": alert_msg}})
                 await manager.broadcast(job_id, {"type": "log", "message": alert_msg})
-                await manager.broadcast(job_id, {"type": "asset_discovered", "asset": serialize_doc(asset_data)})
+                await manager.broadcast(job_id, {"type": "asset_discovered", "asset": serialize_doc(broadcast_asset)})
 
             elif event_type == "scan_summary":
-                # Forward the full summary to the frontend for the progress panel
-                await manager.broadcast(job_id, {
-                    "type": "scan_summary",
-                    "provider_counts": event.get("provider_counts", {}),
-                    "total_unique": event.get("total_unique", 0),
+                # Forward available summary fields without inventing zero values
+                # for internal stages such as HTTPX or Naabu.
+                summary_payload = {"type": "scan_summary"}
+                summary_payload.update({
+                    key: value
+                    for key, value in event.items()
+                    if key != "type" and value is not None
                 })
+                await manager.broadcast(job_id, summary_payload)
 
         # Complete job
         complete_msg = f"[√] Job {job_id} completed successfully."
@@ -299,3 +339,94 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
     except Exception as e:
         logger.error(f"WS Exception on job {job_id}: {e}")
         manager.disconnect(job_id, websocket)
+
+
+@router.post("/{job_id}/pause")
+async def pause_job(job_id: str, current_user: dict = Depends(get_current_user)):
+    db = get_database()
+    if not ObjectId.is_valid(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+    job = await db.jobs.find_one({"_id": ObjectId(job_id)})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    await db.jobs.update_one(
+        {"_id": ObjectId(job_id)},
+        {"$set": {"status": "paused"}}
+    )
+    await manager.broadcast(job_id, {"type": "status", "status": "paused"})
+    await manager.broadcast(job_id, {"type": "log", "message": "[*] Scan paused by user."})
+    return {"status": "paused"}
+
+
+@router.post("/{job_id}/resume")
+async def resume_job(job_id: str, current_user: dict = Depends(get_current_user)):
+    db = get_database()
+    if not ObjectId.is_valid(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+    job = await db.jobs.find_one({"_id": ObjectId(job_id)})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    await db.jobs.update_one(
+        {"_id": ObjectId(job_id)},
+        {"$set": {"status": "running"}}
+    )
+    await manager.broadcast(job_id, {"type": "status", "status": "running"})
+    await manager.broadcast(job_id, {"type": "log", "message": "[*] Scan resumed by user."})
+    return {"status": "running"}
+
+
+@router.post("/{job_id}/stop")
+async def stop_job(job_id: str, current_user: dict = Depends(get_current_user)):
+    db = get_database()
+    if not ObjectId.is_valid(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+    job = await db.jobs.find_one({"_id": ObjectId(job_id)})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    await db.jobs.update_one(
+        {"_id": ObjectId(job_id)},
+        {"$set": {"status": "stopped", "finished_at": datetime.utcnow()}}
+    )
+    
+    from app.job_control import active_processes
+    procs = list(active_processes.get(job_id, []))
+    for p in procs:
+        try:
+            logger.info(f"Terminating process {p.pid} for stopped job {job_id}")
+            p.terminate()
+        except Exception as e:
+            logger.error(f"Error terminating process: {e}")
+            
+    await manager.broadcast(job_id, {"type": "status", "status": "stopped"})
+    await manager.broadcast(job_id, {"type": "log", "message": "[-] Scan stopped by user."})
+    return {"status": "stopped"}
+
+
+@router.post("/{job_id}/reset")
+async def reset_job(job_id: str, current_user: dict = Depends(get_current_user)):
+    db = get_database()
+    if not ObjectId.is_valid(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+    job = await db.jobs.find_one({"_id": ObjectId(job_id)})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    project_id = job.get("project_id")
+    
+    from app.job_control import active_processes
+    procs = list(active_processes.get(job_id, []))
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+            
+    if project_id:
+        await db.assets.delete_many({"project_id": project_id})
+        await db.jobs.delete_many({"project_id": project_id})
+        
+    await manager.broadcast(job_id, {"type": "status", "status": "idle"})
+    return {"status": "reset"}

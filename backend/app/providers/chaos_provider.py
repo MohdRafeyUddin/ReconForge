@@ -42,51 +42,59 @@ class ChaosProvider(BaseProvider):
             discovered_count = 0
 
             try:
+                from app.job_control import register_process, unregister_process, check_job_status
+                await check_job_status()
+
                 # Keep subprocess pattern consistent with other providers.
                 process = subprocess.Popen(
                     [executable, *args],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
                 )
+                register_process(process)
 
-                # Stream stdout line-by-line.
-                assert process.stdout is not None
-                for line in process.stdout:
-                    subdomain = (line or "").strip()
-                    if not subdomain:
-                        continue
+                try:
+                    # Stream stdout line-by-line.
+                    assert process.stdout is not None
+                    for line in process.stdout:
+                        await check_job_status()
+                        subdomain = (line or "").strip().lower()
+                        if not subdomain:
+                            continue
 
-                    # Deduplicate within this provider run/domain.
-                    if subdomain in seen:
-                        continue
-                    seen.add(subdomain)
+                        # Deduplicate within this provider run/domain.
+                        if subdomain in seen:
+                            continue
+                        seen.add(subdomain)
 
-                    discovered_count += 1
-                    sub_msg = f"[+] [Chaos] Found: {subdomain}"
-                    logger.info(sub_msg)
-                    yield {"type": "log", "message": sub_msg}
+                        discovered_count += 1
+                        sub_msg = f"[+] [Chaos] Found: {subdomain}"
+                        logger.info(sub_msg)
+                        yield {"type": "log", "message": sub_msg}
 
-                    # Emit asset immediately so jobs.py can persist + stream to UI.
-                    yield {
-                        "type": "asset",
-                        "data": {
-                            "domain": subdomain,
-                            "type": "subdomain",
-                            "status": "unknown",
-                            "open_ports": [],
-                            "metadata": {"source": "chaos"},
-                            "discovered_by": "chaos",
-                        },
-                    }
+                        # Emit asset immediately so jobs.py can persist + stream to UI.
+                        yield {
+                            "type": "asset",
+                            "data": {
+                                "domain": subdomain,
+                                "type": "subdomain",
+                                "status": "unknown",
+                                "open_ports": [],
+                                "metadata": {"source": "chaos"},
+                                "discovered_by": "chaos",
+                            },
+                        }
 
-                    await asyncio.sleep(0)
-
-                stdout_remaining = ""
-                if process.stdout:
-                    stdout_remaining = process.stdout.read() or ""
-                    # (Intentionally ignored; streaming loop already emitted lines.)
+                        await asyncio.sleep(0)
+                finally:
+                    unregister_process(process)
+                    if process.poll() is None:
+                        process.terminate()
+                        process.wait()
 
                 stderr_out = ""
                 if process.stderr:

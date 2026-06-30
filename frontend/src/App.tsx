@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { AuthPage } from "./components/Auth/AuthPage";
 import { Navbar } from "./components/Common/Navbar";
@@ -7,7 +7,7 @@ import { AssetTable } from "./components/Inventory/AssetTable";
 import { RelationshipGraph } from "./components/AssetGraph/RelationshipGraph";
 import { ConsoleView } from "./components/JobConsole/ConsoleView";
 import { SubdomainsTab } from "./components/Subdomains/SubdomainsTab";
-import { apiCall } from "./services/api";
+import { apiCall, getWebSocketUrl } from "./services/api";
 import { LayoutDashboard, Database, Network, RefreshCw, Sparkles, Globe2 } from "lucide-react";
 
 interface Project {
@@ -44,6 +44,56 @@ const defaultStats: DashboardStats = {
   provider_counts: {},
 };
 
+const updateStatsFromAssets = (currentAssets: any[], currentSubdomains: any[], currentStats: DashboardStats): DashboardStats => {
+  const total_assets = currentAssets.length;
+  const total_subdomains = currentSubdomains.length;
+  const live_hosts = currentAssets.filter(a => a.status === "live").length;
+  
+  // Recompute ports distribution
+  const portCounts: Record<number, number> = {};
+  currentAssets.forEach(a => {
+    (a.open_ports || []).forEach((p: number) => {
+      portCounts[p] = (portCounts[p] || 0) + 1;
+    });
+  });
+  const ports_distribution = Object.entries(portCounts).map(([port, count]) => ({
+    port: parseInt(port),
+    count: count as number
+  })).sort((a, b) => b.count - a.count);
+  const open_ports_count = ports_distribution.length;
+
+  // Recompute provider_counts from the sources array of each asset
+  const providers = ["subfinder", "assetfinder", "amass", "chaos"];
+  const provider_counts: Record<string, number> = {};
+  providers.forEach(p => {
+    provider_counts[p] = currentAssets.filter(a => (a.sources || []).includes(p)).length;
+  });
+
+  // Recompute sources_distribution
+  const sourceGroups: Record<string, number> = {};
+  currentAssets.forEach(a => {
+    const src = a.discovered_by || "unknown";
+    sourceGroups[src] = (sourceGroups[src] || 0) + 1;
+  });
+  const sources_distribution = Object.entries(sourceGroups).map(([name, value]) => ({
+    name,
+    value: value as number
+  }));
+
+  return {
+    ...currentStats,
+    total_assets,
+    total_subdomains,
+    live_hosts,
+    open_ports_count,
+    ports_distribution,
+    sources_distribution,
+    provider_counts
+  };
+};
+
+let wsCount = 0;
+
 type TabId = "dashboard" | "subdomains" | "inventory" | "visualizer";
 
 const MainDashboard: React.FC = () => {
@@ -54,8 +104,14 @@ const MainDashboard: React.FC = () => {
   const [subdomains, setSubdomains] = useState<any[]>([]);
   const [stats, setStats] = useState<DashboardStats>(defaultStats);
   const [activeJob, setActiveJob] = useState<any | null>(null);
+  const [completedProviders, setCompletedProviders] = useState<Set<string>>(new Set());
+  const [currentPhase, setCurrentPhase] = useState<string>("waiting");
   const [activeTab, setActiveTab] = useState<TabId>("dashboard");
   const [loading, setLoading] = useState(true);
+  const [isReconnect, setIsReconnect] = useState(false);
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const fetchProjectDataRef = useRef<(() => Promise<void>) | null>(null);
 
   const fetchProjects = async () => {
     try {
@@ -78,18 +134,33 @@ const MainDashboard: React.FC = () => {
   const fetchProjectData = async () => {
     if (!activeProject) return;
     try {
-      const [assetList, subdomainList, dashboardStats] = await Promise.all([
+      const [assetList, subdomainList, dashboardStats, jobsList] = await Promise.all([
         apiCall(`/assets/project/${activeProject.id}`),
         apiCall(`/assets/project/${activeProject.id}/subdomains`),
         apiCall(`/assets/project/${activeProject.id}/dashboard-stats`),
+        apiCall(`/jobs/project/${activeProject.id}`),
       ]);
       setAssets(assetList);
       setSubdomains(subdomainList);
       setStats(dashboardStats);
+
+      if (!activeJob) {
+        const runningJob = jobsList.find((j: any) => j.status === "running" || j.status === "pending");
+        if (runningJob) {
+          setIsReconnect(true);
+          setActiveJob(runningJob);
+          setCompletedProviders(new Set());
+          setCurrentPhase(runningJob.status === "pending" ? "waiting" : "discovery");
+        }
+      }
     } catch (err) {
       console.error("Failed to load project details", err);
     }
   };
+
+  useEffect(() => {
+    fetchProjectDataRef.current = fetchProjectData;
+  }, [fetchProjectData]);
 
   useEffect(() => {
     if (activeProject) {
@@ -98,6 +169,9 @@ const MainDashboard: React.FC = () => {
       setAssets([]);
       setSubdomains([]);
       setStats(defaultStats);
+      setActiveJob(null);
+      setCompletedProviders(new Set());
+      setCurrentPhase("waiting");
     }
   }, [activeProject]);
 
@@ -108,6 +182,9 @@ const MainDashboard: React.FC = () => {
         `/jobs/project/${activeProject.id}/provider/${encodeURIComponent(providerName)}`,
         { method: "POST" }
       );
+      setIsReconnect(false);
+      setCompletedProviders(new Set());
+      setCurrentPhase(job.status === "pending" ? "waiting" : "discovery");
       setActiveJob(job);
     } catch (err) {
       console.error("Failed to trigger scan", err);
@@ -115,22 +192,280 @@ const MainDashboard: React.FC = () => {
     }
   };
 
-  // Poll active job and refresh data on completion
-  useEffect(() => {
+  const handlePauseScan = async () => {
     if (!activeJob) return;
-    const interval = setInterval(async () => {
-      try {
-        const statusData = await apiCall(`/jobs/${activeJob.id}`);
-        if (statusData.status === "completed" || statusData.status === "failed") {
-          clearInterval(interval);
-          fetchProjectData();
-        }
-      } catch (err) {
-        console.error("Error checking scan job status", err);
+    try {
+      await apiCall(`/jobs/${activeJob.id}/pause`, { method: "POST" });
+      setActiveJob((prev: any) => prev ? { ...prev, status: "paused" } : null);
+    } catch (err) {
+      console.error("Failed to pause scan", err);
+    }
+  };
+
+  const handleResumeScan = async () => {
+    if (!activeJob) return;
+    try {
+      await apiCall(`/jobs/${activeJob.id}/resume`, { method: "POST" });
+      setActiveJob((prev: any) => prev ? { ...prev, status: "running" } : null);
+    } catch (err) {
+      console.error("Failed to resume scan", err);
+    }
+  };
+
+  const handleStopScan = async () => {
+    if (!activeJob) return;
+    try {
+      await apiCall(`/jobs/${activeJob.id}/stop`, { method: "POST" });
+      setActiveJob((prev: any) => prev ? { ...prev, status: "stopped" } : null);
+      setCurrentPhase("stopped");
+      if (wsRef.current) {
+        (wsRef.current as any).isCleanClose = true;
+        wsRef.current.close();
+        wsRef.current = null;
       }
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [activeJob]);
+    } catch (err) {
+      console.error("Failed to stop scan", err);
+    }
+  };
+
+  const handleResetScan = async () => {
+    if (!activeJob) return;
+    try {
+      await apiCall(`/jobs/${activeJob.id}/reset`, { method: "POST" });
+      setActiveJob(null);
+      setAssets([]);
+      setSubdomains([]);
+      setStats(defaultStats);
+      setCompletedProviders(new Set());
+      setCurrentPhase("waiting");
+      if (wsRef.current) {
+        (wsRef.current as any).isCleanClose = true;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    } catch (err) {
+      console.error("Failed to reset scan", err);
+    }
+  };
+
+  const jobId = activeJob?.id;
+
+  // Listen to WebSocket broadcasts for real-time asset updates
+  useEffect(() => {
+    if (!jobId) return;
+
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: any = null;
+    let reconnectDelay = 1000;
+    const maxReconnectDelay = 30000;
+    let isClosed = false;
+    let isCleanClose = false;
+
+    const connect = () => {
+      if (isClosed || isCleanClose) return;
+
+      const wsUrl = getWebSocketUrl(`/jobs/ws/${jobId}`);
+      ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      
+      wsCount++;
+      console.log("WebSocket opened", { jobId, currentWebsocketCount: wsCount });
+      console.log("Current websocket count:", wsCount);
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log("WebSocket event received", { jobId, type: data.type });
+
+          if (data.type === "asset_discovered" || data.type === "asset") {
+            const incomingAsset = data.asset || data.data;
+            if (incomingAsset && incomingAsset.domain) {
+              setAssets((prevAssets) => {
+                const exists = prevAssets.some(
+                  (a) => a.id === incomingAsset.id || a.domain === incomingAsset.domain
+                );
+                let nextAssets;
+                if (exists) {
+                  nextAssets = prevAssets.map((a) =>
+                    a.id === incomingAsset.id || a.domain === incomingAsset.domain ? incomingAsset : a
+                  );
+                } else {
+                  nextAssets = [...prevAssets, incomingAsset];
+                }
+
+                // Also update subdomains and stats relative to the new assets list
+                setSubdomains((prevSubs) => {
+                  let nextSubs = prevSubs;
+                  if (incomingAsset.type === "subdomain") {
+                    const subExists = prevSubs.some(
+                      (s) => s.id === incomingAsset.id || s.domain === incomingAsset.domain
+                    );
+                    if (subExists) {
+                      nextSubs = prevSubs.map((s) =>
+                        s.id === incomingAsset.id || s.domain === incomingAsset.domain ? incomingAsset : s
+                      );
+                    } else {
+                      nextSubs = [...prevSubs, incomingAsset];
+                    }
+                  }
+                  
+                  // Update stats based on the updated lists
+                  setStats((prevStats) => updateStatsFromAssets(nextAssets, nextSubs, prevStats));
+                  return nextSubs;
+                });
+
+                return nextAssets;
+              });
+            }
+          } else if (data.type === "provider_stat") {
+            const { provider, count } = data;
+            setCompletedProviders((prev) => {
+              const next = new Set(prev);
+              next.add(provider);
+              return next;
+            });
+            setStats((prevStats) => ({
+              ...prevStats,
+              provider_counts: {
+                ...prevStats.provider_counts,
+                [provider]: count,
+              },
+            }));
+          } else if (data.type === "scan_summary") {
+            if (data.provider) {
+              if (data.provider === "Httpx") {
+                setCurrentPhase("naabu");
+              } else if (data.provider === "Naabu") {
+                setCurrentPhase("katana");
+              } else if (data.provider === "Katana") {
+                setCurrentPhase("nuclei");
+              } else if (data.provider === "Nuclei") {
+                setCurrentPhase("completed");
+              }
+            } else if (data.provider_counts || data.total_unique !== undefined) {
+              setStats((prevStats) => ({
+                ...prevStats,
+                total_assets: data.total_unique !== undefined ? data.total_unique : prevStats.total_assets,
+                total_subdomains: data.total_unique !== undefined ? data.total_unique : prevStats.total_subdomains,
+                live_hosts: data.live_hosts !== undefined ? data.live_hosts : prevStats.live_hosts,
+                provider_counts: data.provider_counts ? {
+                  subfinder: data.provider_counts.subfinder,
+                  assetfinder: data.provider_counts.assetfinder,
+                  amass: data.provider_counts.amass,
+                  chaos: data.provider_counts.chaos,
+                } : prevStats.provider_counts,
+              }));
+            }
+          } else if (data.type === "status") {
+            if (data.status === "idle") {
+              setActiveJob(null);
+              setAssets([]);
+              setSubdomains([]);
+              setStats(defaultStats);
+              setCompletedProviders(new Set());
+              setCurrentPhase("waiting");
+              isCleanClose = true;
+              if (ws) ws.close();
+            } else {
+              setActiveJob((prev: any) => prev ? { ...prev, status: data.status } : null);
+              if (data.status === "completed" || data.status === "failed") {
+                setCurrentPhase("completed");
+                isCleanClose = true;
+                if (ws) ws.close();
+              } else if (data.status === "stopped") {
+                setCurrentPhase("stopped");
+                isCleanClose = true;
+                if (ws) ws.close();
+              }
+              if (fetchProjectDataRef.current) {
+                fetchProjectDataRef.current();
+              }
+            }
+          } else if (data.type === "log" && data.message) {
+            const msg = data.message;
+            const lowerMsg = msg.toLowerCase();
+            
+            // Reconstruct completed providers from logs
+            const providersList = ["subfinder", "assetfinder", "amass", "chaos"];
+            providersList.forEach((p) => {
+              if (lowerMsg.includes(p) && (lowerMsg.includes("completed") || lowerMsg.includes("finished"))) {
+                setCompletedProviders((prev) => {
+                  const next = new Set(prev);
+                  next.add(p);
+                  return next;
+                });
+              }
+            });
+
+            // Determine phase progression from logs
+            if (lowerMsg.includes("starting httpx") || lowerMsg.includes("launching httpx") || lowerMsg.includes("httpx probing")) {
+              setCurrentPhase("httpx");
+            } else if (lowerMsg.includes("starting naabu") || lowerMsg.includes("launching naabu") || lowerMsg.includes("naabu port scan")) {
+              setCurrentPhase("naabu");
+            } else if (lowerMsg.includes("starting katana") || lowerMsg.includes("launching katana") || lowerMsg.includes("katana web crawl") || lowerMsg.includes("starting crawl session")) {
+              setCurrentPhase("katana");
+            } else if (lowerMsg.includes("starting nuclei") || lowerMsg.includes("launching nuclei") || lowerMsg.includes("nuclei vuln scan")) {
+              setCurrentPhase("nuclei");
+            }
+          }
+        } catch (err) {
+          console.error("Dashboard WS parse error", err);
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.error("Dashboard WS connection error", err);
+      };
+
+      ws.onclose = (event) => {
+        if (!isClosed) {
+          isClosed = true;
+          wsCount--;
+          console.log("WebSocket closed", { jobId, currentWebsocketCount: wsCount });
+          console.log("Current websocket count:", wsCount);
+        }
+
+        // Only reconnect if it's not a clean close (job ended / manual stop) or explicit request
+        const wsInstCleanClose = (event.target as any).isCleanClose || isCleanClose;
+        if (!wsInstCleanClose) {
+          console.log("WebSocket reconnect", { jobId, delay: reconnectDelay });
+          reconnectTimeout = setTimeout(() => {
+            reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
+            isClosed = false;
+            // Fetch project data upon reconnecting to catch up on missed state changes
+            if (fetchProjectDataRef.current) {
+              fetchProjectDataRef.current();
+            }
+            connect();
+          }, reconnectDelay);
+        }
+      };
+    };
+
+    connect();
+
+    const pingInterval = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send("ping");
+      }
+    }, 15000);
+
+    return () => {
+      isCleanClose = true;
+      clearInterval(pingInterval);
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (ws) {
+        (ws as any).isCleanClose = true;
+        ws.close();
+      }
+      if (!isClosed) {
+        isClosed = true;
+        wsCount--;
+        console.log("WebSocket closed", { jobId, currentWebsocketCount: wsCount });
+        console.log("Current websocket count:", wsCount);
+      }
+    };
+  }, [jobId]);
 
   if (loading) {
     return (
@@ -197,9 +532,17 @@ const MainDashboard: React.FC = () => {
             {activeTab === "dashboard" && (
               <OverviewDashboard
                 stats={stats}
+                assets={assets}
                 activeProject={activeProject}
                 onLaunchScan={handleLaunchScan}
                 onRefresh={fetchProjectData}
+                activeJob={activeJob}
+                completedProviders={completedProviders}
+                currentPhase={currentPhase}
+                onPauseScan={handlePauseScan}
+                onResumeScan={handleResumeScan}
+                onStopScan={handleStopScan}
+                onResetScan={handleResetScan}
               />
             )}
 
@@ -208,7 +551,7 @@ const MainDashboard: React.FC = () => {
             )}
 
             {activeTab === "inventory" && (
-              <AssetTable assets={assets} />
+              <AssetTable assets={assets} projectName={activeProject?.name} />
             )}
 
             {activeTab === "visualizer" && (
@@ -219,11 +562,14 @@ const MainDashboard: React.FC = () => {
             )}
           </div>
 
-          {/* Floating console overlay */}
+          {/* Floating console overlay – receives shared state, owns NO WebSocket */}
           {activeJob && (
             <div className="mt-8 pt-4 border-t border-dark-border">
               <ConsoleView
                 activeJob={activeJob}
+                subdomainNames={subdomains.map((s: any) => (typeof s === "string" ? s : s?.domain)).filter(Boolean)}
+                providerStats={stats.provider_counts as Record<string, number> ?? {}}
+                completedProviders={completedProviders}
                 onClose={() => setActiveJob(null)}
               />
             </div>

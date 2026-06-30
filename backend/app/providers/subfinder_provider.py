@@ -165,55 +165,55 @@ class SubfinderProvider(BaseProvider):
             yield {"type": "log", "message": exec_msg}
 
             try:
-
-                result = subprocess.run(
+                import asyncio
+                from app.job_control import register_process, unregister_process, check_job_status
+                
+                await check_job_status()
+                
+                process = subprocess.Popen(
                     [executable, *args],
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    check=False
+                    encoding="utf-8",
+                    errors="replace"
                 )
-
-                if result.stderr:
-                    stderr_msg = (
-                        f"[subfinder stderr] "
-                        f"{result.stderr.strip()}"
-                    )
-
-                    logger.warning(stderr_msg)
-
-                    yield {
-                        "type": "log",
-                        "message": stderr_msg
-                    }
+                register_process(process)
 
                 discovered_count = 0
+                try:
+                    for line in process.stdout:
+                        await check_job_status()
+                        subdomain = line.strip().lower()
+                        if not subdomain:
+                            continue
+                        discovered_count += 1
 
-                for line in result.stdout.splitlines():
+                        logger.info(
+                            f"[+] Found subdomain: {subdomain}"
+                        )
 
-                    subdomain = line.strip()
-
-                    if not subdomain:
-                        continue
-
-                    discovered_count += 1
-
-                    logger.info(
-                        f"[+] Found subdomain: {subdomain}"
-                    )
-
-                    yield {
-                        "type": "asset",
-                        "data": {
-                            "domain": subdomain,
-                            "type": "subdomain",
-                            "status": "unknown",
-                            "open_ports": [],
-                            "metadata": {
-                                "source": "subfinder"
-                            },
-                            "discovered_by": "subfinder"
+                        yield {
+                            "type": "asset",
+                            "data": {
+                                "domain": subdomain,
+                                "type": "subdomain",
+                                "status": "unknown",
+                                "open_ports": [],
+                                "metadata": {
+                                    "source": "subfinder"
+                                },
+                                "discovered_by": "subfinder"
+                            }
                         }
-                    }
+                        await asyncio.sleep(0)
+                finally:
+                    unregister_process(process)
+                    if process.poll() is None:
+                        process.terminate()
+                        process.wait()
+
+                returncode = process.returncode
 
                 logger.info(
                     f"[+] Subfinder discovered "
@@ -221,11 +221,11 @@ class SubfinderProvider(BaseProvider):
                     f"for {domain}"
                 )
 
-                if result.returncode != 0:
+                if returncode != 0:
 
                     err_msg = (
                         f"[-] Subfinder exited with code "
-                        f"{result.returncode}"
+                        f"{returncode}"
                     )
 
                     logger.error(err_msg)

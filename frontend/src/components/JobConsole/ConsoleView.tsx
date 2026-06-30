@@ -1,6 +1,14 @@
-import React, { useEffect, useRef, useState } from "react";
+/**
+ * ConsoleView – PURE DISPLAY COMPONENT.
+ *
+ * This component owns NO WebSocket connection of its own.
+ * All live data flows in via props from the single WebSocket
+ * managed exclusively in App.tsx (MainDashboard).
+ *
+ * Do NOT add WebSocket / setInterval / apiCall here.
+ */
+import React, { useEffect, useRef } from "react";
 import { Terminal, RefreshCw, XCircle, CheckCircle2, AlertCircle } from "lucide-react";
-import { getWebSocketUrl } from "../../services/api";
 
 interface Job {
   id: string;
@@ -10,129 +18,63 @@ interface Job {
   finished_at?: string | null;
 }
 
-interface ProviderStat {
-  provider: string;
-  count: number;
-}
-
 interface ConsoleViewProps {
   activeJob: Job | null;
+  /** Plain domain-name strings for the live feed, derived in App.tsx from the shared subdomains state. */
+  subdomainNames: string[];
+  /** Per-provider discovered counts, derived from stats.provider_counts in App.tsx. */
+  providerStats: Record<string, number>;
+  /** Set of providers whose streaming has finished. */
+  completedProviders: Set<string>;
   onClose: () => void;
 }
 
 const PROVIDER_COLORS: Record<string, string> = {
-  subfinder: "#3B82F6",
+  subfinder:   "#3B82F6",
   assetfinder: "#06B6D4",
-  amass: "#10B981",
-  chaos: "#F59E0B",
+  amass:       "#10B981",
+  chaos:       "#F59E0B",
 };
 
 const PROVIDER_ORDER = ["subfinder", "assetfinder", "amass", "chaos"];
 
-export const ConsoleView: React.FC<ConsoleViewProps> = ({ activeJob, onClose }) => {
-  const [subdomains, setSubdomains] = useState<string[]>([]);
-  const [status, setStatus] = useState<string>("pending");
-  const [providerStats, setProviderStats] = useState<Record<string, number>>({});
-  const [totalUnique, setTotalUnique] = useState<number | null>(null);
-  const [completedProviders, setCompletedProviders] = useState<Set<string>>(new Set());
-  const wsRef = useRef<WebSocket | null>(null);
+export const ConsoleView: React.FC<ConsoleViewProps> = ({
+  activeJob,
+  subdomainNames,
+  providerStats,
+  completedProviders,
+  onClose,
+}) => {
   const listBottomRef = useRef<HTMLDivElement>(null);
 
+  // Mount/unmount diagnostic logs (temporary – remove after verification)
   useEffect(() => {
-    if (!activeJob) return;
-    setStatus(activeJob.status);
-    setSubdomains([]);
-    setProviderStats({});
-    setTotalUnique(null);
-    setCompletedProviders(new Set());
-
-    const wsUrl = getWebSocketUrl(`/jobs/ws/${activeJob.id}`);
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-
-        if (data.type === "status") {
-          setStatus(data.status);
-
-        } else if (data.type === "asset_discovered") {
-          const domain = data.asset?.domain;
-          if (domain) {
-            setSubdomains((prev) =>
-              prev.includes(domain) ? prev : [...prev, domain]
-            );
-          }
-
-        } else if (data.type === "provider_stat") {
-          const { provider, count } = data as ProviderStat;
-          setProviderStats((prev) => ({ ...prev, [provider]: count }));
-          setCompletedProviders((prev) => new Set([...prev, provider]));
-
-        } else if (data.type === "scan_summary") {
-          setTotalUnique(data.total_unique);
-          if (data.provider_counts) {
-            setProviderStats(data.provider_counts);
-          }
-
-        } else if (data.type === "log") {
-          // Parse subdomains from log (replayed historical logs on WS connect)
-          const matchNew = data.message?.match(/^\[\+\] New asset stored:\s*(.+?)\s+\(/);
-          const matchUpdate = data.message?.match(/^\[\!\] Updated existing asset:\s*(.+?)\s+\(/);
-          const matchFound = data.message?.match(/^\[\+\] (?:\[.*?\] )?Found(?:\s+subdomain)?:\s*(.+)$/);
-
-          const domain =
-            (matchNew && matchNew[1]) ||
-            (matchUpdate && matchUpdate[1]) ||
-            (matchFound && matchFound[1]?.split(" ")[0].trim()) ||
-            null;
-
-          if (domain && domain.includes(".")) {
-            setSubdomains((prev) =>
-              prev.includes(domain) ? prev : [...prev, domain]
-            );
-          }
-        }
-      } catch (err) {
-        console.error("WS parse error", err);
-      }
-    };
-
-    ws.onerror = () => {
-      console.error("WS connection error");
-    };
-
-    const interval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) ws.send("ping");
-    }, 15000);
-
+    console.log("[ConsoleView] Component mounted", { jobId: activeJob?.id });
     return () => {
-      clearInterval(interval);
-      wsRef.current?.close();
+      console.log("[ConsoleView] Component unmounted", { jobId: activeJob?.id });
     };
-  }, [activeJob]);
+  }, [activeJob?.id]);
 
+  // Auto-scroll subdomain list when new entries arrive
   useEffect(() => {
     listBottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [subdomains]);
+  }, [subdomainNames.length]);
 
   if (!activeJob) return null;
 
-  const isUnified = activeJob.provider_name === "Unified Discovery";
-  const displayCount = totalUnique ?? subdomains.length;
+  const status     = activeJob.status;
+  const isUnified  = activeJob.provider_name === "Unified Discovery";
+  const displayCount = subdomainNames.length > 0 ? subdomainNames.length : "-";
 
   const statusColor =
-    status === "completed"
-      ? "#10B981"
-      : status === "running"
-      ? "#06B6D4"
-      : status === "failed"
-      ? "#EF4444"
-      : "#F59E0B";
+    status === "completed" ? "#10B981"
+    : status === "running" ? "#06B6D4"
+    : status === "failed"  ? "#EF4444"
+    : "#F59E0B";
 
   return (
     <div className="bg-dark-card border border-dark-border rounded-xl glass shadow-2xl overflow-hidden flex flex-col glow-blue">
+
       {/* Header */}
       <div className="bg-dark-bg border-b border-dark-border px-4 py-3 flex items-center justify-between">
         <div className="flex items-center space-x-2.5">
@@ -160,6 +102,7 @@ export const ConsoleView: React.FC<ConsoleViewProps> = ({ activeJob, onClose }) 
 
         {/* Left: metrics + provider breakdown */}
         <div className="flex flex-col gap-4">
+
           {/* Status card */}
           <div className="bg-dark-bg border border-dark-border rounded-lg p-4 relative overflow-hidden">
             <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider block mb-2">Scan Status</span>
@@ -191,13 +134,13 @@ export const ConsoleView: React.FC<ConsoleViewProps> = ({ activeJob, onClose }) 
             </div>
           </div>
 
-          {/* Per-provider breakdown (only shown for Unified) */}
+          {/* Per-provider breakdown (Unified only) */}
           {isUnified && (
             <div className="bg-dark-bg border border-dark-border rounded-lg p-4 space-y-2">
               <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider block mb-2">Provider Yield</span>
               {PROVIDER_ORDER.map((tool) => {
                 const count = providerStats[tool] ?? 0;
-                const done = completedProviders.has(tool) || status !== "running";
+                const done  = completedProviders.has(tool) || status === "completed" || status === "failed";
                 const color = PROVIDER_COLORS[tool] ?? "#6B7280";
                 return (
                   <div key={tool} className="flex items-center justify-between">
@@ -207,9 +150,7 @@ export const ConsoleView: React.FC<ConsoleViewProps> = ({ activeJob, onClose }) 
                       ) : (
                         <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ color }} />
                       )}
-                      <span className="text-xs font-mono capitalize" style={{ color }}>
-                        {tool}
-                      </span>
+                      <span className="text-xs font-mono capitalize" style={{ color }}>{tool}</span>
                     </div>
                     <span className="text-xs font-mono font-bold text-slate-300">
                       {count > 0 ? count : done ? "0" : "…"}
@@ -224,20 +165,20 @@ export const ConsoleView: React.FC<ConsoleViewProps> = ({ activeJob, onClose }) 
         {/* Right: scrollable subdomain list */}
         <div className="md:col-span-2 bg-dark-bg border border-dark-border rounded-lg p-4 flex flex-col">
           <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-3 border-b border-dark-border pb-2 block">
-            Discovered Subdomains ({subdomains.length})
+            Discovered Subdomains ({subdomainNames.length})
           </span>
           <div className="flex-1 overflow-y-auto space-y-1 max-h-64 pr-1">
-            {subdomains.length === 0 ? (
+            {subdomainNames.length === 0 ? (
               <div className="flex items-center justify-center h-24 text-slate-500 text-xs font-mono italic uppercase tracking-wider">
                 {status === "pending" ? "Waiting for payload..." : "Scanning — results will appear here"}
               </div>
             ) : (
-              subdomains.map((domain, i) => (
+              subdomainNames.map((domain, i) => (
                 <div
                   key={i}
                   className="flex items-center gap-2 px-2.5 py-1 bg-dark-card border border-dark-border/40 rounded hover:border-cyber-accent/30 transition-all text-xs font-mono text-slate-300"
                 >
-                  <span className="w-1.5 h-1.5 rounded-full bg-cyber-success flex-shrink-0"></span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyber-success flex-shrink-0" />
                   {domain}
                 </div>
               ))

@@ -57,65 +57,66 @@ class AssetfinderProvider(BaseProvider):
             yield {"type": "log", "message": exec_msg}
 
             try:
+                import asyncio
+                from app.job_control import register_process, unregister_process, check_job_status
+                
+                await check_job_status()
 
                 logger.info(
-                    "[*] Launching assetfinder via subprocess.run "
+                    "[*] Launching assetfinder via Popen "
                     f"for domain: {domain}"
                 )
 
-                result = subprocess.run(
+                process = subprocess.Popen(
                     [executable, *args],
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    check=False
+                    encoding="utf-8",
+                    errors="replace"
                 )
-
-                logger.info(
-                    "[*] Assetfinder process completed for "
-                    f"{domain} with exit code {result.returncode}"
-                )
-
-                if result.stderr:
-                    stderr_msg = (
-                        f"[assetfinder stderr] "
-                        f"{result.stderr.strip()}"
-                    )
-
-                    logger.warning(stderr_msg)
-
-                    yield {
-                        "type": "log",
-                        "message": stderr_msg
-                    }
+                register_process(process)
 
                 discovered_count = 0
+                try:
+                    for line in process.stdout:
+                        await check_job_status()
+                        subdomain = line.strip().lower()
+                        if not subdomain:
+                            continue
 
-                for line in result.stdout.splitlines():
+                        discovered_count += 1
 
-                    subdomain = line.strip()
+                        logger.info(
+                            f"[+] Found subdomain: {subdomain}"
+                        )
 
-                    if not subdomain:
-                        continue
-
-                    discovered_count += 1
-
-                    logger.info(
-                        f"[+] Found subdomain: {subdomain}"
-                    )
-
-                    yield {
-                        "type": "asset",
-                        "data": {
-                            "domain": subdomain,
-                            "type": "subdomain",
-                            "status": "unknown",
-                            "open_ports": [],
-                            "metadata": {
-                                "source": "assetfinder"
-                            },
-                            "discovered_by": "assetfinder"
+                        yield {
+                            "type": "asset",
+                            "data": {
+                                "domain": subdomain,
+                                "type": "subdomain",
+                                "status": "unknown",
+                                "open_ports": [],
+                                "metadata": {
+                                    "source": "assetfinder"
+                                },
+                                "discovered_by": "assetfinder"
+                            }
                         }
-                    }
+                        await asyncio.sleep(0)
+                finally:
+                    unregister_process(process)
+                    if process.poll() is None:
+                        process.terminate()
+                        process.wait()
+
+                returncode = process.returncode
+
+                logger.info(
+                    f"[+] Assetfinder completed for "
+                    f"{domain} with exit code {returncode}"
+                )
 
                 logger.info(
                     f"[+] Assetfinder discovered "
@@ -123,11 +124,11 @@ class AssetfinderProvider(BaseProvider):
                     f"for {domain}"
                 )
 
-                if result.returncode != 0:
+                if returncode != 0:
 
                     err_msg = (
                         f"[-] Assetfinder exited with code "
-                        f"{result.returncode}"
+                        f"{returncode}"
                     )
 
                     logger.error(err_msg)

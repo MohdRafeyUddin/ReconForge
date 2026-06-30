@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { StatCard } from "./StatCard";
-import { Globe, Server, Radio, ShieldAlert, Play, RefreshCw, FileText } from "lucide-react";
+import { Globe, Server, Radio, ShieldAlert, Play, Pause, Square, RotateCcw, RefreshCw, FileText, Link, AlertCircle } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from "recharts";
 import { apiCall } from "../../services/api";
 
@@ -27,11 +27,57 @@ interface Project {
   seed_domains: string[];
 }
 
+interface Asset {
+  id: string;
+  domain: string;
+  type: string;
+  status: string;
+  open_ports?: number[];
+  discovered_by?: string;
+  created_at?: string;
+  sources?: string[];
+  metadata?: {
+    url?: string;
+    status_code?: number;
+    title?: string;
+    ip_address?: string;
+    technologies?: string[];
+    katana?: {
+      endpoints?: string[];
+      js_files?: string[];
+      forms?: any[];
+      third_party_urls?: string[];
+    };
+    nuclei?: {
+      findings?: {
+        template_id: string;
+        name: string;
+        severity: string;
+        matched_url: string;
+        description: string;
+        tags: string[];
+        cve?: string;
+        reference_urls?: string[];
+        timestamp: string;
+      }[];
+    };
+    [key: string]: any;
+  };
+}
+
 interface OverviewDashboardProps {
   stats: DashboardStats;
+  assets?: Asset[];
   activeProject: Project;
   onLaunchScan: (providerName: string) => void;
   onRefresh: () => void;
+  activeJob?: any | null;
+  completedProviders?: Set<string>;
+  currentPhase?: string;
+  onPauseScan?: () => void;
+  onResumeScan?: () => void;
+  onStopScan?: () => void;
+  onResetScan?: () => void;
 }
 
 const COLORS = ["#3B82F6", "#06B6D4", "#10B981", "#F59E0B", "#EF4444"];
@@ -46,9 +92,17 @@ const FALLBACK_PROVIDERS = [
 
 export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   stats,
+  assets = [],
   activeProject,
   onLaunchScan,
-  onRefresh
+  onRefresh,
+  activeJob = null,
+  completedProviders = new Set(),
+  currentPhase = "waiting",
+  onPauseScan,
+  onResumeScan,
+  onStopScan,
+  onResetScan,
 }) => {
   const [selectedProvider, setSelectedProvider] = useState("Unified Discovery");
   const [providers, setProviders] = useState<string[]>(FALLBACK_PROVIDERS);
@@ -83,6 +137,50 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     };
   }, []);
 
+  const getPhaseText = (phaseName: string, phaseLabel: string) => {
+    const isCurrent = currentPhase === phaseName;
+    const isPast = !isCurrent && (
+      phaseName === "discovery" ? currentPhase !== "waiting" :
+      phaseName === "httpx" ? !["waiting", "discovery"].includes(currentPhase || "") :
+      phaseName === "naabu" ? !["waiting", "discovery", "httpx"].includes(currentPhase || "") :
+      phaseName === "katana" ? !["waiting", "discovery", "httpx", "naabu"].includes(currentPhase || "") :
+      phaseName === "nuclei" ? currentPhase === "completed" : false
+    );
+    
+    if (isPast) return `${phaseLabel} ✓`;
+    if (isCurrent) {
+      if (activeJob?.status === "paused") return `${phaseLabel} (Paused)`;
+      if (activeJob?.status === "stopped") return `${phaseLabel} (Stopped)`;
+      return `${phaseLabel} ⟳ Running`;
+    }
+    return phaseLabel === "Discovery" ? "Discovery Waiting" : phaseLabel;
+  };
+
+  const getPhaseClass = (phaseName: string) => {
+    const isCurrent = currentPhase === phaseName;
+    const isPast = !isCurrent && (
+      phaseName === "discovery" ? currentPhase !== "waiting" :
+      phaseName === "httpx" ? !["waiting", "discovery"].includes(currentPhase || "") :
+      phaseName === "naabu" ? !["waiting", "discovery", "httpx"].includes(currentPhase || "") :
+      phaseName === "katana" ? !["waiting", "discovery", "httpx", "naabu"].includes(currentPhase || "") :
+      phaseName === "nuclei" ? currentPhase === "completed" : false
+    );
+
+    if (isCurrent) {
+      if (activeJob?.status === "paused") {
+        return "bg-cyber-warning/20 border border-cyber-warning/50 text-cyber-warning font-bold";
+      }
+      if (activeJob?.status === "stopped") {
+        return "bg-cyber-danger/20 border border-cyber-danger/50 text-cyber-danger font-bold";
+      }
+      return "bg-cyber-accent/20 border border-cyber-accent/50 text-cyber-accent animate-pulse font-bold";
+    }
+    if (isPast) {
+      return "bg-cyber-success/10 border border-cyber-success/30 text-cyber-success";
+    }
+    return "text-slate-500 border border-transparent";
+  };
+
   const handleExportHTML = async () => {
     setGeneratingReport(true);
     try {
@@ -103,21 +201,253 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     }
   };
 
-  const pc = stats.provider_counts ?? {};
+  const [showExportDropdown, setShowExportDropdown] = useState(false);
+
+  const getProviderStatus = (tool: string): "waiting" | "running" | "completed" | "failed" | "paused" | "stopped" => {
+    const PROVIDER_ORDER = ["subfinder", "assetfinder", "amass", "chaos"];
+    const jobStatus = activeJob?.status;
+    
+    if (!activeJob || jobStatus === "completed" || jobStatus === "failed") {
+      if (completedProviders.has(tool) || jobStatus === "completed") return "completed";
+      if (jobStatus === "failed") return "failed";
+      return "waiting";
+    }
+
+    if (jobStatus === "pending") {
+      return "waiting";
+    }
+
+    if (completedProviders.has(tool)) {
+      return "completed";
+    }
+
+    if (jobStatus === "stopped") {
+      return "stopped";
+    }
+
+    const firstActive = PROVIDER_ORDER.find(t => !completedProviders.has(t));
+    if (tool === firstActive) {
+      return jobStatus === "paused" ? "paused" : "running";
+    }
+
+    return "waiting";
+  };
+
+  const escapeCSV = (val: any) => {
+    if (val === null || val === undefined) return '""';
+    let str = String(val);
+    str = str.replace(/"/g, '""');
+    return `"${str}"`;
+  };
+
+  const handleExportFullCSV = () => {
+    const headers = [
+      "Subdomain", "Source", "Discovery Time", "Live Status", "URL",
+      "Technologies", "HTTP Status", "Title", "Open Ports", "Katana URLs",
+      "JS Files", "Parameters", "Nuclei Findings", "Metadata"
+    ];
+
+    const rows = assets.map(asset => {
+      const source = (asset.sources || []).join("; ") || asset.discovered_by || "unknown";
+      const discoveryTime = asset.created_at || (asset as any).first_seen || "";
+      const url = asset.metadata?.url || "";
+      const technologies = (asset.metadata?.technologies || []).join("; ");
+      const httpStatus = asset.metadata?.status_code !== undefined ? asset.metadata.status_code : "";
+      const title = asset.metadata?.title || "";
+      const openPorts = (asset.open_ports || []).join("; ");
+      const katanaUrls = (asset.metadata?.katana?.endpoints || []).join("; ");
+      const jsFiles = (asset.metadata?.katana?.js_files || []).join("; ");
+      const parameters = (asset.metadata?.katana?.forms || []).map((f: any) => typeof f === "string" ? f : (f.action || "")).join("; ");
+      const nucleiFindings = (asset.metadata?.nuclei?.findings || []).map((f: any) => `[${f.severity}] ${f.name || f.template_id}`).join("; ");
+      const metadata = JSON.stringify(asset.metadata || {});
+
+      return [
+        asset.domain, source, discoveryTime, asset.status, url,
+        technologies, httpStatus, title, openPorts, katanaUrls,
+        jsFiles, parameters, nucleiFindings, metadata
+      ];
+    });
+
+    const csvContent = [headers, ...rows]
+      .map(row => row.map(escapeCSV).join(","))
+      .join("\r\n");
+
+    const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `reconforge_full_export_${activeProject.name.toLowerCase()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportSubdomainsOnlyCSV = () => {
+    const uniqueDomains = Array.from(new Set(assets.map(a => a.domain))).sort();
+    const csvContent = uniqueDomains.join("\r\n");
+
+    const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "subdomains.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Derive main dashboard stats dynamically from assets
+  const derivedTotalAssets = assets.length;
+  const derivedTotalSubdomains = assets.filter((a) => a.type === "subdomain").length;
+  const derivedLiveHosts = assets.filter((a) => a.status === "live").length;
+
+  // Derive provider counts dynamically from assets array
+  const pc = {
+    subfinder: assets.filter((a) => (a.sources || []).some((s) => s.toLowerCase() === "subfinder") || a.discovered_by?.toLowerCase() === "subfinder").length,
+    assetfinder: assets.filter((a) => (a.sources || []).some((s) => s.toLowerCase() === "assetfinder") || a.discovered_by?.toLowerCase() === "assetfinder").length,
+    amass: assets.filter((a) => (a.sources || []).some((s) => s.toLowerCase() === "amass") || a.discovered_by?.toLowerCase() === "amass").length,
+    chaos: assets.filter((a) => (a.sources || []).some((s) => s.toLowerCase() === "chaos") || a.discovered_by?.toLowerCase() === "chaos").length,
+  };
+
+  const totalOpenPortFindings = assets.reduce(
+    (total, asset) => total + (asset.open_ports?.length ?? 0),
+    0
+  );
+  const hostsWithOpenPorts = assets.filter(
+    (asset) => (asset.open_ports?.length ?? 0) > 0
+  ).length;
+
+  const totalUrlsDiscovered = assets.reduce(
+    (total, asset) => total + (
+      (asset.metadata?.katana?.endpoints?.length || 0) +
+      (asset.metadata?.katana?.js_files?.length || 0) +
+      (asset.metadata?.katana?.forms?.length || 0) +
+      (asset.metadata?.katana?.third_party_urls?.length || 0)
+    ),
+    0
+  );
+
+  const criticalCount = assets.reduce((t, a) => t + (a.metadata?.nuclei?.findings?.filter(f => (f.severity || "").toLowerCase() === "critical").length || 0), 0);
+  const highCount = assets.reduce((t, a) => t + (a.metadata?.nuclei?.findings?.filter(f => (f.severity || "").toLowerCase() === "high").length || 0), 0);
+  const mediumCount = assets.reduce((t, a) => t + (a.metadata?.nuclei?.findings?.filter(f => (f.severity || "").toLowerCase() === "medium").length || 0), 0);
+  const lowCount = assets.reduce((t, a) => t + (a.metadata?.nuclei?.findings?.filter(f => (f.severity || "").toLowerCase() === "low").length || 0), 0);
+  const infoCount = assets.reduce((t, a) => t + (a.metadata?.nuclei?.findings?.filter(f => (f.severity || "").toLowerCase() === "info").length || 0), 0);
+  const totalNucleiFindings = criticalCount + highCount + mediumCount + lowCount + infoCount;
+
+  // Recompute ports distribution dynamically from assets
+  const portCounts: Record<number, number> = {};
+  assets.forEach((a) => {
+    (a.open_ports || []).forEach((p: number) => {
+      portCounts[p] = (portCounts[p] || 0) + 1;
+    });
+  });
+  const derivedPortsDistribution = Object.entries(portCounts)
+    .map(([port, count]) => ({
+      port: parseInt(port),
+      count: count as number,
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  // Recompute sources distribution dynamically from assets
+  const sourceGroups: Record<string, number> = {};
+  assets.forEach((a) => {
+    const src = a.discovered_by || "unknown";
+    sourceGroups[src] = (sourceGroups[src] || 0) + 1;
+  });
+  const derivedSourcesDistribution = Object.entries(sourceGroups).map(([name, value]) => ({
+    name,
+    value: value as number,
+  }));
+
   const providerBreakdown = [
-    { label: "Subfinder", count: pc.subfinder ?? 0, color: "#3B82F6" },
-    { label: "Assetfinder", count: pc.assetfinder ?? 0, color: "#06B6D4" },
-    { label: "Amass", count: pc.amass ?? 0, color: "#10B981" },
-    { label: "Chaos", count: pc.chaos ?? 0, color: "#F59E0B" },
-  ];
+    { label: "Subfinder", tool: "subfinder", color: "#3B82F6" },
+    { label: "Assetfinder", tool: "assetfinder", color: "#06B6D4" },
+    { label: "Amass", tool: "amass", color: "#10B981" },
+    { label: "Chaos", tool: "chaos", color: "#F59E0B" },
+  ].map(p => {
+    const pStatus = getProviderStatus(p.tool);
+    const rawCount = pc[p.tool as keyof typeof pc] ?? 0;
+    const countDisplay = (activeJob && pStatus === "waiting") ? "-" : rawCount;
+    return {
+      ...p,
+      status: pStatus,
+      countDisplay,
+      count: rawCount,
+    };
+  });
 
   return (
     <div className="space-y-6">
+      {/* Phase Tracker for Active Scan */}
+      {activeJob && ["running", "pending", "paused", "stopped"].includes(activeJob.status) && (
+        <div className="bg-dark-card border border-dark-border rounded-xl p-4 glass animate-fadeIn">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+            <div className="flex items-center gap-2">
+              {activeJob.status === "paused" ? (
+                <Pause className="w-4 h-4 text-cyber-warning animate-pulse" />
+              ) : activeJob.status === "stopped" ? (
+                <Square className="w-4 h-4 text-cyber-danger fill-current" />
+              ) : (
+                <RefreshCw className="w-4 h-4 text-cyber-accent animate-spin" />
+              )}
+              <span className="font-mono text-xs text-slate-200 uppercase tracking-wider font-semibold">
+                Active Scan Progress:{" "}
+                <span className={
+                  activeJob.status === "paused" ? "text-cyber-warning" :
+                  activeJob.status === "stopped" ? "text-cyber-danger" :
+                  "text-cyber-accent"
+                }>
+                  {activeJob.status.toUpperCase()}
+                </span>
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-2 text-xs font-mono">
+              {/* Discovery Phase */}
+              <div className="flex items-center gap-1.5">
+                <span className={`px-2 py-0.5 rounded ${getPhaseClass("discovery")}`}>
+                  {getPhaseText("discovery", "Discovery")}
+                </span>
+              </div>
+              <span className="text-slate-600">──&gt;</span>
+              {/* HTTPX Phase */}
+              <div className="flex items-center gap-1.5">
+                <span className={`px-2 py-0.5 rounded ${getPhaseClass("httpx")}`}>
+                  {getPhaseText("httpx", "HTTPX")}
+                </span>
+              </div>
+              <span className="text-slate-600">──&gt;</span>
+              {/* Naabu Phase */}
+              <div className="flex items-center gap-1.5">
+                <span className={`px-2 py-0.5 rounded ${getPhaseClass("naabu")}`}>
+                  {getPhaseText("naabu", "Naabu")}
+                </span>
+              </div>
+              <span className="text-slate-600">──&gt;</span>
+              {/* Katana Phase */}
+              <div className="flex items-center gap-1.5">
+                <span className={`px-2 py-0.5 rounded ${getPhaseClass("katana")}`}>
+                  {getPhaseText("katana", "Katana")}
+                </span>
+              </div>
+              <span className="text-slate-600">──&gt;</span>
+              {/* Nuclei Phase */}
+              <div className="flex items-center gap-1.5">
+                <span className={`px-2 py-0.5 rounded ${getPhaseClass("nuclei")}`}>
+                  {getPhaseText("nuclei", "Nuclei")}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Upper stats row */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4">
         <StatCard
           title="Total Domains/Assets"
-          value={stats.total_assets}
+          value={derivedTotalAssets > 0 ? derivedTotalAssets : "-"}
           subtext="Total unique targets discovered"
           icon={<Globe className="w-6 h-6" />}
           colorClass="text-cyber-primary"
@@ -125,7 +455,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
         />
         <StatCard
           title="Discovered Subdomains"
-          value={stats.total_subdomains}
+          value={derivedTotalSubdomains > 0 ? derivedTotalSubdomains : "-"}
           subtext="Target child hosts mapped"
           icon={<Server className="w-6 h-6" />}
           colorClass="text-cyber-accent"
@@ -133,7 +463,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
         />
         <StatCard
           title="Live Probed Hosts"
-          value={stats.live_hosts}
+          value={derivedLiveHosts > 0 ? derivedLiveHosts : "-"}
           subtext="Hosts responding to requests"
           icon={<Radio className="w-6 h-6 animate-pulse" />}
           colorClass="text-cyber-success"
@@ -141,31 +471,76 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
         />
         <StatCard
           title="Exposed Open Ports"
-          value={stats.open_ports_count}
-          subtext="Unique ports with active services"
+          value={totalOpenPortFindings > 0 ? totalOpenPortFindings : "-"}
+          subtext={`${hostsWithOpenPorts} hosts | ${stats.open_ports_count} unique ports`}
           icon={<ShieldAlert className="w-6 h-6" />}
           colorClass="text-cyber-danger"
           glowClass="glow-blue"
         />
+        <StatCard
+          title="Crawled URLs"
+          value={totalUrlsDiscovered > 0 ? totalUrlsDiscovered : "-"}
+          subtext="Discovered endpoints & resources"
+          icon={<Link className="w-6 h-6" />}
+          colorClass="text-cyber-warning"
+          glowClass="glow-orange"
+        />
+        <StatCard
+          title="Security Findings"
+          value={totalNucleiFindings > 0 ? totalNucleiFindings : "-"}
+          subtext="Vulnerabilities & exposures"
+          icon={<AlertCircle className="w-6 h-6" />}
+          colorClass="text-cyber-danger"
+          glowClass="glow-red"
+        />
       </div>
 
       {/* Provider Yield Breakdown */}
-      {providerBreakdown.some(p => p.count > 0) && (
+      {(providerBreakdown.some(p => p.count > 0) || activeJob) && (
         <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">
           <h4 className="text-xs font-mono text-slate-400 uppercase tracking-wider mb-4 border-b border-dark-border pb-2">
             Provider Yield Breakdown
           </h4>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {providerBreakdown.map((p) => (
-              <div key={p.label} className="bg-dark-bg border border-dark-border rounded-lg p-3 flex flex-col items-center text-center">
-                <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1">{p.label}</span>
-                <span className="text-2xl font-mono font-bold" style={{ color: p.color }}>{p.count}</span>
-                <span className="text-[9px] text-slate-600 mt-1">subdomains found</span>
+              <div key={p.label} className="bg-dark-bg border border-dark-border rounded-lg p-3 flex flex-col items-center text-center relative overflow-hidden">
+                <div className="flex items-center gap-1.5 mb-1.5 justify-center">
+                  {p.status === "completed" && <span className="text-cyber-success text-xs font-bold">✓</span>}
+                  {p.status === "running" && <RefreshCw className="w-3 h-3 animate-spin text-cyber-accent" />}
+                  {p.status === "waiting" && <span className="text-slate-500 text-xs">○</span>}
+                  {p.status === "failed" && <span className="text-cyber-danger text-xs font-bold">✕</span>}
+                  {p.status === "paused" && <Pause className="w-3 h-3 text-cyber-warning" />}
+                  {p.status === "stopped" && <Square className="w-3 h-3 text-cyber-danger fill-current" />}
+                  <span className="text-[10px] font-mono text-slate-400 uppercase tracking-widest">{p.label}</span>
+                </div>
+                <span className="text-2xl font-mono font-bold" style={{ color: p.color }}>{p.countDisplay}</span>
+                <span className="text-[9px] text-slate-500 mt-1 capitalize">{p.status}</span>
               </div>
             ))}
           </div>
         </div>
       )}
+
+      {/* Vulnerability Summary Card */}
+      <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">
+        <h4 className="text-xs font-mono text-slate-400 uppercase tracking-wider mb-4 border-b border-dark-border pb-2">
+          Vulnerability Summary (Nuclei)
+        </h4>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          {[
+            { label: "Critical", count: criticalCount, color: "text-cyber-danger", border: "border-cyber-danger/30" },
+            { label: "High", count: highCount, color: "text-orange-500", border: "border-orange-500/30" },
+            { label: "Medium", count: mediumCount, color: "text-cyber-warning", border: "border-cyber-warning/30" },
+            { label: "Low", count: lowCount, color: "text-cyber-accent", border: "border-cyber-accent/30" },
+            { label: "Info", count: infoCount, color: "text-slate-400", border: "border-slate-500/30" }
+          ].map((item) => (
+            <div key={item.label} className={`bg-dark-bg border ${item.border} rounded-lg p-3.5 flex flex-col items-center text-center transition-all hover:scale-[1.02] hover:bg-dark-hover/10`}>
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1.5">{item.label}</span>
+              <span className={`text-3xl font-mono font-bold ${item.color}`}>{item.count}</span>
+            </div>
+          ))}
+        </div>
+      </div>
 
       {/* Main split grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -213,39 +588,123 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           </div>
 
           <div className="mt-8 pt-4 border-t border-dark-border space-y-4">
-            <div>
-              <label className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1.5">Discovery Provider</label>
-              <select
-                value={selectedProvider}
-                onChange={(e) => setSelectedProvider(e.target.value)}
-                className="w-full bg-dark-bg border border-dark-border rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyber-accent font-semibold"
+            {activeJob && ["pending", "running", "paused", "stopped"].includes(activeJob.status) ? (
+              <div className="space-y-3">
+                <span className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1">Scan Control Console</span>
+                <div className="grid grid-cols-2 gap-2">
+                  {activeJob.status === "paused" ? (
+                    <button
+                      onClick={onResumeScan}
+                      className="flex items-center justify-center space-x-1.5 bg-cyber-success/20 border border-cyber-success/40 hover:bg-cyber-success/30 text-cyber-success py-2 rounded text-xs font-bold uppercase tracking-wider transition-all cursor-pointer"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      <span>Resume</span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={onPauseScan}
+                      disabled={activeJob.status !== "running" && activeJob.status !== "pending"}
+                      className="flex items-center justify-center space-x-1.5 bg-cyber-warning/20 border border-cyber-warning/40 hover:bg-cyber-warning/30 text-cyber-warning py-2 rounded text-xs font-bold uppercase tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      <Pause className="w-3.5 h-3.5" />
+                      <span>Pause</span>
+                    </button>
+                  )}
+
+                  <button
+                    onClick={onStopScan}
+                    disabled={activeJob.status !== "running" && activeJob.status !== "pending" && activeJob.status !== "paused"}
+                    className="flex items-center justify-center space-x-1.5 bg-cyber-danger/20 border border-cyber-danger/40 hover:bg-cyber-danger/30 text-cyber-danger py-2 rounded text-xs font-bold uppercase tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    <Square className="w-3.5 h-3.5 fill-current" />
+                    <span>Stop</span>
+                  </button>
+                </div>
+                
+                <button
+                  onClick={onResetScan}
+                  className="w-full flex items-center justify-center space-x-1.5 bg-slate-800/80 border border-slate-700 hover:bg-slate-700 text-slate-200 py-2.5 rounded text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-semibold"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reset Scan Dashboard</span>
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1.5">Discovery Provider</label>
+                  <select
+                    value={selectedProvider}
+                    onChange={(e) => setSelectedProvider(e.target.value)}
+                    className="w-full bg-dark-bg border border-dark-border rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyber-accent font-semibold"
+                  >
+                    {providers.map(p => (
+                      <option key={p} value={p}>{p}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  onClick={() => onLaunchScan(selectedProvider)}
+                  className="w-full bg-gradient-to-r from-cyber-primary to-cyber-accent text-white py-2.5 rounded text-xs font-bold uppercase tracking-wider hover:opacity-90 active:scale-[0.98] transition-all flex items-center justify-center space-x-2 shadow-lg cursor-pointer"
+                >
+                  <Play className="w-4 h-4" />
+                  <span>Launch Discovery Job</span>
+                </button>
+
+                {(assets.length > 0 || (activeJob && ["completed", "failed"].includes(activeJob.status))) && (
+                  <button
+                    onClick={onResetScan}
+                    className="w-full flex items-center justify-center space-x-1.5 bg-slate-800/80 border border-slate-700 hover:bg-slate-700 text-slate-200 py-2.5 rounded text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-semibold"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Reset Scan Dashboard</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div className="relative w-full">
+              <button
+                onClick={() => setShowExportDropdown(!showExportDropdown)}
+                className="w-full bg-dark-bg border border-dark-border hover:border-cyber-accent/50 text-slate-300 hover:text-white py-2.5 rounded text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center space-x-2 cursor-pointer font-semibold animate-pulse"
               >
-                {providers.map(p => (
-                  <option key={p} value={p}>{p}</option>
-                ))}
-              </select>
-            </div>
-
-            <button
-              onClick={() => onLaunchScan(selectedProvider)}
-              className="w-full bg-gradient-to-r from-cyber-primary to-cyber-accent text-white py-2.5 rounded text-xs font-bold uppercase tracking-wider hover:opacity-90 active:scale-[0.98] transition-all flex items-center justify-center space-x-2 shadow-lg cursor-pointer"
-            >
-              <Play className="w-4 h-4" />
-              <span>Launch Discovery Job</span>
-            </button>
-
-            <button
-              onClick={handleExportHTML}
-              disabled={generatingReport}
-              className="w-full bg-dark-bg border border-dark-border hover:border-cyber-accent/50 text-slate-300 hover:text-white py-2.5 rounded text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center space-x-2 cursor-pointer"
-            >
-              {generatingReport ? (
-                <RefreshCw className="w-4 h-4 animate-spin" />
-              ) : (
                 <FileText className="w-4 h-4" />
+                <span>Export ▼</span>
+              </button>
+              {showExportDropdown && (
+                <div className="absolute right-0 left-0 mt-1 bg-dark-card border border-dark-border rounded-lg shadow-xl z-50 overflow-hidden text-xs">
+                  <button
+                    onClick={() => {
+                      setShowExportDropdown(false);
+                      handleExportFullCSV();
+                    }}
+                    className="w-full text-left px-4 py-2 hover:bg-dark-hover text-slate-300 hover:text-white transition-colors cursor-pointer border-b border-dark-border font-semibold"
+                  >
+                    • Full CSV
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowExportDropdown(false);
+                      handleExportSubdomainsOnlyCSV();
+                    }}
+                    className="w-full text-left px-4 py-2 hover:bg-dark-hover text-slate-300 hover:text-white transition-colors cursor-pointer border-b border-dark-border font-semibold"
+                  >
+                    • Subdomains Only CSV
+                  </button>
+                  <button
+                    onClick={async () => {
+                      setShowExportDropdown(false);
+                      await handleExportHTML();
+                    }}
+                    disabled={generatingReport}
+                    className="w-full text-left px-4 py-2 hover:bg-dark-hover text-slate-300 hover:text-white transition-colors cursor-pointer font-semibold"
+                  >
+                    • Audit Report (HTML)
+                  </button>
+                </div>
               )}
-              <span>Export Audit Report</span>
-            </button>
+            </div>
           </div>
         </div>
 
@@ -258,13 +717,13 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                 Open Ports Frequency
               </h4>
               <div className="h-64">
-                {stats.ports_distribution.length === 0 ? (
+                {derivedPortsDistribution.length === 0 ? (
                   <div className="h-full flex items-center justify-center text-xs text-slate-500 uppercase tracking-widest font-mono">
                     No Port Data Discovered
                   </div>
                 ) : (
                   <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={stats.ports_distribution}>
+                    <BarChart data={derivedPortsDistribution}>
                       <XAxis dataKey="port" stroke="#6B7280" fontSize={11} tickLine={false} />
                       <YAxis stroke="#6B7280" fontSize={11} tickLine={false} allowDecimals={false} />
                       <Tooltip
@@ -272,7 +731,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                         labelFormatter={(label) => `Port ${label}`}
                       />
                       <Bar dataKey="count" fill="#3B82F6" radius={[4, 4, 0, 0]}>
-                        {stats.ports_distribution.map((_, index) => (
+                        {derivedPortsDistribution.map((_, index) => (
                           <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                         ))}
                       </Bar>
@@ -289,7 +748,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
               </h4>
               <div className="h-64 flex flex-col justify-between">
                 <div className="h-48">
-                  {stats.sources_distribution.length === 0 ? (
+                  {derivedSourcesDistribution.length === 0 ? (
                     <div className="h-full flex items-center justify-center text-xs text-slate-500 uppercase tracking-widest font-mono">
                       No Yield Data Available
                     </div>
@@ -297,7 +756,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie
-                          data={stats.sources_distribution}
+                          data={derivedSourcesDistribution}
                           cx="50%"
                           cy="50%"
                           innerRadius={50}
@@ -305,7 +764,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                           paddingAngle={5}
                           dataKey="value"
                         >
-                          {stats.sources_distribution.map((_, index) => (
+                          {derivedSourcesDistribution.map((_, index) => (
                             <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                           ))}
                         </Pie>
@@ -316,7 +775,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                 </div>
                 {/* Legend */}
                 <div className="flex flex-wrap justify-center gap-x-4 gap-y-1 text-xs">
-                  {stats.sources_distribution.map((entry, index) => (
+                  {derivedSourcesDistribution.map((entry, index) => (
                     <div key={entry.name} className="flex items-center space-x-1.5">
                       <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: COLORS[index % COLORS.length] }}></span>
                       <span className="text-slate-400">{entry.name} ({entry.value})</span>
