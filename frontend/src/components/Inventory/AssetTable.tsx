@@ -1,5 +1,13 @@
 import React, { useState } from "react";
 import { Search, Filter, Copy, ChevronDown, ChevronUp } from "lucide-react";
+import { DnsTab } from "./DnsTab";
+import type { DnsRecord } from "./DnsTab";
+import { TakeoverTab } from "./TakeoverTab";
+import type { TakeoverRecord } from "./TakeoverTab";
+import { NormalizedUrlTab } from "./NormalizedUrlTab";
+import type { NormalizedUrlRecord } from "./NormalizedUrlTab";
+import { GfTab } from "./GfTab";
+import type { GfUrlRecord } from "./GfTab";
 
 const getRootDomain = (domain: string): string => {
   const parts = domain.split(".");
@@ -29,9 +37,23 @@ interface Asset {
 interface AssetTableProps {
   assets: Asset[];
   projectName?: string;
+  dnsRecords?: DnsRecord[];
+  takeoverRecords?: TakeoverRecord[];
+  normalizedUrlRecords?: NormalizedUrlRecord[];
+  gfRecords?: GfUrlRecord[];
 }
 
-export const AssetTable: React.FC<AssetTableProps> = ({ assets, projectName = "project" }) => {
+type InventoryTab = "assets" | "dns" | "takeovers" | "normalized_urls" | "gf";
+
+export const AssetTable: React.FC<AssetTableProps> = ({
+  assets,
+  projectName = "project",
+  dnsRecords = [],
+  takeoverRecords = [],
+  normalizedUrlRecords = [],
+  gfRecords = [],
+}) => {
+  const [activeInventoryTab, setActiveInventoryTab] = useState<InventoryTab>("assets");
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
@@ -135,7 +157,60 @@ export const AssetTable: React.FC<AssetTableProps> = ({ assets, projectName = "p
     navigator.clipboard.writeText(text);
   };
 
+  const inventoryTabs: { id: InventoryTab; label: string; count?: number }[] = [
+    { id: "assets", label: "Assets", count: assets.length },
+    { id: "dns", label: "DNS", count: dnsRecords.length },
+    { id: "takeovers", label: "Takeovers", count: takeoverRecords.length },
+    { id: "normalized_urls", label: "Normalized URLs", count: normalizedUrlRecords.length },
+    { id: "gf", label: "Interesting URLs", count: gfRecords.length },
+  ];
+
   return (
+    <div className="space-y-4">
+      {/* Sub-tab navigation */}
+      <div className="flex items-center gap-1.5 border-b border-dark-border pb-1 overflow-x-auto">
+        {inventoryTabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveInventoryTab(tab.id)}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-t text-xs font-bold uppercase tracking-wider transition-all cursor-pointer whitespace-nowrap ${
+              activeInventoryTab === tab.id
+                ? "bg-dark-card border-t border-x border-dark-border text-cyber-accent"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            {tab.label}
+            {tab.count !== undefined && tab.count > 0 && (
+              <span className="px-1.5 py-0.5 bg-cyber-accent/20 border border-cyber-accent/40 text-cyber-accent rounded text-[9px] font-bold">
+                {tab.count}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* DNS Tab */}
+      {activeInventoryTab === "dns" && (
+        <DnsTab records={dnsRecords} projectName={projectName} />
+      )}
+
+      {/* Takeovers Tab */}
+      {activeInventoryTab === "takeovers" && (
+        <TakeoverTab records={takeoverRecords} projectName={projectName} />
+      )}
+
+      {/* Normalized URLs Tab */}
+      {activeInventoryTab === "normalized_urls" && (
+        <NormalizedUrlTab records={normalizedUrlRecords} projectName={projectName} />
+      )}
+
+      {/* GF Interesting URLs Tab */}
+      {activeInventoryTab === "gf" && (
+        <GfTab records={gfRecords} projectName={projectName} />
+      )}
+
+      {/* Existing Assets Tab */}
+      {activeInventoryTab === "assets" && (
     <div className="bg-dark-card border border-dark-border rounded-xl glass overflow-hidden">
       {/* Filtering Toolbar */}
       <div className="p-4 border-b border-dark-border flex flex-col md:flex-row space-y-3 md:space-y-0 md:space-x-4 items-center justify-between bg-dark-bg/50">
@@ -664,6 +739,8 @@ export const AssetTable: React.FC<AssetTableProps> = ({ assets, projectName = "p
           </tbody>
         </table>
       </div>
+    </div>
+      )}
     </div>
   );
 };

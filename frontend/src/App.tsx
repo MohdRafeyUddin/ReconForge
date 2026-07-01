@@ -4,6 +4,10 @@ import { AuthPage } from "./components/Auth/AuthPage";
 import { Navbar } from "./components/Common/Navbar";
 import { OverviewDashboard } from "./components/Dashboard/OverviewDashboard";
 import { AssetTable } from "./components/Inventory/AssetTable";
+import type { DnsRecord } from "./components/Inventory/DnsTab";
+import type { TakeoverRecord } from "./components/Inventory/TakeoverTab";
+import type { NormalizedUrlRecord } from "./components/Inventory/NormalizedUrlTab";
+import type { GfUrlRecord } from "./components/Inventory/GfTab";
 import { RelationshipGraph } from "./components/AssetGraph/RelationshipGraph";
 import { ConsoleView } from "./components/JobConsole/ConsoleView";
 import { SubdomainsTab } from "./components/Subdomains/SubdomainsTab";
@@ -31,27 +35,194 @@ interface DashboardStats {
     amass?: number;
     chaos?: number;
   };
+  // new provider counters
+  dnsx_resolved?: number;
+  dnsx_nxdomain?: number;
+  dnsx_wildcards?: number;
+  dnsx_unique_ips?: number;
+  subzy_vulnerable?: number;
+  subzy_not_vulnerable?: number;
+  subzy_unknown?: number;
+  uro_input?: number;
+  uro_normalised?: number;
+  uro_removed?: number;
+  gf_categories?: Record<string, number>;
+  gf_total?: number;
+  normalized_urls_count?: number;
+  gf_urls_count?: number;
 }
 
-const defaultStats: DashboardStats = {
-  total_assets: 0,
-  total_subdomains: 0,
-  live_hosts: 0,
-  open_ports_count: 0,
-  last_scan_time: null,
-  ports_distribution: [],
-  sources_distribution: [],
-  provider_counts: {},
+
+
+let wsCount = 0;
+
+type TabId = "dashboard" | "subdomains" | "inventory" | "visualizer";
+
+interface ScanState {
+  jobId: string | null;
+  scanStatus: string | null;
+  currentStage: string;
+  stages: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
+  providerCounts: Record<string, number>;
+  dnsx_resolved: number | null;
+  dnsx_nxdomain: number | null;
+  dnsx_wildcards: number | null;
+  dnsx_unique_ips: number | null;
+  subzy_vulnerable: number | null;
+  subzy_not_vulnerable: number | null;
+  subzy_unknown: number | null;
+  uro_input: number | null;
+  uro_normalised: number | null;
+  uro_removed: number | null;
+  gf_total: number | null;
+  gf_categories: Record<string, number>;
+  assets: any[];
+  subdomains: any[];
+  dnsRecords: DnsRecord[];
+  takeoverRecords: TakeoverRecord[];
+  normalizedUrlRecords: NormalizedUrlRecord[];
+  gfRecords: GfUrlRecord[];
+  completedProviders: Set<string>;
+  activeJobObject: any | null;
+  providerStatus: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
+  lastWsEventTime: number;
+}
+
+const initialScanState: ScanState = {
+  jobId: null,
+  scanStatus: null,
+  currentStage: "waiting",
+  stages: {
+    discovery: "PENDING",
+    dnsx: "PENDING",
+    subzy: "PENDING",
+    naabu: "PENDING",
+    httpx: "PENDING",
+    katana: "PENDING",
+    uro: "PENDING",
+    gf: "PENDING",
+    nuclei: "PENDING",
+  },
+  providerCounts: {},
+  dnsx_resolved: null,
+  dnsx_nxdomain: null,
+  dnsx_wildcards: null,
+  dnsx_unique_ips: null,
+  subzy_vulnerable: null,
+  subzy_not_vulnerable: null,
+  subzy_unknown: null,
+  uro_input: null,
+  uro_normalised: null,
+  uro_removed: null,
+  gf_total: null,
+  gf_categories: {},
+  assets: [],
+  subdomains: [],
+  dnsRecords: [],
+  takeoverRecords: [],
+  normalizedUrlRecords: [],
+  gfRecords: [],
+  completedProviders: new Set<string>(),
+  activeJobObject: null,
+  providerStatus: {
+    subfinder: "PENDING",
+    assetfinder: "PENDING",
+    amass: "PENDING",
+    chaos: "PENDING",
+    dnsx: "PENDING",
+    subzy: "PENDING",
+    naabu: "PENDING",
+    httpx: "PENDING",
+    katana: "PENDING",
+    uro: "PENDING",
+    gf: "PENDING",
+    nuclei: "PENDING",
+  },
+  lastWsEventTime: 0,
 };
 
-const updateStatsFromAssets = (currentAssets: any[], currentSubdomains: any[], currentStats: DashboardStats): DashboardStats => {
-  const total_assets = currentAssets.length;
-  const total_subdomains = currentSubdomains.length;
-  const live_hosts = currentAssets.filter(a => a.status === "live").length;
+const transitionToStage = (
+  currentStages: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">,
+  newStage: string
+): {
+  currentStage: string;
+  stages: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
+} => {
+  const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+  const targetIdx = PIPELINE_ORDER.indexOf(newStage.toLowerCase());
   
-  // Recompute ports distribution
+  if (targetIdx === -1) {
+    if (newStage.toLowerCase() === "completed") {
+      const nextStages = { ...currentStages };
+      PIPELINE_ORDER.forEach((s) => {
+        nextStages[s] = "COMPLETED";
+      });
+      return { currentStage: "completed", stages: nextStages };
+    }
+    return { currentStage: newStage, stages: currentStages };
+  }
+
+  const nextStages = { ...currentStages };
+  PIPELINE_ORDER.forEach((stage, idx) => {
+    if (idx < targetIdx) {
+      nextStages[stage] = "COMPLETED";
+    } else if (idx === targetIdx) {
+      nextStages[stage] = "RUNNING";
+    } else {
+      nextStages[stage] = "PENDING";
+    }
+  });
+
+  return { currentStage: newStage.toLowerCase(), stages: nextStages };
+};
+
+const updateProviderStatus = (
+  current: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">,
+  provider: string,
+  newStatus: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED"
+): Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED"> => {
+  const p = provider.toLowerCase();
+  const currentStatus = current[p];
+  if (currentStatus === "COMPLETED") {
+    return current;
+  }
+  const next = { ...current };
+  next[p] = newStatus;
+  return next;
+};
+
+const MainDashboard: React.FC = () => {
+  const { token } = useAuth();
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProject, setActiveProject] = useState<Project | null>(null);
+  const [activeTab, setActiveTab] = useState<TabId>("dashboard");
+  const [loading, setLoading] = useState(true);
+  const [isReconnect, setIsReconnect] = useState(false);
+
+  const [scanState, setScanState] = useState<ScanState>(initialScanState);
+
+  const {
+    assets,
+    subdomains,
+    dnsRecords,
+    takeoverRecords,
+    normalizedUrlRecords,
+    gfRecords,
+    providerStatus,
+    stages,
+    currentStage: currentPhase,
+  } = scanState;
+
+  const activeJob = scanState.activeJobObject;
+
+  const completedProviders = new Set(
+    Object.entries(scanState.providerStatus)
+      .filter(([_, status]) => status === "COMPLETED")
+      .map(([provider]) => provider)
+  );
+
   const portCounts: Record<number, number> = {};
-  currentAssets.forEach(a => {
+  scanState.assets.forEach((a: any) => {
     (a.open_ports || []).forEach((p: number) => {
       portCounts[p] = (portCounts[p] || 0) + 1;
     });
@@ -60,18 +231,9 @@ const updateStatsFromAssets = (currentAssets: any[], currentSubdomains: any[], c
     port: parseInt(port),
     count: count as number
   })).sort((a, b) => b.count - a.count);
-  const open_ports_count = ports_distribution.length;
 
-  // Recompute provider_counts from the sources array of each asset
-  const providers = ["subfinder", "assetfinder", "amass", "chaos"];
-  const provider_counts: Record<string, number> = {};
-  providers.forEach(p => {
-    provider_counts[p] = currentAssets.filter(a => (a.sources || []).includes(p)).length;
-  });
-
-  // Recompute sources_distribution
   const sourceGroups: Record<string, number> = {};
-  currentAssets.forEach(a => {
+  scanState.assets.forEach((a: any) => {
     const src = a.discovered_by || "unknown";
     sourceGroups[src] = (sourceGroups[src] || 0) + 1;
   });
@@ -80,35 +242,32 @@ const updateStatsFromAssets = (currentAssets: any[], currentSubdomains: any[], c
     value: value as number
   }));
 
-  return {
-    ...currentStats,
-    total_assets,
-    total_subdomains,
-    live_hosts,
-    open_ports_count,
+  const stats: DashboardStats = {
+    total_assets: scanState.assets.length,
+    total_subdomains: scanState.subdomains.length,
+    live_hosts: scanState.assets.filter((a: any) => a.status === "live").length,
+    open_ports_count: ports_distribution.length,
+    last_scan_time: scanState.activeJobObject?.completed_at || null,
     ports_distribution,
     sources_distribution,
-    provider_counts
+    provider_counts: scanState.providerCounts,
+    
+    dnsx_resolved: scanState.dnsx_resolved ?? undefined,
+    dnsx_nxdomain: scanState.dnsx_nxdomain ?? undefined,
+    dnsx_wildcards: scanState.dnsx_wildcards ?? undefined,
+    dnsx_unique_ips: scanState.dnsx_unique_ips ?? undefined,
+    
+    subzy_vulnerable: scanState.subzy_vulnerable ?? undefined,
+    subzy_not_vulnerable: scanState.subzy_not_vulnerable ?? undefined,
+    subzy_unknown: scanState.subzy_unknown ?? undefined,
+    
+    uro_input: scanState.uro_input ?? undefined,
+    uro_normalised: scanState.uro_normalised ?? undefined,
+    uro_removed: scanState.uro_removed ?? undefined,
+    
+    gf_total: scanState.gf_total ?? undefined,
+    gf_categories: scanState.gf_categories,
   };
-};
-
-let wsCount = 0;
-
-type TabId = "dashboard" | "subdomains" | "inventory" | "visualizer";
-
-const MainDashboard: React.FC = () => {
-  const { token } = useAuth();
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [activeProject, setActiveProject] = useState<Project | null>(null);
-  const [assets, setAssets] = useState<any[]>([]);
-  const [subdomains, setSubdomains] = useState<any[]>([]);
-  const [stats, setStats] = useState<DashboardStats>(defaultStats);
-  const [activeJob, setActiveJob] = useState<any | null>(null);
-  const [completedProviders, setCompletedProviders] = useState<Set<string>>(new Set());
-  const [currentPhase, setCurrentPhase] = useState<string>("waiting");
-  const [activeTab, setActiveTab] = useState<TabId>("dashboard");
-  const [loading, setLoading] = useState(true);
-  const [isReconnect, setIsReconnect] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const fetchProjectDataRef = useRef<(() => Promise<void>) | null>(null);
@@ -140,19 +299,202 @@ const MainDashboard: React.FC = () => {
         apiCall(`/assets/project/${activeProject.id}/dashboard-stats`),
         apiCall(`/jobs/project/${activeProject.id}`),
       ]);
-      setAssets(assetList);
-      setSubdomains(subdomainList);
-      setStats(dashboardStats);
 
-      if (!activeJob) {
-        const runningJob = jobsList.find((j: any) => j.status === "running" || j.status === "pending");
-        if (runningJob) {
-          setIsReconnect(true);
-          setActiveJob(runningJob);
-          setCompletedProviders(new Set());
-          setCurrentPhase(runningJob.status === "pending" ? "waiting" : "discovery");
+      const dns: DnsRecord[] = [];
+      const takeovers: TakeoverRecord[] = [];
+      const normalizedUrls: NormalizedUrlRecord[] = [];
+      const seenUrls = new Set<string>();
+
+      assetList.forEach((asset: any) => {
+        if (asset.metadata?.dnsx) {
+          const dnsx = asset.metadata.dnsx;
+          if (!dns.some((r) => r.subdomain === asset.domain)) {
+            dns.push({
+              subdomain: asset.domain,
+              status: asset.status || "resolved",
+              ipv4: dnsx.a || [],
+              ipv6: dnsx.aaaa || [],
+              cname: dnsx.cname || [],
+              resolved_at: dnsx.resolved_at,
+            });
+          }
         }
-      }
+        if (asset.metadata?.subzy) {
+          const subzy = asset.metadata.subzy;
+          if (!takeovers.some((r) => r.subdomain === asset.domain)) {
+            takeovers.push({
+              subdomain: asset.domain,
+              provider: subzy.service || "",
+              status: subzy.takeover_status || "Unknown",
+              last_checked: subzy.checked_at,
+            });
+          }
+        }
+        if (asset.metadata?.katana?.urls) {
+          asset.metadata.katana.urls.forEach((url: string) => {
+            if (!seenUrls.has(url)) {
+              seenUrls.add(url);
+              normalizedUrls.push({
+                original_url: url,
+                normalized_url: url,
+                duplicate_removed: false,
+                source: "uro",
+              });
+            }
+          });
+        }
+      });
+
+      const gf: GfUrlRecord[] = [];
+      const seenGf = new Set<string>();
+      
+      jobsList.forEach((job: any) => {
+        if (Array.isArray(job.logs)) {
+          job.logs.forEach((log: string) => {
+            const match = log.match(/^\s*\[\+\]\s+(https?:\/\/\S+)\s+→\s+(.+)$/);
+            if (match) {
+              const url = match[1];
+              const categories = match[2].split(",").map((c: string) => c.trim()).filter(Boolean);
+              categories.forEach((cat) => {
+                const key = `${cat}:${url}`;
+                if (!seenGf.has(key)) {
+                  seenGf.add(key);
+                  const existing = gf.find((r) => r.url === url);
+                  if (existing) {
+                    if (!existing.categories.includes(cat)) {
+                      existing.categories.push(cat);
+                    }
+                  } else {
+                    gf.push({
+                      url,
+                      categories: [cat],
+                      source: "gf",
+                      classified_at: Math.floor(Date.now() / 1000),
+                    });
+                  }
+                }
+              });
+            }
+          });
+        }
+      });
+
+      let dnsx_nxdomain = 0;
+      let dnsx_wildcards = 0;
+      let subzy_not_vulnerable = 0;
+      let subzy_unknown = 0;
+      let uro_input = 0;
+      let uro_normalised = 0;
+      let uro_removed = 0;
+
+      jobsList.forEach((job: any) => {
+        if (Array.isArray(job.logs)) {
+          job.logs.forEach((log: string) => {
+            const dnsxMatch = log.match(/DNSx completed\.\s+Resolved:\s*(\d+)\s*\|\s*NXDOMAIN:\s*(\d+)\s*\|\s*Wildcards filtered:\s*(\d+)/i);
+            if (dnsxMatch) {
+              dnsx_nxdomain = parseInt(dnsxMatch[2]);
+              dnsx_wildcards = parseInt(dnsxMatch[3]);
+            }
+            
+            const subzyMatch = log.match(/Subzy completed\.\s+Vulnerable:\s*(\d+)\s*\|\s*Not Vulnerable:\s*(\d+)\s*\|\s*Unknown:\s*(\d+)/i);
+            if (subzyMatch) {
+              subzy_not_vulnerable = parseInt(subzyMatch[2]);
+              subzy_unknown = parseInt(subzyMatch[3]);
+            }
+
+            const uroMatch = log.match(/Uro completed\.\s+Input:\s*(\d+)\s*\|\s*Normalised:\s*(\d+)\s*\|\s*Removed:\s*(\d+)/i);
+            if (uroMatch) {
+              uro_input = parseInt(uroMatch[1]);
+              uro_normalised = parseInt(uroMatch[2]);
+              uro_removed = parseInt(uroMatch[3]);
+            }
+          });
+        }
+      });
+
+      const uniqueDnsxIps = new Set<string>();
+      dns.forEach((r) => {
+        (r.ipv4 || []).forEach((ip) => uniqueDnsxIps.add(ip));
+        (r.ipv6 || []).forEach((ip) => uniqueDnsxIps.add(ip));
+      });
+
+      const seenKatana = new Set<string>();
+      assetList.forEach((asset: any) => {
+        if (asset.metadata?.katana?.urls) {
+          asset.metadata.katana.urls.forEach((url: string) => {
+            seenKatana.add(url);
+          });
+        }
+      });
+
+      const activeJobFromServer = jobsList.find((j: any) => j.status === "running" || j.status === "pending" || j.status === "paused" || j.status === "stopped");
+
+      setScanState((prev) => {
+        const isWsActive = prev.jobId && (Date.now() - prev.lastWsEventTime < 10000);
+        
+        let nextStages = isWsActive ? prev.stages : { ...prev.stages };
+        let nextProviderStatus = isWsActive ? prev.providerStatus : { ...prev.providerStatus };
+        let nextCurrentStage = isWsActive ? prev.currentStage : prev.currentStage;
+
+        if (!isWsActive && activeJobFromServer) {
+          const jobPhase = activeJobFromServer.current_phase || "waiting";
+          const transition = transitionToStage(prev.stages, jobPhase);
+          nextStages = transition.stages;
+          nextCurrentStage = transition.currentStage;
+          
+          const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+          const currentIdx = PIPELINE_ORDER.indexOf(jobPhase.toLowerCase());
+          PIPELINE_ORDER.forEach((stage, idx) => {
+            if (idx < currentIdx) {
+              nextProviderStatus[stage] = "COMPLETED";
+            } else if (idx === currentIdx) {
+              nextProviderStatus[stage] = activeJobFromServer.status === "paused" ? "RUNNING" : (activeJobFromServer.status === "stopped" ? "FAILED" : "RUNNING");
+            } else {
+              nextProviderStatus[stage] = "PENDING";
+            }
+          });
+        } else if (!isWsActive && !activeJobFromServer) {
+          nextCurrentStage = "waiting";
+        }
+
+        const nextProviderCounts = { ...prev.providerCounts, ...dashboardStats.provider_counts };
+
+        return {
+          ...prev,
+          jobId: activeJobFromServer ? activeJobFromServer.id : null,
+          activeJobObject: activeJobFromServer || null,
+          assets: assetList,
+          subdomains: subdomainList,
+          dnsRecords: dns,
+          takeoverRecords: takeovers,
+          normalizedUrlRecords: normalizedUrls,
+          gfRecords: gf,
+          stages: nextStages,
+          currentStage: nextCurrentStage,
+          providerStatus: nextProviderStatus,
+          providerCounts: nextProviderCounts,
+          dnsx_resolved: dns.length || prev.dnsx_resolved,
+          dnsx_nxdomain: dnsx_nxdomain || prev.dnsx_nxdomain,
+          dnsx_wildcards: dnsx_wildcards || prev.dnsx_wildcards,
+          dnsx_unique_ips: uniqueDnsxIps.size || prev.dnsx_unique_ips,
+          subzy_vulnerable: takeovers.filter((r) => r.status.toLowerCase() === "vulnerable").length || prev.subzy_vulnerable,
+          subzy_not_vulnerable: subzy_not_vulnerable || prev.subzy_not_vulnerable,
+          subzy_unknown: subzy_unknown || prev.subzy_unknown,
+          uro_input: uro_input || seenKatana.size || prev.uro_input,
+          uro_normalised: uro_normalised || normalizedUrls.length || prev.uro_normalised,
+          uro_removed: uro_removed || ( (uro_input || seenKatana.size) - (uro_normalised || normalizedUrls.length) ) || prev.uro_removed,
+          gf_total: gf.length || prev.gf_total,
+          gf_categories: (() => {
+            const cats: Record<string, number> = {};
+            gf.forEach((r) => {
+              r.categories.forEach((cat) => {
+                cats[cat] = (cats[cat] ?? 0) + 1;
+              });
+            });
+            return Object.keys(cats).length > 0 ? cats : prev.gf_categories;
+          })(),
+        };
+      });
     } catch (err) {
       console.error("Failed to load project details", err);
     }
@@ -166,12 +508,7 @@ const MainDashboard: React.FC = () => {
     if (activeProject) {
       fetchProjectData();
     } else {
-      setAssets([]);
-      setSubdomains([]);
-      setStats(defaultStats);
-      setActiveJob(null);
-      setCompletedProviders(new Set());
-      setCurrentPhase("waiting");
+      setScanState(initialScanState);
     }
   }, [activeProject]);
 
@@ -183,9 +520,20 @@ const MainDashboard: React.FC = () => {
         { method: "POST" }
       );
       setIsReconnect(false);
-      setCompletedProviders(new Set());
-      setCurrentPhase(job.status === "pending" ? "waiting" : "discovery");
-      setActiveJob(job);
+      setScanState((_prev) => {
+        const transition = transitionToStage(initialScanState.stages, "discovery");
+        return {
+          ...initialScanState,
+          jobId: job.id,
+          activeJobObject: job,
+          stages: transition.stages,
+          currentStage: transition.currentStage,
+          providerStatus: {
+            ...initialScanState.providerStatus,
+            discovery: "RUNNING",
+          },
+        };
+      });
     } catch (err) {
       console.error("Failed to trigger scan", err);
       alert(`Scan launch error: ${err instanceof Error ? err.message : "Internal Server Error"}`);
@@ -196,7 +544,10 @@ const MainDashboard: React.FC = () => {
     if (!activeJob) return;
     try {
       await apiCall(`/jobs/${activeJob.id}/pause`, { method: "POST" });
-      setActiveJob((prev: any) => prev ? { ...prev, status: "paused" } : null);
+      setScanState((prev) => ({
+        ...prev,
+        activeJobObject: prev.activeJobObject ? { ...prev.activeJobObject, status: "paused" } : null,
+      }));
     } catch (err) {
       console.error("Failed to pause scan", err);
     }
@@ -206,7 +557,10 @@ const MainDashboard: React.FC = () => {
     if (!activeJob) return;
     try {
       await apiCall(`/jobs/${activeJob.id}/resume`, { method: "POST" });
-      setActiveJob((prev: any) => prev ? { ...prev, status: "running" } : null);
+      setScanState((prev) => ({
+        ...prev,
+        activeJobObject: prev.activeJobObject ? { ...prev.activeJobObject, status: "running" } : null,
+      }));
     } catch (err) {
       console.error("Failed to resume scan", err);
     }
@@ -216,8 +570,11 @@ const MainDashboard: React.FC = () => {
     if (!activeJob) return;
     try {
       await apiCall(`/jobs/${activeJob.id}/stop`, { method: "POST" });
-      setActiveJob((prev: any) => prev ? { ...prev, status: "stopped" } : null);
-      setCurrentPhase("stopped");
+      setScanState((prev) => ({
+        ...prev,
+        activeJobObject: prev.activeJobObject ? { ...prev.activeJobObject, status: "stopped" } : null,
+        currentStage: "stopped",
+      }));
       if (wsRef.current) {
         (wsRef.current as any).isCleanClose = true;
         wsRef.current.close();
@@ -232,12 +589,7 @@ const MainDashboard: React.FC = () => {
     if (!activeJob) return;
     try {
       await apiCall(`/jobs/${activeJob.id}/reset`, { method: "POST" });
-      setActiveJob(null);
-      setAssets([]);
-      setSubdomains([]);
-      setStats(defaultStats);
-      setCompletedProviders(new Set());
-      setCurrentPhase("waiting");
+      setScanState(initialScanState);
       if (wsRef.current) {
         (wsRef.current as any).isCleanClose = true;
         wsRef.current.close();
@@ -269,145 +621,494 @@ const MainDashboard: React.FC = () => {
       wsRef.current = ws;
       
       wsCount++;
-      console.log("WebSocket opened", { jobId, currentWebsocketCount: wsCount });
+      console.log("WebSocket opened", { jobId, currentWebsocketCount: wsCount, isReconnect });
       console.log("Current websocket count:", wsCount);
-
       ws.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data);
-          console.log("WebSocket event received", { jobId, type: data.type });
+          const rawData = JSON.parse(event.data);
+          console.log("WebSocket event received", { jobId, rawData });
 
-          if (data.type === "asset_discovered" || data.type === "asset") {
-            const incomingAsset = data.asset || data.data;
-            if (incomingAsset && incomingAsset.domain) {
-              setAssets((prevAssets) => {
-                const exists = prevAssets.some(
-                  (a) => a.id === incomingAsset.id || a.domain === incomingAsset.domain
-                );
-                let nextAssets;
-                if (exists) {
-                  nextAssets = prevAssets.map((a) =>
-                    a.id === incomingAsset.id || a.domain === incomingAsset.domain ? incomingAsset : a
-                  );
-                } else {
-                  nextAssets = [...prevAssets, incomingAsset];
-                }
+          const events = Array.isArray(rawData) ? rawData : [rawData];
 
-                // Also update subdomains and stats relative to the new assets list
-                setSubdomains((prevSubs) => {
-                  let nextSubs = prevSubs;
+          events.forEach((data) => {
+            if (!data || !data.type) return;
+
+            if (data.type === "asset_discovered" || data.type === "asset") {
+              const incomingAsset = data.asset || data.data;
+              if (incomingAsset && incomingAsset.domain) {
+                setScanState((prev) => {
+                  const exists = prev.assets.some((a) => a.id === incomingAsset.id || a.domain === incomingAsset.domain);
+                  let nextAssets = exists
+                    ? prev.assets.map((a) => (a.id === incomingAsset.id || a.domain === incomingAsset.domain ? incomingAsset : a))
+                    : [...prev.assets, incomingAsset];
+
+                  let nextSubdomains = prev.subdomains;
                   if (incomingAsset.type === "subdomain") {
-                    const subExists = prevSubs.some(
-                      (s) => s.id === incomingAsset.id || s.domain === incomingAsset.domain
-                    );
-                    if (subExists) {
-                      nextSubs = prevSubs.map((s) =>
-                        s.id === incomingAsset.id || s.domain === incomingAsset.domain ? incomingAsset : s
-                      );
-                    } else {
-                      nextSubs = [...prevSubs, incomingAsset];
+                    const subExists = prev.subdomains.some((s) => s.id === incomingAsset.id || s.domain === incomingAsset.domain);
+                    nextSubdomains = subExists
+                      ? prev.subdomains.map((s) => (s.id === incomingAsset.id || s.domain === incomingAsset.domain ? incomingAsset : s))
+                      : [...prev.subdomains, incomingAsset];
+                  }
+
+                  let nextDnsRecords = prev.dnsRecords;
+                  if (incomingAsset.metadata?.dnsx) {
+                    const dnsx = incomingAsset.metadata.dnsx;
+                    if (!nextDnsRecords.some((r) => r.subdomain === incomingAsset.domain)) {
+                      nextDnsRecords = [...nextDnsRecords, {
+                        subdomain: incomingAsset.domain,
+                        status: incomingAsset.status || "resolved",
+                        ipv4: dnsx.a || [],
+                        ipv6: dnsx.aaaa || [],
+                        cname: dnsx.cname || [],
+                        resolved_at: dnsx.resolved_at,
+                      }];
                     }
                   }
+
+                  let nextTakeoverRecords = prev.takeoverRecords;
+                  if (incomingAsset.metadata?.subzy) {
+                    const subzy = incomingAsset.metadata.subzy;
+                    if (!nextTakeoverRecords.some((r) => r.subdomain === incomingAsset.domain)) {
+                      nextTakeoverRecords = [...nextTakeoverRecords, {
+                        subdomain: incomingAsset.domain,
+                        provider: subzy.service || "",
+                        status: (subzy.takeover_status || "Unknown") as any,
+                        last_checked: subzy.checked_at,
+                      }];
+                    }
+                  }
+
+                  let nextNormalizedUrlRecords = prev.normalizedUrlRecords;
+                  if (incomingAsset.metadata?.katana?.urls) {
+                    const katanaUrls = incomingAsset.metadata.katana.urls;
+                    let temp = [...nextNormalizedUrlRecords];
+                    let changed = false;
+                    katanaUrls.forEach((urlVal: string) => {
+                      if (!temp.some((r) => r.normalized_url === urlVal && r.source === "katana")) {
+                        temp.push({
+                          original_url: urlVal,
+                          normalized_url: urlVal,
+                          duplicate_removed: false,
+                          source: "katana",
+                        });
+                        changed = true;
+                      }
+                    });
+                    if (changed) nextNormalizedUrlRecords = temp;
+                  }
+
+                  if (incomingAsset.metadata?.url) {
+                    const urlVal = incomingAsset.metadata.url;
+                    if (!nextNormalizedUrlRecords.some((r) => r.normalized_url === urlVal && r.source === "httpx")) {
+                      nextNormalizedUrlRecords = [...nextNormalizedUrlRecords, {
+                        original_url: urlVal,
+                        normalized_url: urlVal,
+                        duplicate_removed: false,
+                        source: "httpx",
+                      }];
+                    }
+                  }
+
+                  const uniqueIps = new Set<string>();
+                  nextDnsRecords.forEach((r) => {
+                    (r.ipv4 || []).forEach((ip) => uniqueIps.add(ip));
+                    (r.ipv6 || []).forEach((ip) => uniqueIps.add(ip));
+                  });
+
+                  const vuln = nextTakeoverRecords.filter((r) => r.status.toLowerCase() === "vulnerable").length;
+                  const safe = nextTakeoverRecords.filter((r) => r.status.toLowerCase() === "not vulnerable").length;
+                  const unkn = nextTakeoverRecords.filter((r) => r.status.toLowerCase() === "unknown").length;
+
+                  const originalCount = nextNormalizedUrlRecords.filter(r => r.source === "katana" || r.source === "httpx").length;
+                  const normalisedCount = nextNormalizedUrlRecords.filter(r => r.source === "uro").length;
+
+                  return {
+                    ...prev,
+                    assets: nextAssets,
+                    subdomains: nextSubdomains,
+                    dnsRecords: nextDnsRecords,
+                    takeoverRecords: nextTakeoverRecords,
+                    normalizedUrlRecords: nextNormalizedUrlRecords,
+                    dnsx_resolved: nextDnsRecords.length || prev.dnsx_resolved,
+                    dnsx_unique_ips: uniqueIps.size,
+                    subzy_vulnerable: nextTakeoverRecords.length > 0 ? vuln : prev.subzy_vulnerable,
+                    subzy_not_vulnerable: nextTakeoverRecords.length > 0 ? safe : prev.subzy_not_vulnerable,
+                    subzy_unknown: nextTakeoverRecords.length > 0 ? unkn : prev.subzy_unknown,
+                    uro_input: originalCount || prev.uro_input,
+                    uro_normalised: normalisedCount || prev.uro_normalised,
+                    uro_removed: normalisedCount > 0 ? Math.max(0, (originalCount || prev.uro_input || 0) - normalisedCount) : prev.uro_removed,
+                    lastWsEventTime: Date.now(),
+                  };
+                });
+              }
+            } else if (data.type === "provider_stat") {
+              const { provider, count } = data;
+              setScanState((prev) => {
+                const nextProviderStatus = updateProviderStatus(prev.providerStatus, provider, "RUNNING");
+                return {
+                  ...prev,
+                  providerCounts: {
+                    ...prev.providerCounts,
+                    [provider]: count,
+                  },
+                  providerStatus: nextProviderStatus,
+                  lastWsEventTime: Date.now(),
+                };
+              });
+            } else if (data.type === "scan_summary") {
+              if (data.provider) {
+                setScanState((prev) => {
+                  const providerName = data.provider.toLowerCase();
+                  let nextStageData = transitionToStage(prev.stages, providerName);
+                  let nextProviderStatus = updateProviderStatus(prev.providerStatus, providerName, "COMPLETED");
                   
-                  // Update stats based on the updated lists
-                  setStats((prevStats) => updateStatsFromAssets(nextAssets, nextSubs, prevStats));
-                  return nextSubs;
+                  const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+                  const currentIdx = PIPELINE_ORDER.indexOf(providerName);
+                  if (currentIdx !== -1 && currentIdx < PIPELINE_ORDER.length - 1) {
+                    const nextStageName = PIPELINE_ORDER[currentIdx + 1];
+                    nextStageData = transitionToStage(nextStageData.stages, nextStageName);
+                    nextProviderStatus = updateProviderStatus(nextProviderStatus, nextStageName, "RUNNING");
+                  } else if (currentIdx === PIPELINE_ORDER.length - 1) {
+                    nextStageData = transitionToStage(nextStageData.stages, "completed");
+                  }
+
+                  let extraStats: Partial<ScanState> = {};
+                  if (data.provider === "DNSx") {
+                    extraStats = {
+                      dnsx_resolved: data.resolved ?? prev.dnsx_resolved,
+                      dnsx_nxdomain: data.nxdomain ?? prev.dnsx_nxdomain,
+                      dnsx_wildcards: data.wildcards_filtered ?? prev.dnsx_wildcards,
+                    };
+                  } else if (data.provider === "Subzy") {
+                    extraStats = {
+                      subzy_vulnerable: data.vulnerable ?? prev.subzy_vulnerable,
+                      subzy_not_vulnerable: data.not_vulnerable ?? prev.subzy_not_vulnerable,
+                      subzy_unknown: data.unknown ?? prev.subzy_unknown,
+                    };
+                  } else if (data.provider === "Uro") {
+                    extraStats = {
+                      uro_input: data.input_urls ?? prev.uro_input,
+                      uro_normalised: data.normalised_urls ?? prev.uro_normalised,
+                      uro_removed: data.removed ?? prev.uro_removed,
+                    };
+                  } else if (data.provider === "GF") {
+                    extraStats = {
+                      gf_total: data.urls_classified ?? prev.gf_total,
+                      gf_categories: data.matches_by_category
+                        ? { ...prev.gf_categories, ...data.matches_by_category }
+                        : prev.gf_categories,
+                    };
+                  }
+
+                  return {
+                    ...prev,
+                    stages: nextStageData.stages,
+                    currentStage: nextStageData.currentStage,
+                    providerStatus: nextProviderStatus,
+                    ...extraStats,
+                    lastWsEventTime: Date.now(),
+                  };
+                });
+              } else if (data.provider_counts || data.total_unique !== undefined) {
+                setScanState((prev) => {
+                  return {
+                    ...prev,
+                    dnsx_resolved: data.dnsx_resolved ?? prev.dnsx_resolved,
+                    dnsx_nxdomain: data.dnsx_nxdomain ?? prev.dnsx_nxdomain,
+                    dnsx_wildcards: data.dnsx_wildcards_filtered ?? prev.dnsx_wildcards,
+                    subzy_vulnerable: data.subzy_vulnerable ?? prev.subzy_vulnerable,
+                    uro_input: data.uro_normalised !== undefined ? (data.uro_normalised + (data.uro_removed ?? 0)) : prev.uro_input,
+                    uro_normalised: data.uro_normalised ?? prev.uro_normalised,
+                    uro_removed: data.uro_removed ?? prev.uro_removed,
+                    gf_total: data.gf_classified ?? prev.gf_total,
+                    lastWsEventTime: Date.now(),
+                  };
+                });
+              }
+            } else if (data.type === "status") {
+              if (data.status === "idle") {
+                setScanState(initialScanState);
+                isCleanClose = true;
+                if (ws) ws.close();
+              } else {
+                setScanState((prev) => {
+                  let nextStageData = { currentStage: prev.currentStage, stages: prev.stages };
+                  let nextProviderStatus = { ...prev.providerStatus };
+                  
+                  if (data.status === "completed" || data.status === "failed") {
+                    nextStageData = transitionToStage(prev.stages, "completed");
+                    const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+                    PIPELINE_ORDER.forEach((s) => {
+                      nextProviderStatus[s] = data.status === "completed" ? "COMPLETED" : "FAILED";
+                    });
+                    isCleanClose = true;
+                    if (ws) ws.close();
+                  } else if (data.status === "stopped") {
+                    nextStageData = { currentStage: "stopped", stages: prev.stages };
+                    isCleanClose = true;
+                    if (ws) ws.close();
+                  }
+                  
+                  return {
+                    ...prev,
+                    activeJobObject: prev.activeJobObject ? { ...prev.activeJobObject, status: data.status } : null,
+                    stages: nextStageData.stages,
+                    currentStage: nextStageData.currentStage,
+                    providerStatus: nextProviderStatus,
+                    lastWsEventTime: Date.now(),
+                  };
+                });
+                
+                if (fetchProjectDataRef.current) {
+                  fetchProjectDataRef.current();
+                }
+              }
+            } else if (data.type === "url_event") {
+              const urlDataPayload = data.data;
+              if (urlDataPayload) {
+                const urlItems = Array.isArray(urlDataPayload) ? urlDataPayload : [urlDataPayload];
+                setScanState((prev) => {
+                  let nextList = [...prev.normalizedUrlRecords];
+                  urlItems.forEach((item) => {
+                    const urlVal = item.url || item.normalized_url;
+                    if (urlVal) {
+                      if (!nextList.some((r) => r.normalized_url === urlVal && r.source === "uro")) {
+                        nextList.push({
+                          original_url: item.original_url || urlVal,
+                          normalized_url: urlVal,
+                          duplicate_removed: false,
+                          source: "uro",
+                        });
+                      }
+                    }
+                  });
+                  return {
+                    ...prev,
+                    normalizedUrlRecords: nextList,
+                    uro_normalised: nextList.filter(r => r.source === "uro").length,
+                    lastWsEventTime: Date.now(),
+                  };
+                });
+              }
+            } else if (data.type === "gf_event") {
+              const gfDataPayload = data.data;
+              if (gfDataPayload) {
+                const gfItems = Array.isArray(gfDataPayload) ? gfDataPayload : [gfDataPayload];
+                setScanState((prev) => {
+                  let nextList = [...prev.gfRecords];
+                  gfItems.forEach((item) => {
+                    const urlVal = item.url;
+                    if (urlVal) {
+                      const cats = Array.isArray(item.categories)
+                        ? item.categories
+                        : [item.category].filter(Boolean);
+                      
+                      cats.forEach((cat: string) => {
+                        const existing = nextList.find((r) => r.url === urlVal);
+                        if (existing) {
+                          if (!existing.categories.includes(cat)) {
+                            existing.categories = [...existing.categories, cat];
+                          }
+                        } else {
+                          nextList.push({
+                            url: urlVal,
+                            categories: [cat],
+                            source: item.source || "gf",
+                            classified_at: item.classified_at || Math.floor(Date.now() / 1000),
+                          });
+                        }
+                      });
+                    }
+                  });
+
+                  const gfCats: Record<string, number> = {};
+                  nextList.forEach((r) => {
+                    r.categories.forEach((cat) => {
+                      gfCats[cat] = (gfCats[cat] ?? 0) + 1;
+                    });
+                  });
+
+                  return {
+                    ...prev,
+                    gfRecords: nextList,
+                    gf_total: nextList.length,
+                    gf_categories: gfCats,
+                    lastWsEventTime: Date.now(),
+                  };
+                });
+              }
+            } else if (data.type === "log" && data.message) {
+              const msg = data.message;
+              const lowerMsg = msg.toLowerCase();
+              
+              setScanState((prev) => {
+                let nextStages = { ...prev.stages };
+                let nextProviderStatus = { ...prev.providerStatus };
+                let nextCurrentStage = prev.currentStage;
+                
+                const providersList = ["subfinder", "assetfinder", "amass", "chaos"];
+                providersList.forEach((p) => {
+                  if (lowerMsg.includes(p) && (lowerMsg.includes("completed") || lowerMsg.includes("finished"))) {
+                    nextProviderStatus = updateProviderStatus(nextProviderStatus, p, "COMPLETED");
+                  }
                 });
 
-                return nextAssets;
+                let detectedStage = "";
+                if (lowerMsg.includes("launching dnsx") || lowerMsg.includes("dnsx resolution") || (lowerMsg.includes("resolving") && lowerMsg.includes("subdomains"))) {
+                  detectedStage = "dnsx";
+                } else if (lowerMsg.includes("launching subzy") || lowerMsg.includes("subzy takeover")) {
+                  detectedStage = "subzy";
+                } else if (lowerMsg.includes("starting httpx") || lowerMsg.includes("launching httpx") || lowerMsg.includes("httpx probing")) {
+                  detectedStage = "httpx";
+                } else if (lowerMsg.includes("starting naabu") || lowerMsg.includes("launching naabu") || lowerMsg.includes("naabu port scan")) {
+                  detectedStage = "naabu";
+                } else if (lowerMsg.includes("starting katana") || lowerMsg.includes("launching katana") || lowerMsg.includes("katana web crawl") || lowerMsg.includes("starting crawl session")) {
+                  detectedStage = "katana";
+                } else if (lowerMsg.includes("launching uro") || lowerMsg.includes("uro url normalisation") || lowerMsg.includes("uro completed")) {
+                  detectedStage = "uro";
+                } else if (lowerMsg.includes("gf pattern") || lowerMsg.includes("gf classification") || (lowerMsg.includes("classifying") && lowerMsg.includes("urls"))) {
+                  detectedStage = "gf";
+                } else if (lowerMsg.includes("starting nuclei") || lowerMsg.includes("launching nuclei") || lowerMsg.includes("nuclei vuln scan")) {
+                  detectedStage = "nuclei";
+                }
+
+                if (detectedStage) {
+                  const transition = transitionToStage(nextStages, detectedStage);
+                  nextStages = transition.stages;
+                  nextCurrentStage = transition.currentStage;
+                  nextProviderStatus = updateProviderStatus(nextProviderStatus, detectedStage, "RUNNING");
+                }
+
+                let extraStats: Partial<ScanState> = {};
+                
+                const dnsxMatch = msg.match(/DNSx completed\.\s+Resolved:\s*(\d+)\s*\|\s*NXDOMAIN:\s*(\d+)\s*\|\s*Wildcards filtered:\s*(\d+)/i);
+                if (dnsxMatch) {
+                  extraStats.dnsx_resolved = parseInt(dnsxMatch[1]);
+                  extraStats.dnsx_nxdomain = parseInt(dnsxMatch[2]);
+                  extraStats.dnsx_wildcards = parseInt(dnsxMatch[3]);
+                  
+                  const transition = transitionToStage(nextStages, "subzy");
+                  nextStages = transition.stages;
+                  nextCurrentStage = transition.currentStage;
+                  nextProviderStatus = updateProviderStatus(nextProviderStatus, "dnsx", "COMPLETED");
+                  nextProviderStatus = updateProviderStatus(nextProviderStatus, "subzy", "RUNNING");
+                }
+
+                const subzyMatch = msg.match(/Subzy completed\.\s+Vulnerable:\s*(\d+)\s*\|\s*Not Vulnerable:\s*(\d+)\s*\|\s*Unknown:\s*(\d+)/i);
+                if (subzyMatch) {
+                  extraStats.subzy_vulnerable = parseInt(subzyMatch[1]);
+                  extraStats.subzy_not_vulnerable = parseInt(subzyMatch[2]);
+                  extraStats.subzy_unknown = parseInt(subzyMatch[3]);
+                  
+                  const transition = transitionToStage(nextStages, "naabu");
+                  nextStages = transition.stages;
+                  nextCurrentStage = transition.currentStage;
+                  nextProviderStatus = updateProviderStatus(nextProviderStatus, "subzy", "COMPLETED");
+                  nextProviderStatus = updateProviderStatus(nextProviderStatus, "naabu", "RUNNING");
+                }
+
+                const uroMatch = msg.match(/Uro completed\.\s+Input:\s*(\d+)\s*\|\s*Normalised:\s*(\d+)\s*\|\s*Removed:\s*(\d+)/i);
+                if (uroMatch) {
+                  extraStats.uro_input = parseInt(uroMatch[1]);
+                  extraStats.uro_normalised = parseInt(uroMatch[2]);
+                  extraStats.uro_removed = parseInt(uroMatch[3]);
+                  
+                  const transition = transitionToStage(nextStages, "gf");
+                  nextStages = transition.stages;
+                  nextCurrentStage = transition.currentStage;
+                  nextProviderStatus = updateProviderStatus(nextProviderStatus, "uro", "COMPLETED");
+                  nextProviderStatus = updateProviderStatus(nextProviderStatus, "gf", "RUNNING");
+                }
+
+                if (lowerMsg.includes("wildcard filtered:")) {
+                  extraStats.dnsx_wildcards = (prev.dnsx_wildcards ?? 0) + 1;
+                }
+
+                let nextTakeoverRecords = prev.takeoverRecords;
+                const subzyLineMatch = msg.match(/^\s*\[([!+?])\]\s+(\S+)\s+→\s+(\w[\w\s]*)/);
+                if (subzyLineMatch) {
+                  const subdomain = subzyLineMatch[2];
+                  const takeover_status = subzyLineMatch[3].trim();
+                  if (!nextTakeoverRecords.some((r) => r.subdomain === subdomain)) {
+                    nextTakeoverRecords = [...nextTakeoverRecords, {
+                      subdomain,
+                      provider: "subzy",
+                      status: takeover_status as any,
+                      last_checked: Math.floor(Date.now() / 1000),
+                    }];
+                    extraStats.subzy_vulnerable = nextTakeoverRecords.filter((r) => r.status.toLowerCase() === "vulnerable").length;
+                    extraStats.subzy_not_vulnerable = nextTakeoverRecords.filter((r) => r.status.toLowerCase() === "not vulnerable").length;
+                    extraStats.subzy_unknown = nextTakeoverRecords.filter((r) => r.status.toLowerCase() === "unknown").length;
+                  }
+                }
+
+                let nextGfRecords = prev.gfRecords;
+                const gfMatch = msg.match(/^\s*\[\+\]\s+(https?:\/\/\S+)\s+→\s+(.+)$/);
+                if (gfMatch) {
+                  const urlVal = gfMatch[1];
+                  const cats = gfMatch[2].split(",").map((c: string) => c.trim()).filter(Boolean);
+                  let changed = false;
+                  let temp = [...nextGfRecords];
+                  cats.forEach((cat: string) => {
+                    const existing = temp.find((r) => r.url === urlVal);
+                    if (existing) {
+                      if (!existing.categories.includes(cat)) {
+                        existing.categories = [...existing.categories, cat];
+                        changed = true;
+                      }
+                    } else {
+                      temp.push({
+                        url: urlVal,
+                        categories: [cat],
+                        source: "gf",
+                        classified_at: Math.floor(Date.now() / 1000),
+                      });
+                      changed = true;
+                    }
+                  });
+                  if (changed) {
+                    nextGfRecords = temp;
+                    const gfCats: Record<string, number> = {};
+                    nextGfRecords.forEach((r) => {
+                      r.categories.forEach((c) => {
+                        gfCats[c] = (gfCats[c] ?? 0) + 1;
+                      });
+                    });
+                    extraStats.gf_total = nextGfRecords.length;
+                    extraStats.gf_categories = gfCats;
+                  }
+                }
+
+                let nextNormalizedUrlRecords = prev.normalizedUrlRecords;
+                const katanaMatch = msg.match(/^\s*\[\+\] Discovered URL on [^:]+:\s*(https?:\/\/\S+)/);
+                if (katanaMatch) {
+                  const urlVal = katanaMatch[1];
+                  if (!nextNormalizedUrlRecords.some((r) => r.normalized_url === urlVal && r.source === "katana")) {
+                    nextNormalizedUrlRecords = [...nextNormalizedUrlRecords, {
+                      original_url: urlVal,
+                      normalized_url: urlVal,
+                      duplicate_removed: false,
+                      source: "katana",
+                    }];
+                    const originalCount = nextNormalizedUrlRecords.filter(r => r.source === "katana" || r.source === "httpx").length;
+                    extraStats.uro_input = originalCount;
+                  }
+                }
+
+                return {
+                  ...prev,
+                  stages: nextStages,
+                  providerStatus: nextProviderStatus,
+                  currentStage: nextCurrentStage,
+                  takeoverRecords: nextTakeoverRecords,
+                  gfRecords: nextGfRecords,
+                  normalizedUrlRecords: nextNormalizedUrlRecords,
+                  ...extraStats,
+                  lastWsEventTime: Date.now(),
+                };
               });
             }
-          } else if (data.type === "provider_stat") {
-            const { provider, count } = data;
-            setCompletedProviders((prev) => {
-              const next = new Set(prev);
-              next.add(provider);
-              return next;
-            });
-            setStats((prevStats) => ({
-              ...prevStats,
-              provider_counts: {
-                ...prevStats.provider_counts,
-                [provider]: count,
-              },
-            }));
-          } else if (data.type === "scan_summary") {
-            if (data.provider) {
-              if (data.provider === "Httpx") {
-                setCurrentPhase("naabu");
-              } else if (data.provider === "Naabu") {
-                setCurrentPhase("katana");
-              } else if (data.provider === "Katana") {
-                setCurrentPhase("nuclei");
-              } else if (data.provider === "Nuclei") {
-                setCurrentPhase("completed");
-              }
-            } else if (data.provider_counts || data.total_unique !== undefined) {
-              setStats((prevStats) => ({
-                ...prevStats,
-                total_assets: data.total_unique !== undefined ? data.total_unique : prevStats.total_assets,
-                total_subdomains: data.total_unique !== undefined ? data.total_unique : prevStats.total_subdomains,
-                live_hosts: data.live_hosts !== undefined ? data.live_hosts : prevStats.live_hosts,
-                provider_counts: data.provider_counts ? {
-                  subfinder: data.provider_counts.subfinder,
-                  assetfinder: data.provider_counts.assetfinder,
-                  amass: data.provider_counts.amass,
-                  chaos: data.provider_counts.chaos,
-                } : prevStats.provider_counts,
-              }));
-            }
-          } else if (data.type === "status") {
-            if (data.status === "idle") {
-              setActiveJob(null);
-              setAssets([]);
-              setSubdomains([]);
-              setStats(defaultStats);
-              setCompletedProviders(new Set());
-              setCurrentPhase("waiting");
-              isCleanClose = true;
-              if (ws) ws.close();
-            } else {
-              setActiveJob((prev: any) => prev ? { ...prev, status: data.status } : null);
-              if (data.status === "completed" || data.status === "failed") {
-                setCurrentPhase("completed");
-                isCleanClose = true;
-                if (ws) ws.close();
-              } else if (data.status === "stopped") {
-                setCurrentPhase("stopped");
-                isCleanClose = true;
-                if (ws) ws.close();
-              }
-              if (fetchProjectDataRef.current) {
-                fetchProjectDataRef.current();
-              }
-            }
-          } else if (data.type === "log" && data.message) {
-            const msg = data.message;
-            const lowerMsg = msg.toLowerCase();
-            
-            // Reconstruct completed providers from logs
-            const providersList = ["subfinder", "assetfinder", "amass", "chaos"];
-            providersList.forEach((p) => {
-              if (lowerMsg.includes(p) && (lowerMsg.includes("completed") || lowerMsg.includes("finished"))) {
-                setCompletedProviders((prev) => {
-                  const next = new Set(prev);
-                  next.add(p);
-                  return next;
-                });
-              }
-            });
-
-            // Determine phase progression from logs
-            if (lowerMsg.includes("starting httpx") || lowerMsg.includes("launching httpx") || lowerMsg.includes("httpx probing")) {
-              setCurrentPhase("httpx");
-            } else if (lowerMsg.includes("starting naabu") || lowerMsg.includes("launching naabu") || lowerMsg.includes("naabu port scan")) {
-              setCurrentPhase("naabu");
-            } else if (lowerMsg.includes("starting katana") || lowerMsg.includes("launching katana") || lowerMsg.includes("katana web crawl") || lowerMsg.includes("starting crawl session")) {
-              setCurrentPhase("katana");
-            } else if (lowerMsg.includes("starting nuclei") || lowerMsg.includes("launching nuclei") || lowerMsg.includes("nuclei vuln scan")) {
-              setCurrentPhase("nuclei");
-            }
-          }
+          });
         } catch (err) {
           console.error("Dashboard WS parse error", err);
         }
@@ -425,14 +1126,12 @@ const MainDashboard: React.FC = () => {
           console.log("Current websocket count:", wsCount);
         }
 
-        // Only reconnect if it's not a clean close (job ended / manual stop) or explicit request
         const wsInstCleanClose = (event.target as any).isCleanClose || isCleanClose;
         if (!wsInstCleanClose) {
           console.log("WebSocket reconnect", { jobId, delay: reconnectDelay });
           reconnectTimeout = setTimeout(() => {
             reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
             isClosed = false;
-            // Fetch project data upon reconnecting to catch up on missed state changes
             if (fetchProjectDataRef.current) {
               fetchProjectDataRef.current();
             }
@@ -543,6 +1242,8 @@ const MainDashboard: React.FC = () => {
                 onResumeScan={handleResumeScan}
                 onStopScan={handleStopScan}
                 onResetScan={handleResetScan}
+                stages={stages}
+                providerStatus={providerStatus}
               />
             )}
 
@@ -551,7 +1252,14 @@ const MainDashboard: React.FC = () => {
             )}
 
             {activeTab === "inventory" && (
-              <AssetTable assets={assets} projectName={activeProject?.name} />
+              <AssetTable
+                assets={assets}
+                projectName={activeProject?.name}
+                dnsRecords={dnsRecords}
+                takeoverRecords={takeoverRecords}
+                normalizedUrlRecords={normalizedUrlRecords}
+                gfRecords={gfRecords}
+              />
             )}
 
             {activeTab === "visualizer" && (
@@ -570,7 +1278,7 @@ const MainDashboard: React.FC = () => {
                 subdomainNames={subdomains.map((s: any) => (typeof s === "string" ? s : s?.domain)).filter(Boolean)}
                 providerStats={stats.provider_counts as Record<string, number> ?? {}}
                 completedProviders={completedProviders}
-                onClose={() => setActiveJob(null)}
+                onClose={() => setScanState((prev) => ({ ...prev, activeJobObject: null }))}
               />
             </div>
           )}

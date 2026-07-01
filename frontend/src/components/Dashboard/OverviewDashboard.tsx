@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { StatCard } from "./StatCard";
+import { DnsxCard } from "./DnsxCard";
+import { SubzyCard } from "./SubzyCard";
+import { UroCard } from "./UroCard";
+import { GfCard } from "./GfCard";
+import type { GfCategoryStats } from "./GfCard";
 import { Globe, Server, Radio, ShieldAlert, Play, Pause, Square, RotateCcw, RefreshCw, FileText, Link, AlertCircle } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from "recharts";
 import { apiCall } from "../../services/api";
@@ -18,6 +23,21 @@ interface DashboardStats {
     amass?: number;
     chaos?: number;
   };
+  // new provider counters
+  dnsx_resolved?: number;
+  dnsx_nxdomain?: number;
+  dnsx_wildcards?: number;
+  dnsx_unique_ips?: number;
+  subzy_vulnerable?: number;
+  subzy_not_vulnerable?: number;
+  subzy_unknown?: number;
+  uro_input?: number;
+  uro_normalised?: number;
+  uro_removed?: number;
+  gf_categories?: Partial<GfCategoryStats>;
+  gf_total?: number;
+  normalized_urls_count?: number;
+  gf_urls_count?: number;
 }
 
 interface Project {
@@ -78,6 +98,8 @@ interface OverviewDashboardProps {
   onResumeScan?: () => void;
   onStopScan?: () => void;
   onResetScan?: () => void;
+  stages?: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
+  providerStatus?: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
 }
 
 const COLORS = ["#3B82F6", "#06B6D4", "#10B981", "#F59E0B", "#EF4444"];
@@ -97,12 +119,13 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   onLaunchScan,
   onRefresh,
   activeJob = null,
-  completedProviders = new Set(),
   currentPhase = "waiting",
   onPauseScan,
   onResumeScan,
   onStopScan,
   onResetScan,
+  stages = {},
+  providerStatus = {},
 }) => {
   const [selectedProvider, setSelectedProvider] = useState("Unified Discovery");
   const [providers, setProviders] = useState<string[]>(FALLBACK_PROVIDERS);
@@ -137,47 +160,29 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     };
   }, []);
 
+
+
   const getPhaseText = (phaseName: string, phaseLabel: string) => {
-    const isCurrent = currentPhase === phaseName;
-    const isPast = !isCurrent && (
-      phaseName === "discovery" ? currentPhase !== "waiting" :
-      phaseName === "httpx" ? !["waiting", "discovery"].includes(currentPhase || "") :
-      phaseName === "naabu" ? !["waiting", "discovery", "httpx"].includes(currentPhase || "") :
-      phaseName === "katana" ? !["waiting", "discovery", "httpx", "naabu"].includes(currentPhase || "") :
-      phaseName === "nuclei" ? currentPhase === "completed" : false
-    );
-    
-    if (isPast) return `${phaseLabel} ✓`;
-    if (isCurrent) {
+    const status = stages[phaseName] || "PENDING";
+    if (status === "COMPLETED") return `${phaseLabel} ✓`;
+    if (status === "RUNNING") {
       if (activeJob?.status === "paused") return `${phaseLabel} (Paused)`;
       if (activeJob?.status === "stopped") return `${phaseLabel} (Stopped)`;
       return `${phaseLabel} ⟳ Running`;
     }
+    if (status === "FAILED") return `${phaseLabel} ✕ Failed`;
     return phaseLabel === "Discovery" ? "Discovery Waiting" : phaseLabel;
   };
 
   const getPhaseClass = (phaseName: string) => {
-    const isCurrent = currentPhase === phaseName;
-    const isPast = !isCurrent && (
-      phaseName === "discovery" ? currentPhase !== "waiting" :
-      phaseName === "httpx" ? !["waiting", "discovery"].includes(currentPhase || "") :
-      phaseName === "naabu" ? !["waiting", "discovery", "httpx"].includes(currentPhase || "") :
-      phaseName === "katana" ? !["waiting", "discovery", "httpx", "naabu"].includes(currentPhase || "") :
-      phaseName === "nuclei" ? currentPhase === "completed" : false
-    );
-
-    if (isCurrent) {
-      if (activeJob?.status === "paused") {
-        return "bg-cyber-warning/20 border border-cyber-warning/50 text-cyber-warning font-bold";
-      }
-      if (activeJob?.status === "stopped") {
-        return "bg-cyber-danger/20 border border-cyber-danger/50 text-cyber-danger font-bold";
-      }
+    const status = stages[phaseName] || "PENDING";
+    if (status === "RUNNING") {
+      if (activeJob?.status === "paused") return "bg-cyber-warning/20 border border-cyber-warning/50 text-cyber-warning font-bold";
+      if (activeJob?.status === "stopped") return "bg-cyber-danger/20 border border-cyber-danger/50 text-cyber-danger font-bold";
       return "bg-cyber-accent/20 border border-cyber-accent/50 text-cyber-accent animate-pulse font-bold";
     }
-    if (isPast) {
-      return "bg-cyber-success/10 border border-cyber-success/30 text-cyber-success";
-    }
+    if (status === "COMPLETED") return "bg-cyber-success/10 border border-cyber-success/30 text-cyber-success";
+    if (status === "FAILED") return "bg-cyber-danger/20 border border-cyber-danger/50 text-cyber-danger font-bold";
     return "text-slate-500 border border-transparent";
   };
 
@@ -204,32 +209,14 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   const [showExportDropdown, setShowExportDropdown] = useState(false);
 
   const getProviderStatus = (tool: string): "waiting" | "running" | "completed" | "failed" | "paused" | "stopped" => {
-    const PROVIDER_ORDER = ["subfinder", "assetfinder", "amass", "chaos"];
-    const jobStatus = activeJob?.status;
-    
-    if (!activeJob || jobStatus === "completed" || jobStatus === "failed") {
-      if (completedProviders.has(tool) || jobStatus === "completed") return "completed";
-      if (jobStatus === "failed") return "failed";
-      return "waiting";
+    const status = providerStatus[tool.toLowerCase()] || "PENDING";
+    if (status === "COMPLETED") return "completed";
+    if (status === "FAILED") return "failed";
+    if (status === "RUNNING") {
+      if (activeJob?.status === "paused") return "paused";
+      if (activeJob?.status === "stopped") return "stopped";
+      return "running";
     }
-
-    if (jobStatus === "pending") {
-      return "waiting";
-    }
-
-    if (completedProviders.has(tool)) {
-      return "completed";
-    }
-
-    if (jobStatus === "stopped") {
-      return "stopped";
-    }
-
-    const firstActive = PROVIDER_ORDER.find(t => !completedProviders.has(t));
-    if (tool === firstActive) {
-      return jobStatus === "paused" ? "paused" : "running";
-    }
-
     return "waiting";
   };
 
@@ -403,41 +390,25 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                 </span>
               </span>
             </div>
-            <div className="flex flex-wrap items-center justify-center gap-2 text-xs font-mono">
-              {/* Discovery Phase */}
-              <div className="flex items-center gap-1.5">
-                <span className={`px-2 py-0.5 rounded ${getPhaseClass("discovery")}`}>
-                  {getPhaseText("discovery", "Discovery")}
-                </span>
-              </div>
-              <span className="text-slate-600">──&gt;</span>
-              {/* HTTPX Phase */}
-              <div className="flex items-center gap-1.5">
-                <span className={`px-2 py-0.5 rounded ${getPhaseClass("httpx")}`}>
-                  {getPhaseText("httpx", "HTTPX")}
-                </span>
-              </div>
-              <span className="text-slate-600">──&gt;</span>
-              {/* Naabu Phase */}
-              <div className="flex items-center gap-1.5">
-                <span className={`px-2 py-0.5 rounded ${getPhaseClass("naabu")}`}>
-                  {getPhaseText("naabu", "Naabu")}
-                </span>
-              </div>
-              <span className="text-slate-600">──&gt;</span>
-              {/* Katana Phase */}
-              <div className="flex items-center gap-1.5">
-                <span className={`px-2 py-0.5 rounded ${getPhaseClass("katana")}`}>
-                  {getPhaseText("katana", "Katana")}
-                </span>
-              </div>
-              <span className="text-slate-600">──&gt;</span>
-              {/* Nuclei Phase */}
-              <div className="flex items-center gap-1.5">
-                <span className={`px-2 py-0.5 rounded ${getPhaseClass("nuclei")}`}>
-                  {getPhaseText("nuclei", "Nuclei")}
-                </span>
-              </div>
+            <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
+              {([
+                ["discovery", "Passive"],
+                ["dnsx",      "DNSx"],
+                ["subzy",     "Subzy"],
+                ["naabu",     "Naabu"],
+                ["httpx",     "HTTPX"],
+                ["katana",    "Katana"],
+                ["uro",       "Uro"],
+                ["gf",        "GF"],
+                ["nuclei",    "Nuclei"],
+              ] as [string, string][]).map(([phase, label], i, arr) => (
+                <React.Fragment key={phase}>
+                  <span className={`px-2 py-0.5 rounded ${getPhaseClass(phase)}`}>
+                    {getPhaseText(phase, label)}
+                  </span>
+                  {i < arr.length - 1 && <span className="text-slate-700">{"\u2192"}</span>}
+                </React.Fragment>
+              ))}
             </div>
           </div>
         </div>
@@ -521,6 +492,55 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
         </div>
       )}
 
+      {/* New Provider Cards (DNSx, Subzy, Uro, GF) — shown when data exists or job running */}
+      {(activeJob || stats.dnsx_resolved !== undefined || stats.subzy_vulnerable !== undefined ||
+        stats.uro_normalised !== undefined || stats.gf_total !== undefined) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          <DnsxCard
+            stats={{
+              resolved: stats.dnsx_resolved ?? 0,
+              unique_ips: stats.dnsx_unique_ips ?? 0,
+              wildcard_filtered: stats.dnsx_wildcards ?? 0,
+              nxdomain: stats.dnsx_nxdomain ?? 0,
+            }}
+            isRunning={activeJob?.status === "running" && currentPhase === "dnsx"}
+          />
+          <SubzyCard
+            stats={{
+              vulnerable: stats.subzy_vulnerable ?? 0,
+              not_vulnerable: stats.subzy_not_vulnerable ?? 0,
+              unknown: stats.subzy_unknown ?? 0,
+            }}
+            isRunning={activeJob?.status === "running" && currentPhase === "subzy"}
+          />
+          <UroCard
+            stats={{
+              input_urls: stats.uro_input ?? 0,
+              normalised_urls: stats.uro_normalised ?? 0,
+              removed: stats.uro_removed ?? 0,
+            }}
+            isRunning={activeJob?.status === "running" && currentPhase === "uro"}
+          />
+          <GfCard
+            stats={{
+              xss:      stats.gf_categories?.xss ?? 0,
+              sqli:     stats.gf_categories?.sqli ?? 0,
+              ssrf:     stats.gf_categories?.ssrf ?? 0,
+              redirect: stats.gf_categories?.redirect ?? 0,
+              lfi:      stats.gf_categories?.lfi ?? 0,
+              rce:      stats.gf_categories?.rce ?? 0,
+              idor:     stats.gf_categories?.idor ?? 0,
+              ssti:     stats.gf_categories?.ssti ?? 0,
+              debug:    stats.gf_categories?.debug ?? 0,
+              upload:   stats.gf_categories?.upload ?? 0,
+              aws:      stats.gf_categories?.aws ?? 0,
+              graphql:  stats.gf_categories?.graphql ?? 0,
+            }}
+            isRunning={activeJob?.status === "running" && currentPhase === "gf"}
+          />
+        </div>
+      )}
+
       {/* Vulnerability Summary Card */}
       <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">
         <h4 className="text-xs font-mono text-slate-400 uppercase tracking-wider mb-4 border-b border-dark-border pb-2">
@@ -579,7 +599,40 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
               </div>
 
               <div>
-                <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest block mb-1">LAST SCAN OPERATION</span>
+                <div>
+                <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest block mb-2">PIPELINE STATS</span>
+                <div className="space-y-1">
+                  {stats.dnsx_resolved !== undefined && (
+                    <div className="flex justify-between text-xs font-mono">
+                      <span className="text-slate-500">DNSx Resolved</span>
+                      <span className="text-cyber-accent">{stats.dnsx_resolved}</span>
+                    </div>
+                  )}
+                  {stats.subzy_vulnerable !== undefined && stats.subzy_vulnerable > 0 && (
+                    <div className="flex justify-between text-xs font-mono">
+                      <span className="text-slate-500">Takeovers Found</span>
+                      <span className="text-cyber-danger font-bold">{stats.subzy_vulnerable}</span>
+                    </div>
+                  )}
+                  {stats.uro_normalised !== undefined && (
+                    <div className="flex justify-between text-xs font-mono">
+                      <span className="text-slate-500">Normalized URLs</span>
+                      <span className="text-cyber-primary">{stats.uro_normalised}</span>
+                    </div>
+                  )}
+                  {stats.gf_total !== undefined && stats.gf_total > 0 && (
+                    <div className="flex justify-between text-xs font-mono">
+                      <span className="text-slate-500">Interesting Endpoints</span>
+                      <span className="text-cyber-warning">{stats.gf_total}</span>
+                    </div>
+                  )}
+                  {stats.dnsx_resolved === undefined && stats.uro_normalised === undefined && (
+                    <span className="text-slate-600 text-[10px] font-mono uppercase tracking-wider">Run a full scan to see pipeline stats</span>
+                  )}
+                </div>
+              </div>
+
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest block mb-1">LAST SCAN OPERATION</span>
                 <span className="text-slate-300 text-xs font-mono">
                   {stats.last_scan_time ? new Date(stats.last_scan_time).toLocaleString() : "Never Scanned"}
                 </span>

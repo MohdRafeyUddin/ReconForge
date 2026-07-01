@@ -94,27 +94,22 @@ class GfProvider(BaseProvider):
     async def _run_pattern(
         self,
         pattern: str,
-        list_path: str,
-        is_windows: bool,
+        temp_path: str,
+        resolved_cmd: List[str],
     ) -> List[str]:
         """Run gf for a single pattern and return matched URLs.
 
         Returns an empty list if gf exits non-zero or the pattern file is
         missing (gf silently exits 1 when the pattern does not exist).
         """
-        executable = "wsl" if is_windows else "gf"
-        gf_bin = "/home/kali/go/bin/gf"
-        args = [gf_bin] if is_windows else []
-        # gf reads input from a file via stdin redirect or can accept piped input
-        # Use: cat file | gf <pattern>
-        # We open the file and pipe it via stdin instead of shell=True for safety.
-        cmd = [executable, *args, pattern]
+        cmd = [*resolved_cmd, pattern]
 
         try:
             from app.job_control import check_job_status
             await check_job_status()
 
-            with open(list_path, "r", encoding="utf-8", errors="replace") as fh:
+            # Open temp_path (which is the local host path) to feed via stdin
+            with open(temp_path, "r", encoding="utf-8", errors="replace") as fh:
                 process = subprocess.Popen(
                     cmd,
                     stdin=fh,
@@ -176,6 +171,8 @@ class GfProvider(BaseProvider):
             return
 
         is_windows = platform.system().lower() == "windows"
+        resolved_cmd = ["wsl", "/home/kali/go/bin/gf"] if is_windows else ["/home/kali/go/bin/gf"]
+
         temp_path = ""
         start_ts = time.time()
 
@@ -196,10 +193,6 @@ class GfProvider(BaseProvider):
                 target_file.write("\n")
                 temp_path = target_file.name
 
-            list_path = (
-                self._windows_path_to_wsl(temp_path) if is_windows else temp_path
-            )
-
             for pattern in GF_PATTERNS:
                 category = PATTERN_TO_CATEGORY.get(pattern, pattern)
 
@@ -210,7 +203,7 @@ class GfProvider(BaseProvider):
                 logger.info(pattern_msg)
                 yield {"type": "log", "message": pattern_msg}
 
-                matched = await self._run_pattern(pattern, list_path, is_windows)
+                matched = await self._run_pattern(pattern, temp_path, resolved_cmd)
                 matches_by_category[category] = len(matched)
 
                 for url in matched:

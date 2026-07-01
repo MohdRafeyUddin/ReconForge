@@ -179,6 +179,7 @@ class DnsxProvider(BaseProvider):
                 self._windows_path_to_wsl(temp_path) if is_windows else temp_path
             )
 
+            # Construct command
             dnsx_bin = "/home/kali/go/bin/dnsx"
             args = [dnsx_bin] if is_windows else []
             dnsx_flags = [

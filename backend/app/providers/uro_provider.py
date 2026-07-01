@@ -89,12 +89,12 @@ class UroProvider(BaseProvider):
             return
 
         is_windows = platform.system().lower() == "windows"
-        # uro is a Python CLI tool; invoke as 'python -m uro' or direct 'uro'
-        executable = "wsl" if is_windows else "uro"
+        resolved_cmd = ["wsl", "/home/kali/.local/bin/uro"] if is_windows else ["/home/kali/.local/bin/uro"]
+
         temp_path = ""
         start_ts = time.time()
-
         normalised_urls: List[str] = []
+        self.last_run_status = "success"
 
         try:
             # Write raw URLs to a temp file and feed via stdin / -i flag
@@ -113,10 +113,8 @@ class UroProvider(BaseProvider):
                 self._windows_path_to_wsl(temp_path) if is_windows else temp_path
             )
 
-            if is_windows:
-                cmd = [executable, "uro", "-i", list_path]
-            else:
-                cmd = [executable, "-i", list_path]
+            # Construct command
+            cmd = [*resolved_cmd, "-i", list_path]
 
             exec_msg = f"[*] Executing command: {' '.join(cmd)}"
             logger.info(exec_msg)
@@ -152,7 +150,7 @@ class UroProvider(BaseProvider):
                         "type": "url_event",
                         "data": {
                             "url": normalised,
-                            "original_url": normalised,   # uro output is already normalised
+                            "original_url": normalised,
                             "source": "uro",
                             "normalised": True,
                         },
@@ -176,7 +174,15 @@ class UroProvider(BaseProvider):
                 logger.warning("[uro stderr] %s", stderr_out.strip())
                 yield {"type": "log", "message": f"[uro stderr] {stderr_out.strip()}"}
 
+            exit_code = process.wait()
+            if exit_code != 0:
+                self.last_run_status = f"non_zero_exit_code_{exit_code}"
+                msg = f"[-] Uro exited with non-zero code: {exit_code}"
+                logger.error(msg)
+                yield {"type": "log", "message": msg}
+
         except Exception as exc:
+            self.last_run_status = "failed"
             logger.exception("[-] UroProvider failed: %s", exc)
             yield {"type": "log", "message": f"[-] UroProvider failed: {exc}"}
 
@@ -186,6 +192,9 @@ class UroProvider(BaseProvider):
                     os.unlink(temp_path)
                 except OSError:
                     logger.warning("Failed to remove Uro input file: %s", temp_path)
+
+        if self.last_run_status == "success" and not normalised_urls:
+            self.last_run_status = "zero_urls"
 
         removed = len(raw_urls) - len(normalised_urls)
         duration_s = int(time.time() - start_ts)

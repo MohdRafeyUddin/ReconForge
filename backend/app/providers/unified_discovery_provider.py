@@ -437,10 +437,21 @@ class UnifiedDiscoveryProvider(BaseProvider):
 
         # If Uro produced no output (not installed), fall back to raw Katana URLs
         if not uro_normalised_urls and all_katana_urls:
-            logger.warning("[*] Uro returned no output; falling back to raw Katana URLs.")
+            reason = getattr(uro_provider, "last_run_status", "unknown")
+            if reason == "executable_not_found":
+                reason_str = "Uro executable not found"
+            elif reason == "zero_urls":
+                reason_str = "Uro returned zero URLs"
+            elif reason.startswith("non_zero_exit_code_"):
+                code = reason.replace("non_zero_exit_code_", "")
+                reason_str = f"Uro exited with non-zero code: {code}"
+            else:
+                reason_str = f"Uro failed with status: {reason}"
+
+            logger.warning("[*] Uro yielded no normalised URLs (%s); falling back to raw Katana URLs.", reason_str)
             yield {
                 "type": "log",
-                "message": "[*] Uro returned no output. Using raw Katana URLs for GF and Nuclei.",
+                "message": f"[*] Uro yielded no normalised URLs ({reason_str}). Using raw Katana URLs for GF and Nuclei.",
             }
             uro_normalised_urls = list(dict.fromkeys(all_katana_urls))
 

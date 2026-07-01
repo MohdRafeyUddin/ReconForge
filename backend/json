@@ -1,0 +1,30 @@
+[
+  {
+    "subdomain": "mx.target.org",
+    "status": "http error",
+    "engine": "",
+    "documentation": "",
+    "discussion": "",
+    "cicd_pass": false,
+    "cname": null,
+    "fingerprint": "",
+    "http_status": null,
+    "nxdomain": false,
+    "service": "",
+    "vulnerable": false
+  },
+  {
+    "subdomain": "target.org",
+    "status": "not vulnerable",
+    "engine": "",
+    "documentation": "",
+    "discussion": "",
+    "cicd_pass": false,
+    "cname": null,
+    "fingerprint": "",
+    "http_status": null,
+    "nxdomain": false,
+    "service": "",
+    "vulnerable": false
+  }
+]
