@@ -5,7 +5,7 @@ import { SubzyCard } from "./SubzyCard";
 import { UroCard } from "./UroCard";
 import { GfCard } from "./GfCard";
 import type { GfCategoryStats } from "./GfCard";
-import { Globe, Server, Radio, ShieldAlert, Play, Pause, Square, RotateCcw, RefreshCw, FileText, Link, AlertCircle } from "lucide-react";
+import { Globe, Server, Radio, ShieldAlert, Play, Pause, Square, RotateCcw, RefreshCw, FileText, Link, AlertCircle, CheckCircle } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from "recharts";
 import { apiCall } from "../../services/api";
 
@@ -402,6 +402,9 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
 
   const totalUrlsDiscovered = assets.reduce(
     (total, asset) => total + (
+      // Flat URL list stored by Katana provider
+      (asset.metadata?.katana?.urls?.length || 0) +
+      // Structured sub-keys stored by some katana versions
       (asset.metadata?.katana?.endpoints?.length || 0) +
       (asset.metadata?.katana?.js_files?.length || 0) +
       (asset.metadata?.katana?.forms?.length || 0) +
@@ -495,7 +498,9 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
         <div className="flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
             {activeJob ? (
-              activeJob.status === "paused" ? (
+              activeJob.status === "completed" ? (
+                <CheckCircle className="w-4 h-4 text-cyber-success" />
+              ) : activeJob.status === "paused" ? (
                 <Pause className="w-4 h-4 text-cyber-warning animate-pulse" />
               ) : activeJob.status === "stopped" ? (
                 <Square className="w-4 h-4 text-cyber-danger fill-current" />

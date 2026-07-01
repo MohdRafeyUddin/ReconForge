@@ -1,6 +1,6 @@
 [
   {
-    "subdomain": "testhp.vulnweb.com",
+    "subdomain": "www.scanme.nmap.org",
     "status": "http error",
     "engine": "",
     "documentation": "",
@@ -14,36 +14,8 @@
     "vulnerable": false
   },
   {
-    "subdomain": "localhost.vulnweb.com",
+    "subdomain": "nmap.scanme.nmap.org",
     "status": "http error",
-    "engine": "",
-    "documentation": "",
-    "discussion": "",
-    "cicd_pass": false,
-    "cname": null,
-    "fingerprint": "",
-    "http_status": null,
-    "nxdomain": false,
-    "service": "",
-    "vulnerable": false
-  },
-  {
-    "subdomain": "rest.vulnweb.com",
-    "status": "not vulnerable",
-    "engine": "",
-    "documentation": "",
-    "discussion": "",
-    "cicd_pass": false,
-    "cname": null,
-    "fingerprint": "",
-    "http_status": null,
-    "nxdomain": false,
-    "service": "",
-    "vulnerable": false
-  },
-  {
-    "subdomain": "testasp.vulnweb.com",
-    "status": "not vulnerable",
     "engine": "",
     "documentation": "",
     "discussion": "",

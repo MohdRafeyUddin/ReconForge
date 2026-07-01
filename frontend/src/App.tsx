@@ -278,6 +278,10 @@ const MainDashboard: React.FC = () => {
   const activeProjectRef = useRef<Project | null>(null);
   const jobIdRef = useRef<string | null>(null);
 
+  // Keep refs synchronised every render so closure-captured values are fresh.
+  activeProjectRef.current = activeProject;
+  jobIdRef.current = scanState.jobId;
+
   useEffect(() => {
     activeProjectRef.current = activeProject;
   }, [activeProject]);
@@ -402,7 +406,13 @@ const MainDashboard: React.FC = () => {
     last_scan_duration: lastScanDuration || undefined,
     ports_distribution,
     sources_distribution,
-    provider_counts: scanState.providerCounts,
+    // Merge nuclei count into provider_counts so Nuclei Yield card shows correctly.
+    provider_counts: {
+      ...scanState.providerCounts,
+      nuclei: scanState.assets.reduce(
+        (t: number, a: any) => t + (a.metadata?.nuclei?.findings?.length ?? 0), 0
+      ),
+    },
     
     dnsx_resolved: scanState.dnsx_resolved ?? undefined,
     dnsx_nxdomain: scanState.dnsx_nxdomain ?? undefined,
@@ -471,7 +481,7 @@ const MainDashboard: React.FC = () => {
       let uro_normalised = 0;
       let uro_removed = 0;
 
-      jobsList.forEach((job: any) => {
+      [...jobsList].reverse().forEach((job: any) => {
         if (Array.isArray(job.logs)) {
           job.logs.forEach((log: string) => {
             const dnsxMatch = log.match(/DNSx completed\.\s+Resolved:\s*(\d+)\s*\|\s*NXDOMAIN:\s*(\d+)\s*\|\s*Wildcards filtered:\s*(\d+)/i);
@@ -629,11 +639,13 @@ const MainDashboard: React.FC = () => {
           return prev;
         }
 
-        const isWsActive = prev.jobId && (Date.now() - prev.lastWsEventTime < 10000);
+        // isWsActive: only suppress stage/provider-status re-computation if WS is
+        // actively streaming events. Asset data is ALWAYS refreshed from server.
+        const isWsActive = prev.jobId && (Date.now() - prev.lastWsEventTime < 8000);
         
-        let nextStages = isWsActive ? prev.stages : { ...prev.stages };
-        let nextProviderStatus = isWsActive ? prev.providerStatus : { ...prev.providerStatus };
-        let nextCurrentStage = isWsActive ? prev.currentStage : prev.currentStage;
+        let nextStages = { ...prev.stages };
+        let nextProviderStatus = { ...prev.providerStatus };
+        let nextCurrentStage = prev.currentStage;
 
         if (!isWsActive && activeJobFromServer) {
           if (activeJobFromServer.status === "completed") {
@@ -703,11 +715,22 @@ const MainDashboard: React.FC = () => {
 
         const nextProviderCounts = { ...prev.providerCounts, ...dashboardStats.provider_counts };
 
+        // Merge nuclei findings from restored assetList so counts survive page reload.
+        const nucleiCountFromAssets = assetList.reduce(
+          (t: number, a: any) => t + (a.metadata?.nuclei?.findings?.length ?? 0), 0
+        );
+        if (nucleiCountFromAssets > 0) {
+          nextProviderCounts["nuclei"] = nucleiCountFromAssets;
+        }
+
         return {
           ...prev,
+          // Always use server job list to determine active job so the UI
+          // reflects the real job status even after WS close.
           jobId: activeJobFromServer && ["running", "pending", "paused", "stopped"].includes(activeJobFromServer.status) ? activeJobFromServer.id : null,
           activeJobObject: activeJobFromServer || null,
           lastCompletedJobObject: lastCompletedJobFromServer,
+          // Always restore full asset+subdomain list from server — findings live inside asset metadata.
           assets: assetList,
           subdomains: subdomainList,
           dnsRecords: dns,
@@ -750,6 +773,9 @@ const MainDashboard: React.FC = () => {
   }, [fetchProjectData]);
 
   useEffect(() => {
+    // Synchronously reset state and ref so stale-checks in fetchProjectData
+    // immediately see the new project id — not the old one.
+    activeProjectRef.current = activeProject;
     setScanState(initialScanState);
     setIsReconnect(false);
     setActiveTab("dashboard");
@@ -846,7 +872,12 @@ const MainDashboard: React.FC = () => {
     }
   };
 
-  const jobId = activeJob && ["running", "pending", "paused", "stopped"].includes(activeJob.status) ? activeJob.id : null;
+  // Open a WebSocket only while the job is genuinely active.  The 800ms-delayed
+  // fetchProjectData call in the status:completed handler covers the completion race
+  // without needing to keep the socket alive for already-finished jobs.
+  const jobId = activeJob && ["running", "pending", "paused", "stopped"].includes(activeJob.status)
+    ? activeJob.id
+    : null;
 
   useEffect(() => {
     if (!jobId || !activeProject) return;
@@ -1140,6 +1171,17 @@ const MainDashboard: React.FC = () => {
                         ? { ...prev.gf_categories, ...data.matches_by_category }
                         : prev.gf_categories,
                     };
+                  } else if (data.provider === "Nuclei") {
+                    // Update providerCounts so the Nuclei Yield card shows the real total.
+                    // The exact count is also derived live from assets, but this provides
+                    // an immediate update from the final summary event.
+                    const nucleiFindings = data.findings_found ?? 0;
+                    extraStats = {
+                      providerCounts: {
+                        ...prev.providerCounts,
+                        nuclei: nucleiFindings,
+                      },
+                    } as any;
                   }
 
                   return {
@@ -1199,7 +1241,9 @@ const MainDashboard: React.FC = () => {
                   
                   return {
                     ...prev,
-                    activeJobObject: prev.activeJobObject ? { ...prev.activeJobObject, status: data.status } : null,
+                    activeJobObject: prev.activeJobObject
+                      ? { ...prev.activeJobObject, status: data.status }
+                      : null,
                     stages: nextStageData.stages,
                     currentStage: nextStageData.currentStage,
                     providerStatus: nextProviderStatus,
@@ -1207,8 +1251,12 @@ const MainDashboard: React.FC = () => {
                   };
                 });
                 
-                if (fetchProjectDataRef.current) {
-                  fetchProjectDataRef.current();
+                // Always perform a final REST sync on job completion/failure so the
+                // dashboard reflects exactly what MongoDB has — regardless of WS latency.
+                if (data.status === "completed" || data.status === "failed" || data.status === "stopped") {
+                  setTimeout(() => {
+                    if (fetchProjectDataRef.current) fetchProjectDataRef.current();
+                  }, 800);
                 }
               }
             } else if (data.type === "url_event") {
