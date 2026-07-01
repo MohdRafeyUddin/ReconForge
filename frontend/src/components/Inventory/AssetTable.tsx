@@ -157,12 +157,33 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     navigator.clipboard.writeText(text);
   };
 
+  const displayedNormalizedUrls = React.useMemo(() => {
+    const uroUrls = normalizedUrlRecords.filter(r => r.source === "uro");
+    if (uroUrls.length > 0) {
+      return uroUrls;
+    }
+    return normalizedUrlRecords.filter(r => r.source === "katana" || r.source === "httpx");
+  }, [normalizedUrlRecords]);
+
+  const gfTotalCount = React.useMemo(() => {
+    let total = 0;
+    gfRecords.forEach((r) => {
+      r.categories.forEach((cat) => {
+        const lower = cat.toLowerCase();
+        if (["xss", "sqli", "ssrf", "redirect", "lfi", "rce", "idor", "ssti", "debug", "upload", "aws", "graphql"].includes(lower)) {
+          total++;
+        }
+      });
+    });
+    return total;
+  }, [gfRecords]);
+
   const inventoryTabs: { id: InventoryTab; label: string; count?: number }[] = [
     { id: "assets", label: "Assets", count: assets.length },
     { id: "dns", label: "DNS", count: dnsRecords.length },
     { id: "takeovers", label: "Takeovers", count: takeoverRecords.length },
-    { id: "normalized_urls", label: "Normalized URLs", count: normalizedUrlRecords.length },
-    { id: "gf", label: "Interesting URLs", count: gfRecords.length },
+    { id: "normalized_urls", label: "Normalized URLs", count: displayedNormalizedUrls.length },
+    { id: "gf", label: "Interesting URLs", count: gfTotalCount },
   ];
 
   return (
@@ -201,7 +222,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
 
       {/* Normalized URLs Tab */}
       {activeInventoryTab === "normalized_urls" && (
-        <NormalizedUrlTab records={normalizedUrlRecords} projectName={projectName} />
+        <NormalizedUrlTab records={displayedNormalizedUrls} projectName={projectName} />
       )}
 
       {/* GF Interesting URLs Tab */}

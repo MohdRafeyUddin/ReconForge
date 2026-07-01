@@ -1,6 +1,6 @@
 [
   {
-    "subdomain": "mx.target.org",
+    "subdomain": "testhp.vulnweb.com",
     "status": "http error",
     "engine": "",
     "documentation": "",
@@ -14,7 +14,35 @@
     "vulnerable": false
   },
   {
-    "subdomain": "target.org",
+    "subdomain": "localhost.vulnweb.com",
+    "status": "http error",
+    "engine": "",
+    "documentation": "",
+    "discussion": "",
+    "cicd_pass": false,
+    "cname": null,
+    "fingerprint": "",
+    "http_status": null,
+    "nxdomain": false,
+    "service": "",
+    "vulnerable": false
+  },
+  {
+    "subdomain": "rest.vulnweb.com",
+    "status": "not vulnerable",
+    "engine": "",
+    "documentation": "",
+    "discussion": "",
+    "cicd_pass": false,
+    "cname": null,
+    "fingerprint": "",
+    "http_status": null,
+    "nxdomain": false,
+    "service": "",
+    "vulnerable": false
+  },
+  {
+    "subdomain": "testasp.vulnweb.com",
     "status": "not vulnerable",
     "engine": "",
     "documentation": "",

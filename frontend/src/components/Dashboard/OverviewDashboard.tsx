@@ -15,6 +15,7 @@ interface DashboardStats {
   live_hosts: number;
   open_ports_count: number;
   last_scan_time: string | null;
+  last_scan_duration?: string;
   ports_distribution: { port: number; count: number }[];
   sources_distribution: { name: string; value: number }[];
   provider_counts?: {
@@ -130,6 +131,29 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   const [selectedProvider, setSelectedProvider] = useState("Unified Discovery");
   const [providers, setProviders] = useState<string[]>(FALLBACK_PROVIDERS);
   const [generatingReport, setGeneratingReport] = useState(false);
+  const [activeDuration, setActiveDuration] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!activeJob || !["running", "pending", "paused"].includes(activeJob.status) || !activeJob.started_at) {
+      setActiveDuration(null);
+      return;
+    }
+    const update = () => {
+      const start = new Date(activeJob.started_at).getTime();
+      const diffMs = Date.now() - start;
+      if (diffMs < 0) {
+        setActiveDuration("0s");
+        return;
+      }
+      const diffSecs = Math.floor(diffMs / 1000);
+      const m = Math.floor(diffSecs / 60);
+      const s = diffSecs % 60;
+      setActiveDuration(m > 0 ? `${m}m ${s}s` : `${s}s`);
+    };
+    update();
+    const timer = setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [activeJob]);
 
   useEffect(() => {
     let cancelled = false;
@@ -162,28 +186,110 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
 
 
 
-  const getPhaseText = (phaseName: string, phaseLabel: string) => {
-    const status = stages[phaseName] || "PENDING";
-    if (status === "COMPLETED") return `${phaseLabel} ✓`;
-    if (status === "RUNNING") {
-      if (activeJob?.status === "paused") return `${phaseLabel} (Paused)`;
-      if (activeJob?.status === "stopped") return `${phaseLabel} (Stopped)`;
-      return `${phaseLabel} ⟳ Running`;
+  const getProviderStatus = (tool: string): "waiting" | "running" | "completed" | "failed" | "paused" | "stopped" => {
+    const jobStatus = activeJob?.status;
+    const t = tool.toLowerCase();
+
+    // 1. Job completed/failed cases
+    if (jobStatus === "completed" || currentPhase === "completed") return "completed";
+    if (jobStatus === "failed") {
+      if (providerStatus[t] === "COMPLETED") return "completed";
+      return "failed";
     }
-    if (status === "FAILED") return `${phaseLabel} ✕ Failed`;
-    return phaseLabel === "Discovery" ? "Discovery Waiting" : phaseLabel;
+
+    // 2. Explicit provider status checks
+    if (providerStatus[t] === "COMPLETED") return "completed";
+    if (providerStatus[t] === "FAILED") return "failed";
+
+    if (jobStatus === "stopped") return "stopped";
+
+    if (providerStatus[t] === "RUNNING") {
+      return jobStatus === "paused" ? "paused" : "running";
+    }
+
+    // 3. Fallback based on current phase
+    const PROVIDER_ORDER = [
+      "subfinder", "assetfinder", "chaos", "amass",
+      "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"
+    ];
+    
+    const currentPhaseLower = currentPhase?.toLowerCase();
+    
+    if (currentPhaseLower === "discovery") {
+      if (["subfinder", "assetfinder", "chaos", "amass"].includes(t)) {
+        return jobStatus === "paused" ? "paused" : "running";
+      }
+    } else if (currentPhaseLower === t) {
+      return jobStatus === "paused" ? "paused" : "running";
+    }
+
+    // If a phase after t is running or completed, then t must have completed
+    const currentIdx = PROVIDER_ORDER.indexOf(currentPhaseLower);
+    const toolIdx = PROVIDER_ORDER.indexOf(t);
+    if (currentIdx !== -1 && toolIdx !== -1 && toolIdx < currentIdx) {
+      if (currentPhaseLower !== "discovery") {
+        return "completed";
+      }
+    }
+
+    return "waiting";
   };
 
-  const getPhaseClass = (phaseName: string) => {
-    const status = stages[phaseName] || "PENDING";
-    if (status === "RUNNING") {
-      if (activeJob?.status === "paused") return "bg-cyber-warning/20 border border-cyber-warning/50 text-cyber-warning font-bold";
-      if (activeJob?.status === "stopped") return "bg-cyber-danger/20 border border-cyber-danger/50 text-cyber-danger font-bold";
-      return "bg-cyber-accent/20 border border-cyber-accent/50 text-cyber-accent animate-pulse font-bold";
+  const getElementStatus = (phase: string): "waiting" | "running" | "completed" | "failed" | "paused" | "stopped" => {
+    if (phase === "discovery") {
+      const status = stages.discovery || "PENDING";
+      if (status === "COMPLETED") return "completed";
+      if (status === "FAILED") return "failed";
+      if (status === "RUNNING") {
+        if (activeJob?.status === "paused") return "paused";
+        if (activeJob?.status === "stopped") return "stopped";
+        return "running";
+      }
+      return "waiting";
     }
-    if (status === "COMPLETED") return "bg-cyber-success/10 border border-cyber-success/30 text-cyber-success";
-    if (status === "FAILED") return "bg-cyber-danger/20 border border-cyber-danger/50 text-cyber-danger font-bold";
-    return "text-slate-500 border border-transparent";
+
+    if (phase === "completed") {
+      if (activeJob?.status === "completed") return "completed";
+      if (activeJob?.status === "failed") return "failed";
+      if (activeJob?.status === "stopped") return "stopped";
+      return "waiting";
+    }
+
+    return getProviderStatus(phase);
+  };
+
+  const renderPipelineItem = (phase: string, label: string) => {
+    const status = getElementStatus(phase);
+    
+    let badgeClass = "px-2 py-0.5 rounded text-[10px] font-mono flex items-center space-x-1.5 transition-all ";
+    let icon = null;
+    
+    if (status === "completed") {
+      badgeClass += "bg-cyber-success/10 border border-cyber-success/30 text-cyber-success";
+      icon = <span className="text-[10px] font-bold">✓</span>;
+    } else if (status === "running") {
+      badgeClass += "bg-cyber-accent/20 border border-cyber-accent/50 text-cyber-accent animate-pulse font-bold";
+      icon = <RefreshCw className="w-2.5 h-2.5 animate-spin" />;
+    } else if (status === "paused") {
+      badgeClass += "bg-cyber-warning/20 border border-cyber-warning/50 text-cyber-warning font-bold";
+      icon = <Pause className="w-2.5 h-2.5" />;
+    } else if (status === "stopped") {
+      badgeClass += "bg-cyber-danger/20 border border-cyber-danger/50 text-cyber-danger font-bold";
+      icon = <Square className="w-2.5 h-2.5 fill-current" />;
+    } else if (status === "failed") {
+      badgeClass += "bg-cyber-danger/20 border border-cyber-danger/50 text-cyber-danger font-bold";
+      icon = <span className="text-[10px] font-bold">✗</span>;
+    } else {
+      badgeClass += "text-slate-500 border border-transparent";
+      icon = <span className="text-[10px] opacity-40">○</span>;
+    }
+
+    return (
+      <span className={badgeClass}>
+        {icon}
+        <span>{label}</span>
+      </span>
+    );
   };
 
   const handleExportHTML = async () => {
@@ -207,18 +313,6 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   };
 
   const [showExportDropdown, setShowExportDropdown] = useState(false);
-
-  const getProviderStatus = (tool: string): "waiting" | "running" | "completed" | "failed" | "paused" | "stopped" => {
-    const status = providerStatus[tool.toLowerCase()] || "PENDING";
-    if (status === "COMPLETED") return "completed";
-    if (status === "FAILED") return "failed";
-    if (status === "RUNNING") {
-      if (activeJob?.status === "paused") return "paused";
-      if (activeJob?.status === "stopped") return "stopped";
-      return "running";
-    }
-    return "waiting";
-  };
 
   const escapeCSV = (val: any) => {
     if (val === null || val === undefined) return '""';
@@ -351,11 +445,40 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   const providerBreakdown = [
     { label: "Subfinder", tool: "subfinder", color: "#3B82F6" },
     { label: "Assetfinder", tool: "assetfinder", color: "#06B6D4" },
-    { label: "Amass", tool: "amass", color: "#10B981" },
     { label: "Chaos", tool: "chaos", color: "#F59E0B" },
+    { label: "Amass", tool: "amass", color: "#10B981" },
+    { label: "DNSx", tool: "dnsx", color: "#22D3EE" },
+    { label: "Subzy", tool: "subzy", color: "#EC4899" },
+    { label: "Naabu", tool: "naabu", color: "#F43F5E" },
+    { label: "HTTPX", tool: "httpx", color: "#8B5CF6" },
+    { label: "Katana", tool: "katana", color: "#06B6D4" },
+    { label: "Uro", tool: "uro", color: "#10B981" },
+    { label: "GF", tool: "gf", color: "#F59E0B" },
+    { label: "Nuclei", tool: "nuclei", color: "#EF4444" },
   ].map(p => {
     const pStatus = getProviderStatus(p.tool);
-    const rawCount = pc[p.tool as keyof typeof pc] ?? 0;
+    
+    let rawCount = 0;
+    if (p.tool === "subfinder" || p.tool === "assetfinder" || p.tool === "chaos" || p.tool === "amass") {
+      rawCount = pc[p.tool as keyof typeof pc] ?? 0;
+    } else if (p.tool === "dnsx") {
+      rawCount = stats.dnsx_resolved ?? 0;
+    } else if (p.tool === "subzy") {
+      rawCount = (stats.subzy_vulnerable ?? 0) + (stats.subzy_not_vulnerable ?? 0) + (stats.subzy_unknown ?? 0);
+    } else if (p.tool === "naabu") {
+      rawCount = totalOpenPortFindings;
+    } else if (p.tool === "httpx") {
+      rawCount = derivedLiveHosts;
+    } else if (p.tool === "katana") {
+      rawCount = totalUrlsDiscovered;
+    } else if (p.tool === "uro") {
+      rawCount = stats.uro_normalised ?? 0;
+    } else if (p.tool === "gf") {
+      rawCount = stats.gf_total ?? 0;
+    } else if (p.tool === "nuclei") {
+      rawCount = totalNucleiFindings;
+    }
+
     const countDisplay = (activeJob && pStatus === "waiting") ? "-" : rawCount;
     return {
       ...p,
@@ -368,51 +491,58 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   return (
     <div className="space-y-6">
       {/* Phase Tracker for Active Scan */}
-      {activeJob && ["running", "pending", "paused", "stopped"].includes(activeJob.status) && (
-        <div className="bg-dark-card border border-dark-border rounded-xl p-4 glass animate-fadeIn">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-            <div className="flex items-center gap-2">
-              {activeJob.status === "paused" ? (
+      <div className="bg-dark-card border border-dark-border rounded-xl p-4 glass animate-fadeIn">
+        <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            {activeJob ? (
+              activeJob.status === "paused" ? (
                 <Pause className="w-4 h-4 text-cyber-warning animate-pulse" />
               ) : activeJob.status === "stopped" ? (
                 <Square className="w-4 h-4 text-cyber-danger fill-current" />
               ) : (
                 <RefreshCw className="w-4 h-4 text-cyber-accent animate-spin" />
-              )}
-              <span className="font-mono text-xs text-slate-200 uppercase tracking-wider font-semibold">
-                Active Scan Progress:{" "}
-                <span className={
+              )
+            ) : (
+              <RefreshCw className="w-4 h-4 text-slate-500" />
+            )}
+            <span className="font-mono text-xs text-slate-200 uppercase tracking-wider font-semibold">
+              Active Scan Progress:{" "}
+              <span className={
+                activeJob ? (
                   activeJob.status === "paused" ? "text-cyber-warning" :
                   activeJob.status === "stopped" ? "text-cyber-danger" :
                   "text-cyber-accent"
-                }>
-                  {activeJob.status.toUpperCase()}
-                </span>
+                ) : "text-slate-500"
+              }>
+                {activeJob ? activeJob.status.toUpperCase() : "IDLE"}
               </span>
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
-              {([
-                ["discovery", "Passive"],
-                ["dnsx",      "DNSx"],
-                ["subzy",     "Subzy"],
-                ["naabu",     "Naabu"],
-                ["httpx",     "HTTPX"],
-                ["katana",    "Katana"],
-                ["uro",       "Uro"],
-                ["gf",        "GF"],
-                ["nuclei",    "Nuclei"],
-              ] as [string, string][]).map(([phase, label], i, arr) => (
-                <React.Fragment key={phase}>
-                  <span className={`px-2 py-0.5 rounded ${getPhaseClass(phase)}`}>
-                    {getPhaseText(phase, label)}
-                  </span>
-                  {i < arr.length - 1 && <span className="text-slate-700">{"\u2192"}</span>}
-                </React.Fragment>
-              ))}
-            </div>
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
+            {([
+              ["discovery",   "Passive Discovery"],
+              ["subfinder",   "Subfinder"],
+              ["assetfinder", "Assetfinder"],
+              ["chaos",       "Chaos"],
+              ["amass",       "Amass"],
+              ["dnsx",        "DNSx"],
+              ["subzy",       "Subzy"],
+              ["naabu",       "Naabu"],
+              ["httpx",       "HTTPX"],
+              ["katana",      "Katana"],
+              ["uro",         "Uro"],
+              ["gf",          "GF"],
+              ["nuclei",      "Nuclei"],
+              ["completed",    "Completed"],
+            ] as [string, string][]).map(([phase, label], i, arr) => (
+              <React.Fragment key={phase}>
+                {renderPipelineItem(phase, label)}
+                {i < arr.length - 1 && <span className="text-slate-700">{"\u2192"}</span>}
+              </React.Fragment>
+            ))}
           </div>
         </div>
-      )}
+      </div>
 
       {/* Upper stats row */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4">
@@ -467,30 +597,44 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
       </div>
 
       {/* Provider Yield Breakdown */}
-      {(providerBreakdown.some(p => p.count > 0) || activeJob) && (
-        <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">
-          <h4 className="text-xs font-mono text-slate-400 uppercase tracking-wider mb-4 border-b border-dark-border pb-2">
-            Provider Yield Breakdown
-          </h4>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {providerBreakdown.map((p) => (
-              <div key={p.label} className="bg-dark-bg border border-dark-border rounded-lg p-3 flex flex-col items-center text-center relative overflow-hidden">
-                <div className="flex items-center gap-1.5 mb-1.5 justify-center">
-                  {p.status === "completed" && <span className="text-cyber-success text-xs font-bold">✓</span>}
-                  {p.status === "running" && <RefreshCw className="w-3 h-3 animate-spin text-cyber-accent" />}
-                  {p.status === "waiting" && <span className="text-slate-500 text-xs">○</span>}
-                  {p.status === "failed" && <span className="text-cyber-danger text-xs font-bold">✕</span>}
-                  {p.status === "paused" && <Pause className="w-3 h-3 text-cyber-warning" />}
-                  {p.status === "stopped" && <Square className="w-3 h-3 text-cyber-danger fill-current" />}
-                  <span className="text-[10px] font-mono text-slate-400 uppercase tracking-widest">{p.label}</span>
-                </div>
-                <span className="text-2xl font-mono font-bold" style={{ color: p.color }}>{p.countDisplay}</span>
-                <span className="text-[9px] text-slate-500 mt-1 capitalize">{p.status}</span>
+      <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">
+        <h4 className="text-xs font-mono text-slate-400 uppercase tracking-wider mb-4 border-b border-dark-border pb-2">
+          Provider Yield Breakdown
+        </h4>
+        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
+          {providerBreakdown.map((p) => (
+            <div key={p.label} className="bg-dark-bg border border-dark-border rounded-lg p-3 flex flex-col items-center text-center relative overflow-hidden">
+              <div className="flex items-center gap-1.5 mb-1.5 justify-center">
+                {p.status === "completed" && <span className="text-cyber-success text-xs font-bold">✓</span>}
+                {p.status === "running" && <RefreshCw className="w-3 h-3 animate-spin text-cyber-accent" />}
+                {p.status === "waiting" && <span className="text-slate-500 text-xs">○</span>}
+                {p.status === "failed" && <span className="text-cyber-danger text-xs font-bold">✕</span>}
+                {p.status === "paused" && <Pause className="w-3 h-3 text-cyber-warning animate-pulse" />}
+                {p.status === "stopped" && <Square className="w-3 h-3 text-cyber-danger fill-current" />}
+                <span className="text-[10px] font-mono text-slate-400 uppercase tracking-widest">{p.label}</span>
               </div>
-            ))}
-          </div>
+              <span className="text-2xl font-mono font-bold" style={{ color: p.color }}>{p.countDisplay}</span>
+              <span className="text-[9px] text-slate-500 mt-1 capitalize">{p.status}</span>
+              
+              {/* Progress bar for sub-providers (Subfinder, Assetfinder, Chaos, Amass) */}
+              {["subfinder", "assetfinder", "chaos", "amass"].includes(p.tool) && (
+                <div className="w-full mt-3 h-1 bg-dark-card border border-dark-border/40 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-500 ${
+                      p.status === "completed" ? "bg-cyber-success w-full" :
+                      p.status === "failed" ? "bg-cyber-danger w-full" :
+                      p.status === "running" ? "bg-cyber-accent w-2/3 animate-pulse" :
+                      p.status === "paused" ? "bg-cyber-warning w-1/2 animate-pulse" :
+                      p.status === "stopped" ? "bg-cyber-danger w-1/3" :
+                      "bg-slate-700 w-0"
+                    }`}
+                  />
+                </div>
+              )}
+            </div>
+          ))}
         </div>
-      )}
+      </div>
 
       {/* New Provider Cards (DNSx, Subzy, Uro, GF) — shown when data exists or job running */}
       {(activeJob || stats.dnsx_resolved !== undefined || stats.subzy_vulnerable !== undefined ||
@@ -599,7 +743,6 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
               </div>
 
               <div>
-                <div>
                 <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest block mb-2">PIPELINE STATS</span>
                 <div className="space-y-1">
                   {stats.dnsx_resolved !== undefined && (
@@ -626,96 +769,106 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                       <span className="text-cyber-warning">{stats.gf_total}</span>
                     </div>
                   )}
+                  {totalNucleiFindings > 0 && (
+                    <div className="flex justify-between text-xs font-mono">
+                      <span className="text-slate-500">Security Findings</span>
+                      <span className="text-cyber-danger font-bold">{totalNucleiFindings}</span>
+                    </div>
+                  )}
                   {stats.dnsx_resolved === undefined && stats.uro_normalised === undefined && (
                     <span className="text-slate-600 text-[10px] font-mono uppercase tracking-wider">Run a full scan to see pipeline stats</span>
                   )}
                 </div>
               </div>
 
-              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest block mb-1">LAST SCAN OPERATION</span>
-                <span className="text-slate-300 text-xs font-mono">
-                  {stats.last_scan_time ? new Date(stats.last_scan_time).toLocaleString() : "Never Scanned"}
-                </span>
+              <div>
+                <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest block mb-1">SCAN TIME / DURATION</span>
+                <div className="text-slate-300 text-xs font-mono flex flex-col space-y-1">
+                  {activeDuration ? (
+                    <span className="text-cyber-accent font-bold animate-pulse">Running: {activeDuration}</span>
+                  ) : stats.last_scan_duration ? (
+                    <span className="text-cyber-success font-semibold">Finished in {stats.last_scan_duration}</span>
+                  ) : null}
+                  {stats.last_scan_time && (
+                    <span className="text-slate-400 text-[10px]">
+                      Completed: {new Date(stats.last_scan_time).toLocaleString()}
+                    </span>
+                  )}
+                  {!activeDuration && !stats.last_scan_time && <span>Never Scanned</span>}
+                </div>
               </div>
             </div>
           </div>
 
-          <div className="mt-8 pt-4 border-t border-dark-border space-y-4">
-            {activeJob && ["pending", "running", "paused", "stopped"].includes(activeJob.status) ? (
-              <div className="space-y-3">
-                <span className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1">Scan Control Console</span>
-                <div className="grid grid-cols-2 gap-2">
-                  {activeJob.status === "paused" ? (
-                    <button
-                      onClick={onResumeScan}
-                      className="flex items-center justify-center space-x-1.5 bg-cyber-success/20 border border-cyber-success/40 hover:bg-cyber-success/30 text-cyber-success py-2 rounded text-xs font-bold uppercase tracking-wider transition-all cursor-pointer"
-                    >
-                      <Play className="w-3.5 h-3.5" />
-                      <span>Resume</span>
-                    </button>
-                  ) : (
-                    <button
-                      onClick={onPauseScan}
-                      disabled={activeJob.status !== "running" && activeJob.status !== "pending"}
-                      className="flex items-center justify-center space-x-1.5 bg-cyber-warning/20 border border-cyber-warning/40 hover:bg-cyber-warning/30 text-cyber-warning py-2 rounded text-xs font-bold uppercase tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                    >
-                      <Pause className="w-3.5 h-3.5" />
-                      <span>Pause</span>
-                    </button>
-                  )}
-
-                  <button
-                    onClick={onStopScan}
-                    disabled={activeJob.status !== "running" && activeJob.status !== "pending" && activeJob.status !== "paused"}
-                    className="flex items-center justify-center space-x-1.5 bg-cyber-danger/20 border border-cyber-danger/40 hover:bg-cyber-danger/30 text-cyber-danger py-2 rounded text-xs font-bold uppercase tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                  >
-                    <Square className="w-3.5 h-3.5 fill-current" />
-                    <span>Stop</span>
-                  </button>
-                </div>
-                
-                <button
-                  onClick={onResetScan}
-                  className="w-full flex items-center justify-center space-x-1.5 bg-slate-800/80 border border-slate-700 hover:bg-slate-700 text-slate-200 py-2.5 rounded text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-semibold"
+          <div className="mt-8 pt-4 border-t border-dark-border space-y-5">
+            {/* Launch Section */}
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1.5">Discovery Provider</label>
+                <select
+                  value={selectedProvider}
+                  onChange={(e) => setSelectedProvider(e.target.value)}
+                  disabled={!!activeJob && ["running", "pending", "paused"].includes(activeJob.status)}
+                  className="w-full bg-dark-bg border border-dark-border rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyber-accent font-semibold disabled:opacity-50"
                 >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  <span>Reset Scan Dashboard</span>
-                </button>
+                  {providers.map(p => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
               </div>
-            ) : (
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1.5">Discovery Provider</label>
-                  <select
-                    value={selectedProvider}
-                    onChange={(e) => setSelectedProvider(e.target.value)}
-                    className="w-full bg-dark-bg border border-dark-border rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-cyber-accent font-semibold"
-                  >
-                    {providers.map(p => (
-                      <option key={p} value={p}>{p}</option>
-                    ))}
-                  </select>
-                </div>
 
-                <button
-                  onClick={() => onLaunchScan(selectedProvider)}
-                  className="w-full bg-gradient-to-r from-cyber-primary to-cyber-accent text-white py-2.5 rounded text-xs font-bold uppercase tracking-wider hover:opacity-90 active:scale-[0.98] transition-all flex items-center justify-center space-x-2 shadow-lg cursor-pointer"
-                >
-                  <Play className="w-4 h-4" />
-                  <span>Launch Discovery Job</span>
-                </button>
+              <button
+                onClick={() => onLaunchScan(selectedProvider)}
+                disabled={!!activeJob && ["running", "pending", "paused"].includes(activeJob.status)}
+                className="w-full bg-gradient-to-r from-cyber-primary to-cyber-accent text-white py-2.5 rounded text-xs font-bold uppercase tracking-wider hover:opacity-90 active:scale-[0.98] transition-all flex items-center justify-center space-x-2 shadow-lg cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Play className="w-4 h-4" />
+                <span>Launch Discovery Job</span>
+              </button>
+            </div>
 
-                {(assets.length > 0 || (activeJob && ["completed", "failed"].includes(activeJob.status))) && (
+            {/* Scan Control Console */}
+            <div className="space-y-3 pt-4 border-t border-dark-border/40">
+              <span className="block text-xs font-mono text-slate-400 uppercase tracking-widest mb-1">Scan Control Console</span>
+              <div className="grid grid-cols-2 gap-2">
+                {activeJob?.status === "paused" ? (
                   <button
-                    onClick={onResetScan}
-                    className="w-full flex items-center justify-center space-x-1.5 bg-slate-800/80 border border-slate-700 hover:bg-slate-700 text-slate-200 py-2.5 rounded text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-semibold"
+                    onClick={onResumeScan}
+                    className="flex items-center justify-center space-x-1.5 bg-cyber-success/20 border border-cyber-success/40 hover:bg-cyber-success/30 text-cyber-success py-2 rounded text-xs font-bold uppercase tracking-wider transition-all cursor-pointer"
                   >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>Reset Scan Dashboard</span>
+                    <Play className="w-3.5 h-3.5" />
+                    <span>Resume</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={onPauseScan}
+                    disabled={!activeJob || (activeJob.status !== "running" && activeJob.status !== "pending")}
+                    className="flex items-center justify-center space-x-1.5 bg-cyber-warning/20 border border-cyber-warning/40 hover:bg-cyber-warning/30 text-cyber-warning py-2 rounded text-xs font-bold uppercase tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    <Pause className="w-3.5 h-3.5" />
+                    <span>Pause</span>
                   </button>
                 )}
+
+                <button
+                  onClick={onStopScan}
+                  disabled={!activeJob || (activeJob.status !== "running" && activeJob.status !== "pending" && activeJob.status !== "paused")}
+                  className="flex items-center justify-center space-x-1.5 bg-cyber-danger/20 border border-cyber-danger/40 hover:bg-cyber-danger/30 text-cyber-danger py-2 rounded text-xs font-bold uppercase tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                  <span>Stop</span>
+                </button>
               </div>
-            )}
+              
+              <button
+                onClick={onResetScan}
+                disabled={assets.length === 0 && (!activeJob || !["completed", "failed", "stopped"].includes(activeJob.status))}
+                className="w-full flex items-center justify-center space-x-1.5 bg-slate-800/80 border border-slate-700 hover:bg-slate-700 text-slate-200 py-2.5 rounded text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reset Scan Dashboard</span>
+              </button>
+            </div>
 
             <div className="relative w-full">
               <button

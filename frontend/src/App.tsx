@@ -27,6 +27,7 @@ interface DashboardStats {
   live_hosts: number;
   open_ports_count: number;
   last_scan_time: string | null;
+  last_scan_duration?: string;
   ports_distribution: { port: number; count: number }[];
   sources_distribution: { name: string; value: number }[];
   provider_counts?: {
@@ -84,6 +85,7 @@ interface ScanState {
   gfRecords: GfUrlRecord[];
   completedProviders: Set<string>;
   activeJobObject: any | null;
+  lastCompletedJobObject: any | null;
   providerStatus: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
   lastWsEventTime: number;
 }
@@ -92,6 +94,7 @@ const initialScanState: ScanState = {
   jobId: null,
   scanStatus: null,
   currentStage: "waiting",
+  lastCompletedJobObject: null,
   stages: {
     discovery: "PENDING",
     dnsx: "PENDING",
@@ -191,6 +194,77 @@ const updateProviderStatus = (
   return next;
 };
 
+const mergeFindingIntoAssets = (currentAssets: any[], finding: any) => {
+  if (!finding || !finding.matched_url) return currentAssets;
+  
+  let host = (finding.host || "").toLowerCase().trim();
+  if (!host) {
+    try {
+      const parsed = new URL(finding.matched_url);
+      host = (parsed.hostname || parsed.pathname).toLowerCase();
+      if (host.includes(":")) {
+        host = host.split(":")[0];
+      }
+    } catch (e) {
+      host = "";
+    }
+  }
+  if (!host) return currentAssets;
+
+  const exists = currentAssets.some((a) => a.domain.toLowerCase() === host || host.endsWith("." + a.domain.toLowerCase()) || a.domain.toLowerCase().endsWith("." + host));
+  
+  if (exists) {
+    return currentAssets.map((a) => {
+      const match = a.domain.toLowerCase() === host || host.endsWith("." + a.domain.toLowerCase()) || a.domain.toLowerCase().endsWith("." + host);
+      if (!match) return a;
+      
+      const metadata = a.metadata || {};
+      const nuclei = metadata.nuclei || {};
+      const findings = nuclei.findings || [];
+      
+      const alreadyHas = findings.some((f: any) => 
+        (f.template_id === finding.template_id || f.template_name === finding.template_name) && 
+        f.matched_url === finding.matched_url
+      );
+      
+      if (alreadyHas) return a;
+      
+      return {
+        ...a,
+        metadata: {
+          ...metadata,
+          nuclei: {
+            ...nuclei,
+            findings: [...findings, finding],
+            scanned_at: Math.floor(Date.now() / 1000)
+          }
+        }
+      };
+    });
+  } else {
+    return [
+      ...currentAssets,
+      {
+        id: `nuclei-${Date.now()}-${Math.random()}`,
+        domain: host,
+        type: "subdomain",
+        status: "live",
+        open_ports: [],
+        discovered_by: "nuclei",
+        created_at: new Date().toISOString(),
+        sources: ["nuclei"],
+        metadata: {
+          source: "nuclei",
+          nuclei: {
+            findings: [finding],
+            scanned_at: Math.floor(Date.now() / 1000)
+          }
+        }
+      }
+    ];
+  }
+};
+
 const MainDashboard: React.FC = () => {
   const { token } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -200,6 +274,17 @@ const MainDashboard: React.FC = () => {
   const [isReconnect, setIsReconnect] = useState(false);
 
   const [scanState, setScanState] = useState<ScanState>(initialScanState);
+
+  const activeProjectRef = useRef<Project | null>(null);
+  const jobIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    activeProjectRef.current = activeProject;
+  }, [activeProject]);
+
+  useEffect(() => {
+    jobIdRef.current = scanState.jobId;
+  }, [scanState.jobId]);
 
   const {
     assets,
@@ -242,12 +327,79 @@ const MainDashboard: React.FC = () => {
     value: value as number
   }));
 
+  // Derive Uro statistics
+  const derivedUroInput = React.useMemo(() => {
+    const hasUroRun = (scanState.uro_normalised !== null && scanState.uro_normalised !== undefined) || scanState.normalizedUrlRecords.some(r => r.source === "uro");
+    if (!hasUroRun) return undefined;
+    if (scanState.uro_input !== null && scanState.uro_input !== undefined && scanState.uro_input > 0) {
+      return scanState.uro_input;
+    }
+    // Fallback: total unique input URLs (from katana and httpx)
+    const inputCount = scanState.normalizedUrlRecords.filter(r => r.source === "katana" || r.source === "httpx").length;
+    if (inputCount > 0) return inputCount;
+    return undefined;
+  }, [scanState.normalizedUrlRecords, scanState.uro_input, scanState.uro_normalised]);
+
+  const derivedUroNormalised = React.useMemo(() => {
+    const hasUroRun = (scanState.uro_normalised !== null && scanState.uro_normalised !== undefined) || scanState.normalizedUrlRecords.some(r => r.source === "uro");
+    if (!hasUroRun) return undefined;
+    if (scanState.uro_normalised !== null && scanState.uro_normalised !== undefined) {
+      return scanState.uro_normalised;
+    }
+    // Fallback: URLs in the list with source 'uro'
+    const uroCount = scanState.normalizedUrlRecords.filter(r => r.source === "uro").length;
+    if (uroCount > 0) return uroCount;
+    if (scanState.uro_input !== null && scanState.uro_input !== undefined) {
+      return 0;
+    }
+    return undefined;
+  }, [scanState.normalizedUrlRecords, scanState.uro_normalised, scanState.uro_input]);
+
+  const derivedUroRemoved = React.useMemo(() => {
+    if (derivedUroInput === undefined || derivedUroNormalised === undefined) return undefined;
+    return Math.max(0, derivedUroInput - derivedUroNormalised);
+  }, [derivedUroInput, derivedUroNormalised]);
+
+  // Derive GF statistics
+  const derivedGfCategories = React.useMemo(() => {
+    const cats: Record<string, number> = {};
+    scanState.gfRecords.forEach((r) => {
+      r.categories.forEach((cat) => {
+        const lower = cat.toLowerCase();
+        cats[lower] = (cats[lower] ?? 0) + 1;
+      });
+    });
+    return cats;
+  }, [scanState.gfRecords]);
+
+  const derivedGfTotal = React.useMemo(() => {
+    const hasGfRun = scanState.gfRecords.length > 0 || (scanState.gf_total !== null && scanState.gf_total !== undefined);
+    if (!hasGfRun) return undefined;
+    
+    return Object.values(derivedGfCategories).reduce((a, b) => a + b, 0);
+  }, [derivedGfCategories, scanState.gfRecords.length, scanState.gf_total]);
+
+  const lastScanDuration = React.useMemo(() => {
+    const job = scanState.lastCompletedJobObject;
+    if (!job || !job.started_at || !job.finished_at) return null;
+    const start = new Date(job.started_at).getTime();
+    const end = new Date(job.finished_at).getTime();
+    const diffMs = end - start;
+    if (diffMs < 0) return "0s";
+    const diffSecs = Math.floor(diffMs / 1000);
+    const m = Math.floor(diffSecs / 60);
+    const s = diffSecs % 60;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }, [scanState.lastCompletedJobObject]);
+
   const stats: DashboardStats = {
     total_assets: scanState.assets.length,
     total_subdomains: scanState.subdomains.length,
     live_hosts: scanState.assets.filter((a: any) => a.status === "live").length,
     open_ports_count: ports_distribution.length,
-    last_scan_time: scanState.activeJobObject?.completed_at || null,
+    last_scan_time: scanState.lastCompletedJobObject?.finished_at || null,
+    last_scan_duration: lastScanDuration || undefined,
     ports_distribution,
     sources_distribution,
     provider_counts: scanState.providerCounts,
@@ -261,12 +413,12 @@ const MainDashboard: React.FC = () => {
     subzy_not_vulnerable: scanState.subzy_not_vulnerable ?? undefined,
     subzy_unknown: scanState.subzy_unknown ?? undefined,
     
-    uro_input: scanState.uro_input ?? undefined,
-    uro_normalised: scanState.uro_normalised ?? undefined,
-    uro_removed: scanState.uro_removed ?? undefined,
+    uro_input: derivedUroInput,
+    uro_normalised: derivedUroNormalised,
+    uro_removed: derivedUroRemoved,
     
-    gf_total: scanState.gf_total ?? undefined,
-    gf_categories: scanState.gf_categories,
+    gf_total: derivedGfTotal,
+    gf_categories: derivedGfCategories,
   };
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -292,18 +444,59 @@ const MainDashboard: React.FC = () => {
 
   const fetchProjectData = async () => {
     if (!activeProject) return;
+    const projectId = activeProject.id;
     try {
       const [assetList, subdomainList, dashboardStats, jobsList] = await Promise.all([
-        apiCall(`/assets/project/${activeProject.id}`),
-        apiCall(`/assets/project/${activeProject.id}/subdomains`),
-        apiCall(`/assets/project/${activeProject.id}/dashboard-stats`),
-        apiCall(`/jobs/project/${activeProject.id}`),
+        apiCall(`/assets/project/${projectId}`),
+        apiCall(`/assets/project/${projectId}/subdomains`),
+        apiCall(`/assets/project/${projectId}/dashboard-stats`),
+        apiCall(`/jobs/project/${projectId}`),
       ]);
+
+      if (activeProjectRef.current?.id !== projectId) {
+        console.log("Ignoring stale API fetch result for project", projectId);
+        return;
+      }
 
       const dns: DnsRecord[] = [];
       const takeovers: TakeoverRecord[] = [];
-      const normalizedUrls: NormalizedUrlRecord[] = [];
       const seenUrls = new Set<string>();
+
+      // Parse logs first to get counts and status of providers
+      let dnsx_nxdomain = 0;
+      let dnsx_wildcards = 0;
+      let subzy_not_vulnerable = 0;
+      let subzy_unknown = 0;
+      let uro_input = 0;
+      let uro_normalised = 0;
+      let uro_removed = 0;
+
+      jobsList.forEach((job: any) => {
+        if (Array.isArray(job.logs)) {
+          job.logs.forEach((log: string) => {
+            const dnsxMatch = log.match(/DNSx completed\.\s+Resolved:\s*(\d+)\s*\|\s*NXDOMAIN:\s*(\d+)\s*\|\s*Wildcards filtered:\s*(\d+)/i);
+            if (dnsxMatch) {
+              dnsx_nxdomain = parseInt(dnsxMatch[2]);
+              dnsx_wildcards = parseInt(dnsxMatch[3]);
+            }
+            
+            const subzyMatch = log.match(/Subzy completed\.\s+Vulnerable:\s*(\d+)\s*\|\s*Not Vulnerable:\s*(\d+)\s*\|\s*Unknown:\s*(\d+)/i);
+            if (subzyMatch) {
+              subzy_not_vulnerable = parseInt(subzyMatch[2]);
+              subzy_unknown = parseInt(subzyMatch[3]);
+            }
+
+            const uroMatch = log.match(/Uro completed\.\s+Input:\s*(\d+)\s*\|\s*Normalised:\s*(\d+)\s*\|\s*Removed:\s*(\d+)/i);
+            if (uroMatch) {
+              uro_input = parseInt(uroMatch[1]);
+              uro_normalised = parseInt(uroMatch[2]);
+              uro_removed = parseInt(uroMatch[3]);
+            }
+          });
+        }
+      });
+
+      const originalUrls: { original_url: string; normalized_url: string; duplicate_removed: boolean; source: string }[] = [];
 
       assetList.forEach((asset: any) => {
         if (asset.metadata?.dnsx) {
@@ -330,20 +523,57 @@ const MainDashboard: React.FC = () => {
             });
           }
         }
+        if (asset.metadata?.url) {
+          const urlVal = asset.metadata.url;
+          if (!seenUrls.has(urlVal)) {
+            seenUrls.add(urlVal);
+            originalUrls.push({
+              original_url: urlVal,
+              normalized_url: urlVal,
+              duplicate_removed: false,
+              source: "httpx",
+            });
+          }
+        }
         if (asset.metadata?.katana?.urls) {
           asset.metadata.katana.urls.forEach((url: string) => {
             if (!seenUrls.has(url)) {
               seenUrls.add(url);
-              normalizedUrls.push({
+              originalUrls.push({
                 original_url: url,
                 normalized_url: url,
                 duplicate_removed: false,
-                source: "uro",
+                source: "katana",
               });
             }
           });
         }
       });
+
+      const normalizedUrls: NormalizedUrlRecord[] = [];
+      if (uro_normalised > 0) {
+        originalUrls.forEach((item, idx) => {
+          if (idx < uro_normalised) {
+            normalizedUrls.push({
+              original_url: item.original_url,
+              normalized_url: item.normalized_url,
+              duplicate_removed: false,
+              source: "uro",
+            });
+          } else {
+            normalizedUrls.push({
+              original_url: item.original_url,
+              normalized_url: item.normalized_url,
+              duplicate_removed: true,
+              source: item.source,
+            });
+          }
+        });
+      } else {
+        originalUrls.forEach((item) => {
+          normalizedUrls.push(item);
+        });
+      }
 
       const gf: GfUrlRecord[] = [];
       const seenGf = new Set<string>();
@@ -379,57 +609,26 @@ const MainDashboard: React.FC = () => {
         }
       });
 
-      let dnsx_nxdomain = 0;
-      let dnsx_wildcards = 0;
-      let subzy_not_vulnerable = 0;
-      let subzy_unknown = 0;
-      let uro_input = 0;
-      let uro_normalised = 0;
-      let uro_removed = 0;
-
-      jobsList.forEach((job: any) => {
-        if (Array.isArray(job.logs)) {
-          job.logs.forEach((log: string) => {
-            const dnsxMatch = log.match(/DNSx completed\.\s+Resolved:\s*(\d+)\s*\|\s*NXDOMAIN:\s*(\d+)\s*\|\s*Wildcards filtered:\s*(\d+)/i);
-            if (dnsxMatch) {
-              dnsx_nxdomain = parseInt(dnsxMatch[2]);
-              dnsx_wildcards = parseInt(dnsxMatch[3]);
-            }
-            
-            const subzyMatch = log.match(/Subzy completed\.\s+Vulnerable:\s*(\d+)\s*\|\s*Not Vulnerable:\s*(\d+)\s*\|\s*Unknown:\s*(\d+)/i);
-            if (subzyMatch) {
-              subzy_not_vulnerable = parseInt(subzyMatch[2]);
-              subzy_unknown = parseInt(subzyMatch[3]);
-            }
-
-            const uroMatch = log.match(/Uro completed\.\s+Input:\s*(\d+)\s*\|\s*Normalised:\s*(\d+)\s*\|\s*Removed:\s*(\d+)/i);
-            if (uroMatch) {
-              uro_input = parseInt(uroMatch[1]);
-              uro_normalised = parseInt(uroMatch[2]);
-              uro_removed = parseInt(uroMatch[3]);
-            }
-          });
-        }
-      });
-
       const uniqueDnsxIps = new Set<string>();
       dns.forEach((r) => {
         (r.ipv4 || []).forEach((ip) => uniqueDnsxIps.add(ip));
         (r.ipv6 || []).forEach((ip) => uniqueDnsxIps.add(ip));
       });
 
-      const seenKatana = new Set<string>();
-      assetList.forEach((asset: any) => {
-        if (asset.metadata?.katana?.urls) {
-          asset.metadata.katana.urls.forEach((url: string) => {
-            seenKatana.add(url);
-          });
-        }
-      });
+      const activeJobFromServer = jobsList.find((j: any) => ["running", "pending", "paused", "stopped"].includes(j.status)) ||
+        [...jobsList].sort((a: any, b: any) => new Date(b.started_at || 0).getTime() - new Date(a.started_at || 0).getTime())[0] ||
+        null;
 
-      const activeJobFromServer = jobsList.find((j: any) => j.status === "running" || j.status === "pending" || j.status === "paused" || j.status === "stopped");
+      const completedJobs = jobsList
+        .filter((j: any) => j.status === "completed" || j.status === "failed")
+        .sort((a: any, b: any) => new Date(b.finished_at || 0).getTime() - new Date(a.finished_at || 0).getTime());
+      const lastCompletedJobFromServer = completedJobs[0] || null;
 
       setScanState((prev) => {
+        if (activeProjectRef.current?.id !== projectId) {
+          return prev;
+        }
+
         const isWsActive = prev.jobId && (Date.now() - prev.lastWsEventTime < 10000);
         
         let nextStages = isWsActive ? prev.stages : { ...prev.stages };
@@ -437,22 +636,67 @@ const MainDashboard: React.FC = () => {
         let nextCurrentStage = isWsActive ? prev.currentStage : prev.currentStage;
 
         if (!isWsActive && activeJobFromServer) {
-          const jobPhase = activeJobFromServer.current_phase || "waiting";
-          const transition = transitionToStage(prev.stages, jobPhase);
-          nextStages = transition.stages;
-          nextCurrentStage = transition.currentStage;
-          
-          const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
-          const currentIdx = PIPELINE_ORDER.indexOf(jobPhase.toLowerCase());
-          PIPELINE_ORDER.forEach((stage, idx) => {
-            if (idx < currentIdx) {
+          if (activeJobFromServer.status === "completed") {
+            nextCurrentStage = "completed";
+            const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+            PIPELINE_ORDER.forEach((stage) => {
+              nextStages[stage] = "COMPLETED";
               nextProviderStatus[stage] = "COMPLETED";
-            } else if (idx === currentIdx) {
-              nextProviderStatus[stage] = activeJobFromServer.status === "paused" ? "RUNNING" : (activeJobFromServer.status === "stopped" ? "FAILED" : "RUNNING");
+            });
+            ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
+              nextProviderStatus[sp] = "COMPLETED";
+            });
+          } else if (activeJobFromServer.status === "failed") {
+            nextCurrentStage = "failed";
+            const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+            const jobPhase = (activeJobFromServer.current_phase || "waiting").toLowerCase();
+            const currentIdx = PIPELINE_ORDER.indexOf(jobPhase);
+            PIPELINE_ORDER.forEach((stage, idx) => {
+              if (idx < currentIdx) {
+                nextStages[stage] = "COMPLETED";
+                nextProviderStatus[stage] = "COMPLETED";
+              } else if (idx === currentIdx) {
+                nextStages[stage] = "FAILED";
+                nextProviderStatus[stage] = "FAILED";
+              } else {
+                nextStages[stage] = "PENDING";
+                nextProviderStatus[stage] = "PENDING";
+              }
+            });
+            if (jobPhase === "discovery") {
+              ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
+                nextProviderStatus[sp] = "FAILED";
+              });
             } else {
-              nextProviderStatus[stage] = "PENDING";
+              ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
+                nextProviderStatus[sp] = "COMPLETED";
+              });
             }
-          });
+          } else {
+            const jobPhase = activeJobFromServer.current_phase || "waiting";
+            const transition = transitionToStage(prev.stages, jobPhase);
+            nextStages = transition.stages;
+            nextCurrentStage = transition.currentStage;
+            
+            const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+            const currentIdx = PIPELINE_ORDER.indexOf(jobPhase.toLowerCase());
+            PIPELINE_ORDER.forEach((stage, idx) => {
+              if (idx < currentIdx) {
+                nextProviderStatus[stage] = "COMPLETED";
+              } else if (idx === currentIdx) {
+                nextProviderStatus[stage] = activeJobFromServer.status === "paused" ? "RUNNING" : (activeJobFromServer.status === "stopped" ? "FAILED" : "RUNNING");
+              } else {
+                nextProviderStatus[stage] = "PENDING";
+              }
+            });
+            if (jobPhase.toLowerCase() === "discovery") {
+              ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
+                if (nextProviderStatus[sp] !== "COMPLETED" && nextProviderStatus[sp] !== "FAILED") {
+                  nextProviderStatus[sp] = "RUNNING";
+                }
+              });
+            }
+          }
         } else if (!isWsActive && !activeJobFromServer) {
           nextCurrentStage = "waiting";
         }
@@ -461,8 +705,9 @@ const MainDashboard: React.FC = () => {
 
         return {
           ...prev,
-          jobId: activeJobFromServer ? activeJobFromServer.id : null,
+          jobId: activeJobFromServer && ["running", "pending", "paused", "stopped"].includes(activeJobFromServer.status) ? activeJobFromServer.id : null,
           activeJobObject: activeJobFromServer || null,
+          lastCompletedJobObject: lastCompletedJobFromServer,
           assets: assetList,
           subdomains: subdomainList,
           dnsRecords: dns,
@@ -473,17 +718,17 @@ const MainDashboard: React.FC = () => {
           currentStage: nextCurrentStage,
           providerStatus: nextProviderStatus,
           providerCounts: nextProviderCounts,
-          dnsx_resolved: dns.length || prev.dnsx_resolved,
-          dnsx_nxdomain: dnsx_nxdomain || prev.dnsx_nxdomain,
-          dnsx_wildcards: dnsx_wildcards || prev.dnsx_wildcards,
-          dnsx_unique_ips: uniqueDnsxIps.size || prev.dnsx_unique_ips,
-          subzy_vulnerable: takeovers.filter((r) => r.status.toLowerCase() === "vulnerable").length || prev.subzy_vulnerable,
-          subzy_not_vulnerable: subzy_not_vulnerable || prev.subzy_not_vulnerable,
-          subzy_unknown: subzy_unknown || prev.subzy_unknown,
-          uro_input: uro_input || seenKatana.size || prev.uro_input,
-          uro_normalised: uro_normalised || normalizedUrls.length || prev.uro_normalised,
-          uro_removed: uro_removed || ( (uro_input || seenKatana.size) - (uro_normalised || normalizedUrls.length) ) || prev.uro_removed,
-          gf_total: gf.length || prev.gf_total,
+          dnsx_resolved: dns.length,
+          dnsx_nxdomain: dnsx_nxdomain,
+          dnsx_wildcards: dnsx_wildcards,
+          dnsx_unique_ips: uniqueDnsxIps.size,
+          subzy_vulnerable: takeovers.filter((r) => r.status.toLowerCase() === "vulnerable").length,
+          subzy_not_vulnerable: subzy_not_vulnerable,
+          subzy_unknown: subzy_unknown,
+          uro_input: uro_input || originalUrls.length,
+          uro_normalised: uro_normalised || normalizedUrls.filter(r => r.source === "uro").length,
+          uro_removed: uro_removed || Math.max(0, (uro_input || originalUrls.length) - (uro_normalised || normalizedUrls.filter(r => r.source === "uro").length)),
+          gf_total: gf.reduce((sum, r) => sum + r.categories.length, 0),
           gf_categories: (() => {
             const cats: Record<string, number> = {};
             gf.forEach((r) => {
@@ -491,7 +736,7 @@ const MainDashboard: React.FC = () => {
                 cats[cat] = (cats[cat] ?? 0) + 1;
               });
             });
-            return Object.keys(cats).length > 0 ? cats : prev.gf_categories;
+            return cats;
           })(),
         };
       });
@@ -505,10 +750,11 @@ const MainDashboard: React.FC = () => {
   }, [fetchProjectData]);
 
   useEffect(() => {
+    setScanState(initialScanState);
+    setIsReconnect(false);
+    setActiveTab("dashboard");
     if (activeProject) {
       fetchProjectData();
-    } else {
-      setScanState(initialScanState);
     }
   }, [activeProject]);
 
@@ -600,11 +846,13 @@ const MainDashboard: React.FC = () => {
     }
   };
 
-  const jobId = activeJob?.id;
+  const jobId = activeJob && ["running", "pending", "paused", "stopped"].includes(activeJob.status) ? activeJob.id : null;
 
-  // Listen to WebSocket broadcasts for real-time asset updates
   useEffect(() => {
-    if (!jobId) return;
+    if (!jobId || !activeProject) return;
+
+    const currentProjectId = activeProject.id;
+    const currentJobId = jobId;
 
     let ws: WebSocket | null = null;
     let reconnectTimeout: any = null;
@@ -612,6 +860,12 @@ const MainDashboard: React.FC = () => {
     const maxReconnectDelay = 30000;
     let isClosed = false;
     let isCleanClose = false;
+
+    if (wsRef.current) {
+      (wsRef.current as any).isCleanClose = true;
+      wsRef.current.close();
+      wsRef.current = null;
+    }
 
     const connect = () => {
       if (isClosed || isCleanClose) return;
@@ -623,7 +877,17 @@ const MainDashboard: React.FC = () => {
       wsCount++;
       console.log("WebSocket opened", { jobId, currentWebsocketCount: wsCount, isReconnect });
       console.log("Current websocket count:", wsCount);
+
       ws.onmessage = (event) => {
+        if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+          console.log("Ignoring event: Project or Job changed");
+          if (ws) {
+            (ws as any).isCleanClose = true;
+            ws.close();
+          }
+          return;
+        }
+
         try {
           const rawData = JSON.parse(event.data);
           console.log("WebSocket event received", { jobId, rawData });
@@ -637,10 +901,74 @@ const MainDashboard: React.FC = () => {
               const incomingAsset = data.asset || data.data;
               if (incomingAsset && incomingAsset.domain) {
                 setScanState((prev) => {
+                  if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                    return prev;
+                  }
+
                   const exists = prev.assets.some((a) => a.id === incomingAsset.id || a.domain === incomingAsset.domain);
                   let nextAssets = exists
-                    ? prev.assets.map((a) => (a.id === incomingAsset.id || a.domain === incomingAsset.domain ? incomingAsset : a))
-                    : [...prev.assets, incomingAsset];
+                    ? prev.assets.map((a) => {
+                        if (a.id === incomingAsset.id || a.domain === incomingAsset.domain) {
+                          const mergedMetadata = {
+                            ...(a.metadata || {}),
+                            ...(incomingAsset.metadata || {}),
+                            nuclei: {
+                              ...(a.metadata?.nuclei || {}),
+                              ...(incomingAsset.metadata?.nuclei || {}),
+                              findings: (() => {
+                                const existFindings = a.metadata?.nuclei?.findings || [];
+                                const newFindings = incomingAsset.metadata?.nuclei?.findings || [];
+                                const merged = [...existFindings];
+                                newFindings.forEach((nf: any) => {
+                                  const alreadyHas = merged.some((ef: any) => 
+                                    (ef.template_id === nf.template_id || ef.template_name === nf.template_name) && 
+                                    ef.matched_url === nf.matched_url
+                                  );
+                                  if (!alreadyHas) {
+                                    merged.push(nf);
+                                  }
+                                });
+                                return merged;
+                              })()
+                            }
+                          };
+                          return {
+                            ...a,
+                            ...incomingAsset,
+                            metadata: mergedMetadata,
+                            open_ports: Array.from(new Set([...(a.open_ports || []), ...(incomingAsset.open_ports || [])])),
+                            sources: Array.from(new Set([...(a.sources || []), ...(incomingAsset.sources || [])]))
+                          };
+                        }
+                        return a;
+                      })
+                    : [
+                        ...prev.assets,
+                        {
+                          ...incomingAsset,
+                          metadata: {
+                            ...(incomingAsset.metadata || {}),
+                            nuclei: incomingAsset.metadata?.nuclei
+                              ? {
+                                  ...(incomingAsset.metadata.nuclei || {}),
+                                  findings: (() => {
+                                    const merged: any[] = [];
+                                    (incomingAsset.metadata.nuclei.findings || []).forEach((nf: any) => {
+                                      const alreadyHas = merged.some((ef: any) => 
+                                        (ef.template_id === nf.template_id || ef.template_name === nf.template_name) && 
+                                        ef.matched_url === nf.matched_url
+                                      );
+                                      if (!alreadyHas) {
+                                        merged.push(nf);
+                                      }
+                                    });
+                                    return merged;
+                                  })()
+                                }
+                              : undefined
+                          }
+                        }
+                      ];
 
                   let nextSubdomains = prev.subdomains;
                   if (incomingAsset.type === "subdomain") {
@@ -719,9 +1047,6 @@ const MainDashboard: React.FC = () => {
                   const safe = nextTakeoverRecords.filter((r) => r.status.toLowerCase() === "not vulnerable").length;
                   const unkn = nextTakeoverRecords.filter((r) => r.status.toLowerCase() === "unknown").length;
 
-                  const originalCount = nextNormalizedUrlRecords.filter(r => r.source === "katana" || r.source === "httpx").length;
-                  const normalisedCount = nextNormalizedUrlRecords.filter(r => r.source === "uro").length;
-
                   return {
                     ...prev,
                     assets: nextAssets,
@@ -729,21 +1054,35 @@ const MainDashboard: React.FC = () => {
                     dnsRecords: nextDnsRecords,
                     takeoverRecords: nextTakeoverRecords,
                     normalizedUrlRecords: nextNormalizedUrlRecords,
-                    dnsx_resolved: nextDnsRecords.length || prev.dnsx_resolved,
+                    dnsx_resolved: nextDnsRecords.length,
                     dnsx_unique_ips: uniqueIps.size,
                     subzy_vulnerable: nextTakeoverRecords.length > 0 ? vuln : prev.subzy_vulnerable,
                     subzy_not_vulnerable: nextTakeoverRecords.length > 0 ? safe : prev.subzy_not_vulnerable,
                     subzy_unknown: nextTakeoverRecords.length > 0 ? unkn : prev.subzy_unknown,
-                    uro_input: originalCount || prev.uro_input,
-                    uro_normalised: normalisedCount || prev.uro_normalised,
-                    uro_removed: normalisedCount > 0 ? Math.max(0, (originalCount || prev.uro_input || 0) - normalisedCount) : prev.uro_removed,
                     lastWsEventTime: Date.now(),
+                  };
+                });
+              }
+            } else if (data.type === "finding" || data.type === "finding_event" || (data.type === "scan_summary" && data.event === "FindingDetected")) {
+              const finding = data.finding || data.data;
+              if (finding) {
+                setScanState((prev) => {
+                  if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                    return prev;
+                  }
+                  return {
+                    ...prev,
+                    assets: mergeFindingIntoAssets(prev.assets, finding),
+                    lastWsEventTime: Date.now()
                   };
                 });
               }
             } else if (data.type === "provider_stat") {
               const { provider, count } = data;
               setScanState((prev) => {
+                if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                  return prev;
+                }
                 const nextProviderStatus = updateProviderStatus(prev.providerStatus, provider, "RUNNING");
                 return {
                   ...prev,
@@ -758,6 +1097,9 @@ const MainDashboard: React.FC = () => {
             } else if (data.type === "scan_summary") {
               if (data.provider) {
                 setScanState((prev) => {
+                  if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                    return prev;
+                  }
                   const providerName = data.provider.toLowerCase();
                   let nextStageData = transitionToStage(prev.stages, providerName);
                   let nextProviderStatus = updateProviderStatus(prev.providerStatus, providerName, "COMPLETED");
@@ -811,6 +1153,9 @@ const MainDashboard: React.FC = () => {
                 });
               } else if (data.provider_counts || data.total_unique !== undefined) {
                 setScanState((prev) => {
+                  if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                    return prev;
+                  }
                   return {
                     ...prev,
                     dnsx_resolved: data.dnsx_resolved ?? prev.dnsx_resolved,
@@ -832,6 +1177,9 @@ const MainDashboard: React.FC = () => {
                 if (ws) ws.close();
               } else {
                 setScanState((prev) => {
+                  if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                    return prev;
+                  }
                   let nextStageData = { currentStage: prev.currentStage, stages: prev.stages };
                   let nextProviderStatus = { ...prev.providerStatus };
                   
@@ -868,6 +1216,9 @@ const MainDashboard: React.FC = () => {
               if (urlDataPayload) {
                 const urlItems = Array.isArray(urlDataPayload) ? urlDataPayload : [urlDataPayload];
                 setScanState((prev) => {
+                  if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                    return prev;
+                  }
                   let nextList = [...prev.normalizedUrlRecords];
                   urlItems.forEach((item) => {
                     const urlVal = item.url || item.normalized_url;
@@ -895,6 +1246,9 @@ const MainDashboard: React.FC = () => {
               if (gfDataPayload) {
                 const gfItems = Array.isArray(gfDataPayload) ? gfDataPayload : [gfDataPayload];
                 setScanState((prev) => {
+                  if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                    return prev;
+                  }
                   let nextList = [...prev.gfRecords];
                   gfItems.forEach((item) => {
                     const urlVal = item.url;
@@ -942,6 +1296,9 @@ const MainDashboard: React.FC = () => {
               const lowerMsg = msg.toLowerCase();
               
               setScanState((prev) => {
+                if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                  return prev;
+                }
                 let nextStages = { ...prev.stages };
                 let nextProviderStatus = { ...prev.providerStatus };
                 let nextCurrentStage = prev.currentStage;
@@ -1114,20 +1471,13 @@ const MainDashboard: React.FC = () => {
         }
       };
 
-      ws.onerror = (err) => {
-        console.error("Dashboard WS connection error", err);
-      };
-
-      ws.onclose = (event) => {
-        if (!isClosed) {
-          isClosed = true;
-          wsCount--;
-          console.log("WebSocket closed", { jobId, currentWebsocketCount: wsCount });
-          console.log("Current websocket count:", wsCount);
-        }
-
-        const wsInstCleanClose = (event.target as any).isCleanClose || isCleanClose;
-        if (!wsInstCleanClose) {
+      ws.onclose = () => {
+        isClosed = true;
+        wsCount--;
+        console.log("WebSocket closed", { jobId, currentWebsocketCount: wsCount });
+        console.log("Current websocket count:", wsCount);
+        
+        if (!isCleanClose) {
           console.log("WebSocket reconnect", { jobId, delay: reconnectDelay });
           reconnectTimeout = setTimeout(() => {
             reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
@@ -1138,6 +1488,10 @@ const MainDashboard: React.FC = () => {
             connect();
           }, reconnectDelay);
         }
+      };
+
+      ws.onerror = (err) => {
+        console.error("WebSocket error", err);
       };
     };
 
@@ -1164,7 +1518,7 @@ const MainDashboard: React.FC = () => {
         console.log("Current websocket count:", wsCount);
       }
     };
-  }, [jobId]);
+  }, [jobId, activeProject?.id]);
 
   if (loading) {
     return (

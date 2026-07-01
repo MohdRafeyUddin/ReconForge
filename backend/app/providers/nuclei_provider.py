@@ -9,8 +9,10 @@ import json
 import logging
 import os
 import platform
+import queue
 import subprocess
 import tempfile
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -40,6 +42,7 @@ NUCLEI_PASSES = [
     }
 ]
 
+PASS_TIMEOUT_SECONDS = 1800
 
 class NucleiProvider(BaseProvider):
     @property
@@ -134,13 +137,132 @@ class NucleiProvider(BaseProvider):
             "info": 0
         }
 
-        import threading
-        import queue
-
         def read_stdout(stream, q):
             for line in stream:
                 q.put(line)
+            logger.info("Reader EOF")
             q.put(None)
+
+        def process_line(line: str, current_pass_name: str, current_pass_severity_counts: Dict[str, int]) -> List[Dict[str, Any]]:
+            nonlocal total_findings_found, pass_findings_found
+            events = []
+            try:
+                record = json.loads(line)
+            except Exception:
+                return events
+
+            template_id = record.get("template-id") or record.get("template_id")
+            info = record.get("info") or {}
+            template_name = info.get("name") or template_id
+            severity = (info.get("severity") or "info").lower()
+            matched_url = record.get("matched-at") or record.get("matched_at") or record.get("matched")
+
+            if not template_id or not matched_url:
+                return events
+
+            # Deduplicate findings in this execution
+            f_key = (template_id, matched_url)
+            if f_key in seen_findings:
+                return events
+            seen_findings.add(f_key)
+
+            # Extract additional metadata fields
+            try:
+                parsed_match = urlparse(matched_url)
+                match_host = parsed_match.hostname or parsed_match.path
+                if ":" in match_host:
+                    match_host = match_host.split(":", 1)[0]
+                match_host = match_host.lower().strip()
+            except Exception:
+                match_host = ""
+
+            ip = record.get("ip") or ""
+            tags = info.get("tags") or []
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(",") if t.strip()]
+
+            classification = info.get("classification") or {}
+            cve = classification.get("cve-id") or classification.get("cve_id") or ""
+            cwe = classification.get("cwe-id") or classification.get("cwe_id") or ""
+            cvss = classification.get("cvss-score") or classification.get("cvss_score") or ""
+            curl_command = record.get("curl-command") or record.get("curl_command") or ""
+            timestamp = record.get("timestamp") or datetime.utcnow().isoformat()
+            request = record.get("request") or ""
+            response = record.get("response") or ""
+
+            finding = {
+                "template_id": template_id,
+                "template_name": template_name,
+                "severity": severity,
+                "matched_url": matched_url,
+                "host": match_host,
+                "ip": ip,
+                "tags": tags,
+                "classification": classification,
+                "cve": cve,
+                "cwe": cwe,
+                "cvss": cvss,
+                "curl_command": curl_command,
+                "timestamp": timestamp,
+                "request": request,
+                "response": response,
+                "pass_name": current_pass_name,
+                "source": "nuclei"
+            }
+
+            # Stream finding in real-time to log console
+            events.append({
+                "type": "log",
+                "message": f"\nFinding:\nSeverity: {severity.upper()}\nTemplate: {template_name}\nMatched URL:\n{matched_url}"
+            })
+
+            # Emit FindingDetected WebSocket event
+            events.append({
+                "type": "scan_summary",
+                "event": "FindingDetected",
+                "pass_name": current_pass_name,
+                "finding": finding
+            })
+
+            matched_host = None
+            if match_host:
+                if match_host in target_hosts:
+                    matched_host = match_host
+                else:
+                    for th in target_hosts:
+                        if match_host.endswith("." + th) or th.endswith("." + match_host):
+                            matched_host = th
+                            break
+
+            if matched_host:
+                crawled_findings[matched_host].append(finding)
+                total_findings_found += 1
+                pass_findings_found += 1
+                if severity in severity_counts:
+                    severity_counts[severity] += 1
+                if severity in current_pass_severity_counts:
+                    current_pass_severity_counts[severity] += 1
+
+                # Yield asset event immediately to update database & UI
+                events.append({
+                    "type": "asset",
+                    "data": {
+                        "domain": matched_host,
+                        "type": "subdomain",
+                        "status": "live",
+                        "metadata": {
+                            "source": "nuclei",
+                            "nuclei": {
+                                "findings": [finding],
+                                "scanned_at": int(time.time()),
+                            }
+                        },
+                        "discovered_by": "nuclei",
+                        "sources": ["nuclei"],
+                    }
+                })
+
+            return events
 
         try:
             # Create ONE temp file and reuse it for all three passes
@@ -180,6 +302,7 @@ class NucleiProvider(BaseProvider):
                 yield {"type": "log", "message": f"Scanning {len(urls)} URLs..."}
 
                 args = ["/home/kali/go/bin/nuclei"] if is_windows else []
+                # Removed -stats flag
                 nuclei_flags = [
                     "-l", wsl_temp_path,
                     "-tags", pass_tags,
@@ -189,8 +312,7 @@ class NucleiProvider(BaseProvider):
                     "-duc",
                     "-rl", "150",
                     "-c", "25",
-                    "-bs", "25",
-                    "-stats"
+                    "-bs", "25"
                 ]
                 cmd = [executable, *args, *nuclei_flags]
 
@@ -201,24 +323,8 @@ class NucleiProvider(BaseProvider):
                 from app.job_control import register_process, unregister_process, check_job_status
                 await check_job_status()
 
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    bufsize=1,
-                )
-                register_process(process)
-
-                q = queue.Queue()
-                t = threading.Thread(target=read_stdout, args=(process.stdout, q))
-                t.daemon = True
-                t.start()
-
-                last_progress_time = time.time()
-                pass_start_ts = time.time()
+                process = None
+                t = None
                 pass_findings_found = 0
                 pass_severity_counts = {
                     "critical": 0,
@@ -227,13 +333,50 @@ class NucleiProvider(BaseProvider):
                     "low": 0,
                     "info": 0
                 }
+                pass_start_ts = time.time()
+                timeout_exceeded = False
 
                 try:
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,  # Merge stderr into stdout
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                    )
+                    logger.info("Process started")
+                    register_process(process)
+
+                    q = queue.Queue()
+                    t = threading.Thread(target=read_stdout, args=(process.stdout, q))
+                    t.daemon = True
+                    t.start()
+                    logger.info("Reader thread started")
+
+                    last_progress_time = time.time()
+
                     while True:
                         await check_job_status()
+
+                        # Timeout protection
+                        if time.time() - pass_start_ts > PASS_TIMEOUT_SECONDS:
+                            timeout_exceeded = True
+                            logger.warning(f"Pass {pass_name} exceeded timeout of {PASS_TIMEOUT_SECONDS}s. Terminating process.")
+                            yield {
+                                "type": "log",
+                                "message": f"[-] Pass {pass_name} timed out after {PASS_TIMEOUT_SECONDS} seconds. Terminating..."
+                            }
+                            break
+
                         try:
                             raw_line = q.get_nowait()
                         except queue.Empty:
+                            # Terminate polling loop when process has exited and queue is empty
+                            if process.poll() is not None:
+                                break
+
                             now = time.time()
                             if now - last_progress_time > 15:
                                 elapsed = int(now - pass_start_ts)
@@ -257,148 +400,88 @@ class NucleiProvider(BaseProvider):
                         if not line:
                             continue
 
-                        try:
-                            record = json.loads(line)
-                        except Exception:
-                            continue
-
-                        template_id = record.get("template-id") or record.get("template_id")
-                        info = record.get("info") or {}
-                        template_name = info.get("name") or template_id
-                        severity = (info.get("severity") or "info").lower()
-                        matched_url = record.get("matched-at") or record.get("matched_at") or record.get("matched")
-
-                        if not template_id or not matched_url:
-                            continue
-
-                        # Deduplicate findings in this execution
-                        f_key = (template_id, matched_url)
-                        if f_key in seen_findings:
-                            continue
-                        seen_findings.add(f_key)
-
-                        # Extract additional metadata fields
-                        try:
-                            parsed_match = urlparse(matched_url)
-                            match_host = parsed_match.hostname or parsed_match.path
-                            if ":" in match_host:
-                                match_host = match_host.split(":", 1)[0]
-                            match_host = match_host.lower().strip()
-                        except Exception:
-                            match_host = ""
-
-                        ip = record.get("ip") or ""
-                        tags = info.get("tags") or []
-                        if isinstance(tags, str):
-                            tags = [t.strip() for t in tags.split(",") if t.strip()]
-
-                        classification = info.get("classification") or {}
-                        cve = classification.get("cve-id") or classification.get("cve_id") or ""
-                        cwe = classification.get("cwe-id") or classification.get("cwe_id") or ""
-                        cvss = classification.get("cvss-score") or classification.get("cvss_score") or ""
-                        curl_command = record.get("curl-command") or record.get("curl_command") or ""
-                        timestamp = record.get("timestamp") or datetime.utcnow().isoformat()
-                        request = record.get("request") or ""
-                        response = record.get("response") or ""
-
-                        finding = {
-                            "template_id": template_id,
-                            "template_name": template_name,
-                            "severity": severity,
-                            "matched_url": matched_url,
-                            "host": match_host,
-                            "ip": ip,
-                            "tags": tags,
-                            "classification": classification,
-                            "cve": cve,
-                            "cwe": cwe,
-                            "cvss": cvss,
-                            "curl_command": curl_command,
-                            "timestamp": timestamp,
-                            "request": request,
-                            "response": response,
-                            "pass_name": pass_name,
-                            "source": "nuclei"
-                        }
-
-                        # Stream finding in real-time to log console
-                        yield {
-                            "type": "log",
-                            "message": f"\nFinding:\nSeverity: {severity.upper()}\nTemplate: {template_name}\nMatched URL:\n{matched_url}"
-                        }
-
-                        # Emit FindingDetected WebSocket event
-                        yield {
-                            "type": "scan_summary",
-                            "event": "FindingDetected",
-                            "pass_name": pass_name,
-                            "finding": finding
-                        }
-
-                        matched_host = None
-                        if match_host:
-                            if match_host in target_hosts:
-                                matched_host = match_host
-                            else:
-                                for th in target_hosts:
-                                    if match_host.endswith("." + th) or th.endswith("." + match_host):
-                                        matched_host = th
-                                        break
-
-                        if matched_host:
-                            crawled_findings[matched_host].append(finding)
-                            total_findings_found += 1
-                            pass_findings_found += 1
-                            if severity in severity_counts:
-                                severity_counts[severity] += 1
-                            if severity in pass_severity_counts:
-                                pass_severity_counts[severity] += 1
-
-                            # Yield asset event immediately to update database & UI
-                            yield {
-                                "type": "asset",
-                                "data": {
-                                    "domain": matched_host,
-                                    "type": "subdomain",
-                                    "status": "live",
-                                    "metadata": {
-                                        "source": "nuclei",
-                                        "nuclei": {
-                                            "findings": [finding],
-                                            "scanned_at": int(time.time()),
-                                        }
-                                    },
-                                    "discovered_by": "nuclei",
-                                    "sources": ["nuclei"],
-                                }
-                            }
+                        events = process_line(line, pass_name, pass_severity_counts)
+                        for ev in events:
+                            yield ev
 
                         last_progress_time = time.time()
                         await asyncio.sleep(0)
 
-                finally:
-                    unregister_process(process)
-                    if process.poll() is None:
+                    # Terminate process if timeout exceeded
+                    if timeout_exceeded and process and process.poll() is None:
                         process.terminate()
-                        process.wait()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
 
-                # Yield PassSummary event
-                yield {
-                    "type": "scan_summary",
-                    "event": "PassSummary",
-                    "pass_name": pass_name,
-                    "findings_found": pass_findings_found,
-                    "urls_scanned": len(urls),
-                    "severity_counts": pass_severity_counts
-                }
+                    # Process exited: capture return code
+                    return_code = process.poll() if process else None
+                    logger.info(f"Process exited ({return_code})")
 
-                # Emit NucleiPassCompleted event
-                yield {
-                    "type": "scan_summary",
-                    "event": "NucleiPassCompleted",
-                    "pass_name": pass_name
-                }
-                yield {"type": "log", "message": f"[*] Completed pass: {pass_name}"}
+                    # Drain remaining queue entries
+                    drain_start = time.time()
+                    while True:
+                        try:
+                            raw_line = q.get_nowait()
+                            if raw_line is None:
+                                break
+                            line = raw_line.strip()
+                            if line:
+                                events = process_line(line, pass_name, pass_severity_counts)
+                                for ev in events:
+                                    yield ev
+                        except queue.Empty:
+                            if not t.is_alive():
+                                break
+                            if time.time() - drain_start > 5:
+                                break
+                            await asyncio.sleep(0.05)
+                    logger.info("Queue drained")
+
+                    # Join reader thread
+                    if t and t.is_alive():
+                        t.join(timeout=5)
+                    logger.info("Reader joined")
+
+                except Exception as pass_exc:
+                    logger.error(f"[-] Pass {pass_name} failed: {pass_exc}", exc_info=True)
+                    yield {"type": "log", "message": f"[-] Pass {pass_name} failed: {str(pass_exc)}"}
+
+                finally:
+                    # Clean up pass resources
+                    if process:
+                        unregister_process(process)
+                        if process.poll() is None:
+                            process.terminate()
+                            try:
+                                process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                process.wait()
+                    if t and t.is_alive():
+                        t.join(timeout=5)
+                    logger.info("Cleanup complete")
+
+                    # Yield PassSummary event
+                    yield {
+                        "type": "scan_summary",
+                        "event": "PassSummary",
+                        "pass_name": pass_name,
+                        "findings_found": pass_findings_found,
+                        "urls_scanned": len(urls),
+                        "severity_counts": pass_severity_counts
+                    }
+
+                    # Emit NucleiPassCompleted event
+                    yield {
+                        "type": "scan_summary",
+                        "event": "NucleiPassCompleted",
+                        "pass_name": pass_name
+                    }
+                    yield {"type": "log", "message": f"[*] Completed pass: {pass_name}"}
+                    logger.info("Pass completed")
 
         except Exception as exc:
             logger.error(f"[-] Nuclei scan failed: {exc}", exc_info=True)
@@ -420,3 +503,4 @@ class NucleiProvider(BaseProvider):
             "duration_seconds": duration_s,
             "severity_counts": severity_counts
         }
+        logger.info("Provider completed")
