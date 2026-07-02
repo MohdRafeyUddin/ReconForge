@@ -579,6 +579,6 @@ class KatanaProvider(BaseProvider):
             "provider": self.name,
             "hosts_scanned": len(targets),
             "hosts_with_urls": len(crawled_data),
-            "urls_discovered": total_urls_discovered,
+            "urls_discovered": total_urls_stored,
             "duration_seconds": duration_s,
         }

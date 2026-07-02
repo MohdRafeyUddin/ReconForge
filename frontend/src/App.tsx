@@ -35,6 +35,7 @@ interface DashboardStats {
     assetfinder?: number;
     amass?: number;
     chaos?: number;
+    [key: string]: number | undefined;
   };
   // new provider counters
   dnsx_resolved?: number;
@@ -51,6 +52,9 @@ interface DashboardStats {
   gf_total?: number;
   normalized_urls_count?: number;
   gf_urls_count?: number;
+  // Dual-mode Nuclei pipeline findings
+  nuclei_host_findings?: number;
+  nuclei_endpoint_findings?: number;
 }
 
 
@@ -104,6 +108,9 @@ const initialScanState: ScanState = {
     katana: "PENDING",
     uro: "PENDING",
     gf: "PENDING",
+    nuclei_host: "PENDING",
+    nuclei_endpoint: "PENDING",
+    // Legacy key kept for backward-compat with any existing WS events.
     nuclei: "PENDING",
   },
   providerCounts: {},
@@ -139,6 +146,8 @@ const initialScanState: ScanState = {
     katana: "PENDING",
     uro: "PENDING",
     gf: "PENDING",
+    nuclei_host: "PENDING",
+    nuclei_endpoint: "PENDING",
     nuclei: "PENDING",
   },
   lastWsEventTime: 0,
@@ -151,7 +160,7 @@ const transitionToStage = (
   currentStage: string;
   stages: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
 } => {
-  const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+  const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei_host", "nuclei_endpoint", "nuclei"];
   const targetIdx = PIPELINE_ORDER.indexOf(newStage.toLowerCase());
   
   if (targetIdx === -1) {
@@ -270,6 +279,8 @@ const MainDashboard: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("dashboard");
+  const [initialInventoryTab, setInitialInventoryTab] = useState<"assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei">("assets");
+  const [initialSeverityFilter, setInitialSeverityFilter] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isReconnect, setIsReconnect] = useState(false);
 
@@ -429,6 +440,9 @@ const MainDashboard: React.FC = () => {
     
     gf_total: derivedGfTotal,
     gf_categories: derivedGfCategories,
+    // Per-scan Nuclei totals — populated from providerCounts when WS summary events arrive.
+    nuclei_host_findings: scanState.providerCounts.nuclei_host ?? undefined,
+    nuclei_endpoint_findings: scanState.providerCounts.nuclei_endpoint ?? undefined,
   };
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -508,7 +522,12 @@ const MainDashboard: React.FC = () => {
 
       const originalUrls: { original_url: string; normalized_url: string; duplicate_removed: boolean; source: string }[] = [];
 
-      assetList.forEach((asset: any) => {
+      // 1. Separate real assets from Uro/GF URL assets
+      const realAssets = assetList.filter((a: any) => a.type !== "uro_url" && a.type !== "gf_url");
+      const uroAssets = assetList.filter((a: any) => a.type === "uro_url");
+      const gfAssets = assetList.filter((a: any) => a.type === "gf_url");
+
+      realAssets.forEach((asset: any) => {
         if (asset.metadata?.dnsx) {
           const dnsx = asset.metadata.dnsx;
           if (!dns.some((r) => r.subdomain === asset.domain)) {
@@ -561,7 +580,29 @@ const MainDashboard: React.FC = () => {
       });
 
       const normalizedUrls: NormalizedUrlRecord[] = [];
-      if (uro_normalised > 0) {
+      if (uroAssets.length > 0) {
+        uroAssets.forEach((asset: any) => {
+          const uro = asset.metadata?.uro || {};
+          normalizedUrls.push({
+            original_url: uro.original_url || asset.domain,
+            normalized_url: uro.normalized_url || asset.domain,
+            duplicate_removed: uro.duplicate_removed || false,
+            source: "uro",
+          });
+        });
+        
+        const normSet = new Set(normalizedUrls.map(u => u.normalized_url));
+        originalUrls.forEach((item) => {
+          if (!normSet.has(item.normalized_url)) {
+            normalizedUrls.push({
+              original_url: item.original_url,
+              normalized_url: item.normalized_url,
+              duplicate_removed: true,
+              source: item.source,
+            });
+          }
+        });
+      } else if (uro_normalised > 0) {
         originalUrls.forEach((item, idx) => {
           if (idx < uro_normalised) {
             normalizedUrls.push({
@@ -588,36 +629,48 @@ const MainDashboard: React.FC = () => {
       const gf: GfUrlRecord[] = [];
       const seenGf = new Set<string>();
       
-      jobsList.forEach((job: any) => {
-        if (Array.isArray(job.logs)) {
-          job.logs.forEach((log: string) => {
-            const match = log.match(/^\s*\[\+\]\s+(https?:\/\/\S+)\s+→\s+(.+)$/);
-            if (match) {
-              const url = match[1];
-              const categories = match[2].split(",").map((c: string) => c.trim()).filter(Boolean);
-              categories.forEach((cat) => {
-                const key = `${cat}:${url}`;
-                if (!seenGf.has(key)) {
-                  seenGf.add(key);
-                  const existing = gf.find((r) => r.url === url);
-                  if (existing) {
-                    if (!existing.categories.includes(cat)) {
-                      existing.categories.push(cat);
-                    }
-                  } else {
-                    gf.push({
-                      url,
-                      categories: [cat],
-                      source: "gf",
-                      classified_at: Math.floor(Date.now() / 1000),
-                    });
-                  }
-                }
-              });
-            }
+      if (gfAssets.length > 0) {
+        gfAssets.forEach((asset: any) => {
+          const gfData = asset.metadata?.gf || {};
+          gf.push({
+            url: gfData.url || asset.domain,
+            categories: gfData.categories || [],
+            source: "gf",
+            classified_at: gfData.classified_at || Math.floor(Date.now() / 1000),
           });
-        }
-      });
+        });
+      } else {
+        jobsList.forEach((job: any) => {
+          if (Array.isArray(job.logs)) {
+            job.logs.forEach((log: string) => {
+              const match = log.match(/^\s*\[\+\]\s+(https?:\/\/\S+)\s+→\s+(.+)$/);
+              if (match) {
+                const url = match[1];
+                const categories = match[2].split(",").map((c: string) => c.trim()).filter(Boolean);
+                categories.forEach((cat) => {
+                  const key = `${cat}:${url}`;
+                  if (!seenGf.has(key)) {
+                    seenGf.add(key);
+                    const existing = gf.find((r) => r.url === url);
+                    if (existing) {
+                      if (!existing.categories.includes(cat)) {
+                        existing.categories.push(cat);
+                      }
+                    } else {
+                      gf.push({
+                        url,
+                        categories: [cat],
+                        source: "gf",
+                        classified_at: Math.floor(Date.now() / 1000),
+                      });
+                    }
+                  }
+                });
+              }
+            });
+          }
+        });
+      }
 
       const uniqueDnsxIps = new Set<string>();
       dns.forEach((r) => {
@@ -639,8 +692,6 @@ const MainDashboard: React.FC = () => {
           return prev;
         }
 
-        // isWsActive: only suppress stage/provider-status re-computation if WS is
-        // actively streaming events. Asset data is ALWAYS refreshed from server.
         const isWsActive = prev.jobId && (Date.now() - prev.lastWsEventTime < 8000);
         
         let nextStages = { ...prev.stages };
@@ -650,7 +701,7 @@ const MainDashboard: React.FC = () => {
         if (!isWsActive && activeJobFromServer) {
           if (activeJobFromServer.status === "completed") {
             nextCurrentStage = "completed";
-            const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+            const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei_host", "nuclei_endpoint", "nuclei"];
             PIPELINE_ORDER.forEach((stage) => {
               nextStages[stage] = "COMPLETED";
               nextProviderStatus[stage] = "COMPLETED";
@@ -660,7 +711,7 @@ const MainDashboard: React.FC = () => {
             });
           } else if (activeJobFromServer.status === "failed") {
             nextCurrentStage = "failed";
-            const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+            const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei_host", "nuclei_endpoint", "nuclei"];
             const jobPhase = (activeJobFromServer.current_phase || "waiting").toLowerCase();
             const currentIdx = PIPELINE_ORDER.indexOf(jobPhase);
             PIPELINE_ORDER.forEach((stage, idx) => {
@@ -715,23 +766,23 @@ const MainDashboard: React.FC = () => {
 
         const nextProviderCounts = { ...prev.providerCounts, ...dashboardStats.provider_counts };
 
-        // Merge nuclei findings from restored assetList so counts survive page reload.
-        const nucleiCountFromAssets = assetList.reduce(
+        const nucleiCountFromAssets = realAssets.reduce(
           (t: number, a: any) => t + (a.metadata?.nuclei?.findings?.length ?? 0), 0
         );
         if (nucleiCountFromAssets > 0) {
           nextProviderCounts["nuclei"] = nucleiCountFromAssets;
         }
 
+        // Determine derived subzy safe and unknown counts strictly from persisted takeoverRecords
+        const subzySafe = takeovers.filter((r) => r.status.toLowerCase() === "not vulnerable").length;
+        const subzyUnkn = takeovers.filter((r) => r.status.toLowerCase() === "unknown").length;
+
         return {
           ...prev,
-          // Always use server job list to determine active job so the UI
-          // reflects the real job status even after WS close.
           jobId: activeJobFromServer && ["running", "pending", "paused", "stopped"].includes(activeJobFromServer.status) ? activeJobFromServer.id : null,
           activeJobObject: activeJobFromServer || null,
           lastCompletedJobObject: lastCompletedJobFromServer,
-          // Always restore full asset+subdomain list from server — findings live inside asset metadata.
-          assets: assetList,
+          assets: realAssets,
           subdomains: subdomainList,
           dnsRecords: dns,
           takeoverRecords: takeovers,
@@ -746,8 +797,8 @@ const MainDashboard: React.FC = () => {
           dnsx_wildcards: dnsx_wildcards,
           dnsx_unique_ips: uniqueDnsxIps.size,
           subzy_vulnerable: takeovers.filter((r) => r.status.toLowerCase() === "vulnerable").length,
-          subzy_not_vulnerable: subzy_not_vulnerable,
-          subzy_unknown: subzy_unknown,
+          subzy_not_vulnerable: subzySafe || subzy_not_vulnerable,
+          subzy_unknown: subzyUnkn || subzy_unknown,
           uro_input: uro_input || originalUrls.length,
           uro_normalised: uro_normalised || normalizedUrls.filter(r => r.source === "uro").length,
           uro_removed: uro_removed || Math.max(0, (uro_input || originalUrls.length) - (uro_normalised || normalizedUrls.filter(r => r.source === "uro").length)),
@@ -779,6 +830,8 @@ const MainDashboard: React.FC = () => {
     setScanState(initialScanState);
     setIsReconnect(false);
     setActiveTab("dashboard");
+    setInitialInventoryTab("assets");
+    setInitialSeverityFilter(null);
     if (activeProject) {
       fetchProjectData();
     }
@@ -1171,10 +1224,29 @@ const MainDashboard: React.FC = () => {
                         ? { ...prev.gf_categories, ...data.matches_by_category }
                         : prev.gf_categories,
                     };
+                  } else if (data.provider === "Nuclei Host Scan") {
+                    // Host scan completed — mark nuclei_host as COMPLETED.
+                    const nucleiHostFindings = data.findings_found ?? 0;
+                    extraStats = {
+                      providerCounts: {
+                        ...prev.providerCounts,
+                        nuclei_host: nucleiHostFindings,
+                        // Aggregate into the legacy nuclei key so Security Findings card still works.
+                        nuclei: (prev.providerCounts.nuclei ?? 0) + nucleiHostFindings,
+                      },
+                    } as any;
+                  } else if (data.provider === "Nuclei Endpoint Scan") {
+                    // Endpoint scan completed — mark nuclei_endpoint as COMPLETED.
+                    const nucleiEndpointFindings = data.findings_found ?? 0;
+                    extraStats = {
+                      providerCounts: {
+                        ...prev.providerCounts,
+                        nuclei_endpoint: nucleiEndpointFindings,
+                        nuclei: (prev.providerCounts.nuclei ?? 0) + nucleiEndpointFindings,
+                      },
+                    } as any;
                   } else if (data.provider === "Nuclei") {
-                    // Update providerCounts so the Nuclei Yield card shows the real total.
-                    // The exact count is also derived live from assets, but this provides
-                    // an immediate update from the final summary event.
+                    // Legacy single-mode Nuclei summary (backward compat).
                     const nucleiFindings = data.findings_found ?? 0;
                     extraStats = {
                       providerCounts: {
@@ -1227,7 +1299,7 @@ const MainDashboard: React.FC = () => {
                   
                   if (data.status === "completed" || data.status === "failed") {
                     nextStageData = transitionToStage(prev.stages, "completed");
-                    const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+                    const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei_host", "nuclei_endpoint", "nuclei"];
                     PIPELINE_ORDER.forEach((s) => {
                       nextProviderStatus[s] = data.status === "completed" ? "COMPLETED" : "FAILED";
                     });
@@ -1373,6 +1445,10 @@ const MainDashboard: React.FC = () => {
                   detectedStage = "uro";
                 } else if (lowerMsg.includes("gf pattern") || lowerMsg.includes("gf classification") || (lowerMsg.includes("classifying") && lowerMsg.includes("urls"))) {
                   detectedStage = "gf";
+                } else if (lowerMsg.includes("nuclei host scan") || lowerMsg.includes("host scan") && lowerMsg.includes("nuclei")) {
+                  detectedStage = "nuclei_host";
+                } else if (lowerMsg.includes("nuclei endpoint scan") || (lowerMsg.includes("endpoint scan") && lowerMsg.includes("nuclei"))) {
+                  detectedStage = "nuclei_endpoint";
                 } else if (lowerMsg.includes("starting nuclei") || lowerMsg.includes("launching nuclei") || lowerMsg.includes("nuclei vuln scan")) {
                   detectedStage = "nuclei";
                 }
@@ -1430,7 +1506,7 @@ const MainDashboard: React.FC = () => {
                 }
 
                 let nextTakeoverRecords = prev.takeoverRecords;
-                const subzyLineMatch = msg.match(/^\s*\[([!+?])\]\s+(\S+)\s+→\s+(\w[\w\s]*)/);
+                const subzyLineMatch = msg.match(/^\s*\[([!+?])\]\s+(\S+)\s+→\s+(Vulnerable|Not\s+Vulnerable|Unknown)/i);
                 if (subzyLineMatch) {
                   const subdomain = subzyLineMatch[2];
                   const takeover_status = subzyLineMatch[3].trim();
@@ -1601,7 +1677,13 @@ const MainDashboard: React.FC = () => {
               {tabs.map((tab) => (
                 <button
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
+                  onClick={() => {
+                    setActiveTab(tab.id);
+                    if (tab.id === "inventory") {
+                      setInitialInventoryTab("assets");
+                      setInitialSeverityFilter(null);
+                    }
+                  }}
                   className={`flex items-center space-x-2 px-4 py-2.5 rounded-t-lg text-xs font-bold uppercase tracking-wider transition-all cursor-pointer ${
                     activeTab === tab.id
                       ? "bg-dark-card border-t border-x border-dark-border text-cyber-accent"
@@ -1646,6 +1728,11 @@ const MainDashboard: React.FC = () => {
                 onResetScan={handleResetScan}
                 stages={stages}
                 providerStatus={providerStatus}
+                onSelectSeverity={(severity: string) => {
+                  setInitialInventoryTab("nuclei");
+                  setInitialSeverityFilter(severity);
+                  setActiveTab("inventory");
+                }}
               />
             )}
 
@@ -1661,6 +1748,8 @@ const MainDashboard: React.FC = () => {
                 takeoverRecords={takeoverRecords}
                 normalizedUrlRecords={normalizedUrlRecords}
                 gfRecords={gfRecords}
+                initialTab={initialInventoryTab}
+                initialSeverityFilter={initialSeverityFilter}
               />
             )}
 

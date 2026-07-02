@@ -248,10 +248,10 @@ class GfProvider(BaseProvider):
                     logger.warning("Failed to remove GF input file: %s", temp_path)
 
         duration_s = int(time.time() - start_ts)
-        total_classified = len(url_categories)
+        total_classified = sum(matches_by_category.values())
         complete_msg = (
             f"GF completed. "
-            f"URLs classified: {total_classified} | "
+            f"Matches: {total_classified} | "
             f"Duration: {duration_s}s"
         )
         logger.info(complete_msg)

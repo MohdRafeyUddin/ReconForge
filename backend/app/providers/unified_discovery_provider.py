@@ -460,44 +460,122 @@ class UnifiedDiscoveryProvider(BaseProvider):
         # ================================================================
 
         gf_classified = 0
+        # Collect GF-classified URLs for the bug-class categories that benefit
+        # from parameterised endpoint scanning.  Other categories (debug, upload,
+        # aws, graphql) are informational and are intentionally excluded.
+        ENDPOINT_SCAN_CATEGORIES = {"xss", "sqli", "ssrf", "lfi", "ssti", "idor", "redirect", "rce"}
+        gf_endpoint_urls: List[str] = []
+        gf_seen_endpoint_urls: set = set()
 
         if uro_normalised_urls:
             gf_provider = GfProvider()
             async for event in self._run_phase(gf_provider, uro_normalised_urls, "GF Classification"):
                 if event.get("type") == "scan_summary" and event.get("provider") == "GF":
                     gf_classified = event.get("urls_classified", 0)
+                elif event.get("type") == "gf_event":
+                    gf_data = event.get("data", {})
+                    url = gf_data.get("url", "")
+                    categories = set(gf_data.get("categories", []))
+                    # Only include URLs that matched an exploit-relevant category.
+                    if url and categories & ENDPOINT_SCAN_CATEGORIES:
+                        if url not in gf_seen_endpoint_urls:
+                            gf_seen_endpoint_urls.add(url)
+                            gf_endpoint_urls.append(url)
                 yield event
         elif unique_live_urls:
             yield {"type": "log", "message": "[*] No normalised URLs; skipping GF."}
 
         # ================================================================
-        # PHASE 9: Vulnerability Scanning (Nuclei)
+        # PHASE 9: Vulnerability Scanning (Nuclei — two concurrent scans)
+        #
+        #   Host Scan     → live HTTPX hosts   → tech / exposure / misconfig
+        #   Endpoint Scan → GF-classified URLs → sqli / xss / ssrf / lfi / ssti …
+        #
+        # The two scans run concurrently via asyncio tasks that push events onto
+        # a shared async queue.  Neither scan can block the other.
         # ================================================================
 
-        # Build Nuclei target list: prefer Uro-normalised URLs; fall back to
-        # live-host URLs so Nuclei always has at least something to scan.
-        nuclei_targets: List[str] = []
-        if uro_normalised_urls:
-            nuclei_targets = list(dict.fromkeys(uro_normalised_urls))
+        nuclei_host_findings = 0
+        nuclei_endpoint_findings = 0
+
+        # Deduplicated host-scan targets: one URL per live host.
+        host_scan_targets: List[str] = list(dict.fromkeys(unique_live_urls)) if unique_live_urls else []
+
+        if not host_scan_targets and not gf_endpoint_urls:
+            yield {"type": "log", "message": "[*] No targets for Nuclei; skipping."}
         else:
-            for host in unique_live_hosts:
-                host_urls = host_to_urls.get(host, [])
-                if not host_urls:
-                    live_url = host_to_live_url.get(host)
-                    host_urls = [live_url] if live_url else [f"http://{host}"]
-                nuclei_targets.extend(host_urls)
-            nuclei_targets = list(dict.fromkeys(nuclei_targets))
-
-        nuclei_findings_count = 0
-
-        if nuclei_targets:
             nuclei_provider = NucleiProvider()
-            async for event in self._run_phase(nuclei_provider, nuclei_targets, "Nuclei Vulnerability Scan"):
-                if event.get("type") == "scan_summary":
-                    nuclei_findings_count = event.get("findings_found", 0)
+            nuclei_queue: asyncio.Queue = asyncio.Queue()
+            SENTINEL = object()
+
+            async def run_host_scan() -> None:
+                try:
+                    if host_scan_targets:
+                        async for event in nuclei_provider.discover_host_scan(host_scan_targets):
+                            await nuclei_queue.put(event)
+                    else:
+                        await nuclei_queue.put({
+                            "type": "log",
+                            "message": "[*] No live hosts for Nuclei Host Scan; skipping.",
+                        })
+                except Exception as exc:
+                    logger.error("Nuclei Host Scan task failed: %s", exc, exc_info=True)
+                    await nuclei_queue.put({"type": "log", "message": f"[-] Nuclei Host Scan failed: {exc}"})
+                finally:
+                    await nuclei_queue.put(("__done__", "host"))
+
+            async def run_endpoint_scan() -> None:
+                try:
+                    if gf_endpoint_urls:
+                        async for event in nuclei_provider.discover_endpoint_scan(gf_endpoint_urls):
+                            await nuclei_queue.put(event)
+                    else:
+                        await nuclei_queue.put({
+                            "type": "log",
+                            "message": "[*] No GF-classified endpoint URLs for Nuclei Endpoint Scan; skipping.",
+                        })
+                except Exception as exc:
+                    logger.error("Nuclei Endpoint Scan task failed: %s", exc, exc_info=True)
+                    await nuclei_queue.put({"type": "log", "message": f"[-] Nuclei Endpoint Scan failed: {exc}"})
+                finally:
+                    await nuclei_queue.put(("__done__", "endpoint"))
+
+            host_task     = asyncio.create_task(run_host_scan())
+            endpoint_task = asyncio.create_task(run_endpoint_scan())
+            tasks_done = 0
+            expected_done = 2
+
+            yield {"type": "log", "message": "\n========== Nuclei Vulnerability Scanning =========="}
+            yield {"type": "log", "message": (
+                f"[*] Host Scan    → {len(host_scan_targets)} live host URLs\n"
+                f"[*] Endpoint Scan → {len(gf_endpoint_urls)} GF-classified URLs"
+            )}
+
+            while tasks_done < expected_done:
+                try:
+                    item = await asyncio.wait_for(nuclei_queue.get(), timeout=0.3)
+                except asyncio.TimeoutError:
+                    continue
+
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "__done__":
+                    tasks_done += 1
+                    continue
+
+                event = item
+                # Track per-scan findings totals from summary events.
+                if event.get("type") == "scan_summary" and event.get("provider") == "Nuclei Host Scan":
+                    nuclei_host_findings = event.get("findings_found", nuclei_host_findings)
+                elif event.get("type") == "scan_summary" and event.get("provider") == "Nuclei Endpoint Scan":
+                    nuclei_endpoint_findings = event.get("findings_found", nuclei_endpoint_findings)
+                elif event.get("type") == "scan_summary" and event.get("event") == "FindingDetected":
+                    # Real-time finding — let it flow through unchanged.
+                    pass
+
                 yield event
-        elif unique_resolved:
-            yield {"type": "log", "message": "[*] No URLs for Nuclei; skipping."}
+
+            await asyncio.gather(host_task, endpoint_task, return_exceptions=True)
+
+        nuclei_findings_count = nuclei_host_findings + nuclei_endpoint_findings
 
         # ================================================================
         # Final summary
@@ -506,15 +584,17 @@ class UnifiedDiscoveryProvider(BaseProvider):
         final_summary_msg = (
             f"\n{'='*10} Pipeline Complete {'='*10}\n"
             f"[√] Unified Discovery Pipeline finished.\n"
-            f"    Passive Discovery : {total_unique} unique subdomains\n"
-            f"    DNSx Resolved     : {dnsx_resolved} | NXDOMAIN: {dnsx_nxdomain} | Wildcards: {dnsx_wildcards}\n"
-            f"    Subzy Vulnerable  : {subzy_vulnerable}\n"
-            f"    HTTPX Live Hosts  : {live_hosts}\n"
-            f"    Naabu Open Ports  : {naabu_open_ports} across {naabu_hosts_with_ports} hosts\n"
-            f"    Katana URLs       : {katana_urls_discovered} across {katana_hosts_scanned} hosts\n"
-            f"    Uro Normalised    : {len(uro_normalised_urls)} (removed {uro_removed})\n"
-            f"    GF Classified     : {gf_classified} URLs\n"
-            f"    Nuclei Findings   : {nuclei_findings_count}"
+            f"    Passive Discovery  : {total_unique} unique subdomains\n"
+            f"    DNSx Resolved      : {dnsx_resolved} | NXDOMAIN: {dnsx_nxdomain} | Wildcards: {dnsx_wildcards}\n"
+            f"    Subzy Vulnerable   : {subzy_vulnerable}\n"
+            f"    HTTPX Live Hosts   : {live_hosts}\n"
+            f"    Naabu Open Ports   : {naabu_open_ports} across {naabu_hosts_with_ports} hosts\n"
+            f"    Katana URLs (Unique): {katana_urls_discovered} across {katana_hosts_scanned} hosts\n"
+            f"    Uro Normalised URLs : {len(uro_normalised_urls)} (removed {uro_removed})\n"
+            f"    GF Matches          : {gf_classified} | Endpoint targets: {len(gf_endpoint_urls)}\n"
+            f"    Nuclei Host Scan   : {nuclei_host_findings} findings\n"
+            f"    Nuclei Endpoint Scan : {nuclei_endpoint_findings} findings\n"
+            f"    Nuclei Findings    : {nuclei_findings_count}"
         )
         logger.info(final_summary_msg)
         yield {"type": "log", "message": final_summary_msg}
@@ -527,18 +607,22 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 "chaos":       provider_counts.get("chaos", 0),
                 "amass":       provider_counts.get("amass", 0),
             },
-            "total_unique":              total_unique,
-            "dnsx_resolved":             dnsx_resolved,
-            "dnsx_nxdomain":             dnsx_nxdomain,
-            "dnsx_wildcards_filtered":   dnsx_wildcards,
-            "subzy_vulnerable":          subzy_vulnerable,
-            "live_hosts":                live_hosts,
+            "total_unique":                total_unique,
+            "dnsx_resolved":               dnsx_resolved,
+            "dnsx_nxdomain":               dnsx_nxdomain,
+            "dnsx_wildcards_filtered":     dnsx_wildcards,
+            "subzy_vulnerable":            subzy_vulnerable,
+            "live_hosts":                  live_hosts,
             "naabu_hosts_with_open_ports": naabu_hosts_with_ports,
-            "naabu_open_ports":          naabu_open_ports,
-            "katana_hosts_scanned":      katana_hosts_scanned,
-            "katana_urls_discovered":    katana_urls_discovered,
-            "uro_normalised_urls":       len(uro_normalised_urls),
-            "uro_removed":               uro_removed,
-            "gf_classified":             gf_classified,
-            "nuclei_findings_count":     nuclei_findings_count,
+            "naabu_open_ports":            naabu_open_ports,
+            "katana_hosts_scanned":        katana_hosts_scanned,
+            "katana_urls_discovered":      katana_urls_discovered,
+            "uro_normalised_urls":         len(uro_normalised_urls),
+            "uro_removed":                 uro_removed,
+            "gf_classified":              gf_classified,
+            "gf_endpoint_urls":            len(gf_endpoint_urls),
+            "nuclei_host_findings":        nuclei_host_findings,
+            "nuclei_endpoint_findings":    nuclei_endpoint_findings,
+            "nuclei_findings_count":       nuclei_findings_count,
         }
+

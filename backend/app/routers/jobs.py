@@ -208,6 +208,82 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                 await manager.broadcast(job_id, {"type": "log", "message": alert_msg})
                 await manager.broadcast(job_id, {"type": "asset_discovered", "asset": serialize_doc(broadcast_asset)})
 
+            elif event_type in ("url_event", "gf_event"):
+                import time
+                url_data = event.get("data") or {}
+                url_val = url_data.get("url")
+                if url_val:
+                    if event_type == "url_event":
+                        existing = await db.assets.find_one({
+                            "project_id": project_id,
+                            "domain": url_val,
+                            "type": "uro_url"
+                        })
+                        if not existing:
+                            await db.assets.insert_one({
+                                "project_id": project_id,
+                                "domain": url_val,
+                                "type": "uro_url",
+                                "status": "live",
+                                "metadata": {
+                                    "source": "uro",
+                                    "uro": {
+                                        "original_url": url_data.get("original_url", url_val),
+                                        "normalized_url": url_val,
+                                        "duplicate_removed": url_data.get("duplicate_removed", False),
+                                    }
+                                },
+                                "discovered_by": "uro",
+                                "sources": ["uro"],
+                                "created_at": datetime.utcnow(),
+                                "updated_at": datetime.utcnow()
+                            })
+                    elif event_type == "gf_event":
+                        existing = await db.assets.find_one({
+                            "project_id": project_id,
+                            "domain": url_val,
+                            "type": "gf_url"
+                        })
+                        if existing:
+                            metadata = existing.get("metadata") or {}
+                            gf_meta = metadata.get("gf") or {}
+                            existing_cats = gf_meta.get("categories") or []
+                            new_cats = list(set(existing_cats + url_data.get("categories", [])))
+                            updated_metadata = {
+                                **metadata,
+                                "gf": {
+                                    **gf_meta,
+                                    "categories": new_cats
+                                }
+                            }
+                            await db.assets.update_one(
+                                {"_id": existing["_id"]},
+                                {"$set": {
+                                    "metadata": updated_metadata,
+                                    "updated_at": datetime.utcnow()
+                                }}
+                            )
+                        else:
+                            await db.assets.insert_one({
+                                "project_id": project_id,
+                                "domain": url_val,
+                                "type": "gf_url",
+                                "status": "live",
+                                "metadata": {
+                                    "source": "gf",
+                                    "gf": {
+                                        "url": url_val,
+                                        "categories": url_data.get("categories", []),
+                                        "classified_at": url_data.get("classified_at", int(time.time()))
+                                    }
+                                },
+                                "discovered_by": "gf",
+                                "sources": ["gf"],
+                                "created_at": datetime.utcnow(),
+                                "updated_at": datetime.utcnow()
+                            })
+                await manager.broadcast(job_id, event)
+
             elif event_type == "scan_summary":
                 # Forward available summary fields without inventing zero values
                 # for internal stages such as HTTPX or Naabu.

@@ -39,6 +39,9 @@ interface DashboardStats {
   gf_total?: number;
   normalized_urls_count?: number;
   gf_urls_count?: number;
+  // Per-scan Nuclei findings (new dual-mode pipeline)
+  nuclei_host_findings?: number;
+  nuclei_endpoint_findings?: number;
 }
 
 interface Project {
@@ -64,6 +67,7 @@ interface Asset {
     ip_address?: string;
     technologies?: string[];
     katana?: {
+      urls?: string[];
       endpoints?: string[];
       js_files?: string[];
       forms?: any[];
@@ -101,6 +105,7 @@ interface OverviewDashboardProps {
   onResetScan?: () => void;
   stages?: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
   providerStatus?: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
+  onSelectSeverity?: (severity: string) => void;
 }
 
 const COLORS = ["#3B82F6", "#06B6D4", "#10B981", "#F59E0B", "#EF4444"];
@@ -120,13 +125,14 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   onLaunchScan,
   onRefresh,
   activeJob = null,
-  currentPhase = "waiting",
+  currentPhase = "",
   onPauseScan,
   onResumeScan,
   onStopScan,
   onResetScan,
   stages = {},
   providerStatus = {},
+  onSelectSeverity,
 }) => {
   const [selectedProvider, setSelectedProvider] = useState("Unified Discovery");
   const [providers, setProviders] = useState<string[]>(FALLBACK_PROVIDERS);
@@ -210,7 +216,8 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     // 3. Fallback based on current phase
     const PROVIDER_ORDER = [
       "subfinder", "assetfinder", "chaos", "amass",
-      "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"
+      "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf",
+      "nuclei_host", "nuclei_endpoint", "nuclei"
     ];
     
     const currentPhaseLower = currentPhase?.toLowerCase();
@@ -455,9 +462,10 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     { label: "Naabu", tool: "naabu", color: "#F43F5E" },
     { label: "HTTPX", tool: "httpx", color: "#8B5CF6" },
     { label: "Katana", tool: "katana", color: "#06B6D4" },
-    { label: "Uro", tool: "uro", color: "#10B981" },
-    { label: "GF", tool: "gf", color: "#F59E0B" },
-    { label: "Nuclei", tool: "nuclei", color: "#EF4444" },
+    { label: "Uro",             tool: "uro",             color: "#10B981" },
+    { label: "GF",              tool: "gf",              color: "#F59E0B" },
+    { label: "Nuclei Host",     tool: "nuclei_host",     color: "#EF4444" },
+    { label: "Nuclei Endpoint", tool: "nuclei_endpoint", color: "#F97316" },
   ].map(p => {
     const pStatus = getProviderStatus(p.tool);
     
@@ -478,6 +486,21 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
       rawCount = stats.uro_normalised ?? 0;
     } else if (p.tool === "gf") {
       rawCount = stats.gf_total ?? 0;
+    } else if (p.tool === "nuclei_host") {
+      // Sum findings from assets where scan mode was host-level
+      rawCount = assets.reduce(
+        (t, a) => t + (a.metadata?.nuclei?.findings?.filter(
+          (f: any) => f.pass_name === "HostExposure" || f.source === "nuclei_host"
+        ).length || 0),
+        0
+      ) || (stats.nuclei_host_findings ?? 0);
+    } else if (p.tool === "nuclei_endpoint") {
+      rawCount = assets.reduce(
+        (t, a) => t + (a.metadata?.nuclei?.findings?.filter(
+          (f: any) => f.pass_name === "EndpointBugClass" || f.pass_name === "EndpointCritical" || f.source === "nuclei_endpoint"
+        ).length || 0),
+        0
+      ) || (stats.nuclei_endpoint_findings ?? 0);
     } else if (p.tool === "nuclei") {
       rawCount = totalNucleiFindings;
     }
@@ -535,10 +558,11 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
               ["naabu",       "Naabu"],
               ["httpx",       "HTTPX"],
               ["katana",      "Katana"],
-              ["uro",         "Uro"],
-              ["gf",          "GF"],
-              ["nuclei",      "Nuclei"],
-              ["completed",    "Completed"],
+              ["uro",            "Uro"],
+              ["gf",             "GF"],
+              ["nuclei_host",    "Nuclei Host"],
+              ["nuclei_endpoint","Nuclei Endpoint"],
+              ["completed",       "Completed"],
             ] as [string, string][]).map(([phase, label], i, arr) => (
               <React.Fragment key={phase}>
                 {renderPipelineItem(phase, label)}
@@ -586,7 +610,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
         <StatCard
           title="Crawled URLs"
           value={totalUrlsDiscovered > 0 ? totalUrlsDiscovered : "-"}
-          subtext="Discovered endpoints & resources"
+          subtext="Unique endpoints & resources stored"
           icon={<Link className="w-6 h-6" />}
           colorClass="text-cyber-warning"
           glowClass="glow-orange"
@@ -703,7 +727,11 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
             { label: "Low", count: lowCount, color: "text-cyber-accent", border: "border-cyber-accent/30" },
             { label: "Info", count: infoCount, color: "text-slate-400", border: "border-slate-500/30" }
           ].map((item) => (
-            <div key={item.label} className={`bg-dark-bg border ${item.border} rounded-lg p-3.5 flex flex-col items-center text-center transition-all hover:scale-[1.02] hover:bg-dark-hover/10`}>
+            <div
+              key={item.label}
+              onClick={() => onSelectSeverity && onSelectSeverity(item.label)}
+              className={`bg-dark-bg border ${item.border} rounded-lg p-3.5 flex flex-col items-center text-center transition-all hover:scale-[1.02] hover:bg-dark-hover/10 cursor-pointer`}
+            >
               <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1.5">{item.label}</span>
               <span className={`text-3xl font-mono font-bold ${item.color}`}>{item.count}</span>
             </div>

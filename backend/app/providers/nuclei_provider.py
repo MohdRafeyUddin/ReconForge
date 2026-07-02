@@ -44,6 +44,36 @@ NUCLEI_PASSES = [
 
 PASS_TIMEOUT_SECONDS = 1800
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Bug-bounty optimised Nuclei configurations
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Host-level scan: run against bare live hosts discovered by HTTPX.
+# Focuses on technology fingerprinting, exposed panels, misconfigurations,
+# SSL/TLS issues and default credentials — all host-scoped templates.
+NUCLEI_HOST_PASSES = [
+    {
+        "name": "HostExposure",
+        "tags": "tech,exposure,misconfig,config,panel,default-login,dns,ssl",
+        "severity": "medium,high,critical",
+    },
+]
+
+# Endpoint-level scan: run against GF-classified interesting URLs only.
+# Focuses on exploitable bug-classes that require a parameterised endpoint.
+NUCLEI_ENDPOINT_PASSES = [
+    {
+        "name": "EndpointBugClass",
+        "tags": "sqli,xss,ssrf,lfi,ssti,redirect,idor,injection,xxe",
+        "severity": "medium,high,critical",
+    },
+    {
+        "name": "EndpointCritical",
+        "tags": "cve,rce,oast",
+        "severity": "critical,high",
+    },
+]
+
 class NucleiProvider(BaseProvider):
     @property
     def name(self) -> str:
@@ -193,8 +223,11 @@ class NucleiProvider(BaseProvider):
             finding = {
                 "template_id": template_id,
                 "template_name": template_name,
+                "template": template_id,
+                "finding": template_name,
                 "severity": severity,
                 "matched_url": matched_url,
+                "endpoint": matched_url,
                 "host": match_host,
                 "ip": ip,
                 "tags": tags,
@@ -504,3 +537,411 @@ class NucleiProvider(BaseProvider):
             "severity_counts": severity_counts
         }
         logger.info("Provider completed")
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Shared low-level pass runner
+    # ──────────────────────────────────────────────────────────────────────
+
+    async def _run_passes(
+        self,
+        passes: list,
+        urls: List[str],
+        scan_label: str,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Run a custom list of Nuclei passes against *urls*.
+
+        Emits identical events to ``discover()`` so the pipeline broadcaster
+        handles them without any changes.  Callers supply the pass list and a
+        human-readable label used in log messages.
+        """
+        import tempfile
+        import os
+
+        if not urls:
+            msg = f"{scan_label}: No targets to scan."
+            logger.info(msg)
+            yield {"type": "log", "message": msg}
+            yield {
+                "type": "scan_summary",
+                "provider": scan_label,
+                "urls_scanned": 0,
+                "findings_found": 0,
+            }
+            return
+
+        is_windows = platform.system().lower() == "windows"
+        executable = "wsl" if is_windows else "/home/kali/go/bin/nuclei"
+        temp_path = ""
+        start_ts = time.time()
+
+        target_hosts: set = set()
+        for u in urls:
+            try:
+                parsed = urlparse(u)
+                h = parsed.hostname or parsed.path
+                if ":" in h:
+                    h = h.split(":", 1)[0]
+                if h:
+                    target_hosts.add(h.lower().strip())
+            except Exception:
+                pass
+
+        crawled_findings: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        total_findings_found = 0
+        seen_findings: set = set()
+
+        severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+
+        def read_stdout(stream, q):
+            for line in stream:
+                q.put(line)
+            q.put(None)
+
+        pass_findings_found = 0  # shared across nested scope
+
+        def process_line(line: str, current_pass_name: str, current_pass_severity_counts: Dict[str, int]) -> List[Dict[str, Any]]:
+            nonlocal total_findings_found, pass_findings_found
+            events = []
+            try:
+                record = json.loads(line)
+            except Exception:
+                return events
+
+            template_id = record.get("template-id") or record.get("template_id")
+            info = record.get("info") or {}
+            template_name = info.get("name") or template_id
+            severity = (info.get("severity") or "info").lower()
+            matched_url = record.get("matched-at") or record.get("matched_at") or record.get("matched")
+
+            if not template_id or not matched_url:
+                return events
+
+            f_key = (template_id, matched_url)
+            if f_key in seen_findings:
+                return events
+            seen_findings.add(f_key)
+
+            try:
+                parsed_match = urlparse(matched_url)
+                match_host = parsed_match.hostname or parsed_match.path
+                if ":" in match_host:
+                    match_host = match_host.split(":", 1)[0]
+                match_host = match_host.lower().strip()
+            except Exception:
+                match_host = ""
+
+            ip = record.get("ip") or ""
+            tags = info.get("tags") or []
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(",") if t.strip()]
+
+            classification = info.get("classification") or {}
+            cve = classification.get("cve-id") or classification.get("cve_id") or ""
+            cwe = classification.get("cwe-id") or classification.get("cwe_id") or ""
+            cvss = classification.get("cvss-score") or classification.get("cvss_score") or ""
+            curl_command = record.get("curl-command") or record.get("curl_command") or ""
+            timestamp = record.get("timestamp") or datetime.utcnow().isoformat()
+            request = record.get("request") or ""
+            response = record.get("response") or ""
+
+            finding = {
+                "template_id": template_id,
+                "template_name": template_name,
+                "template": template_id,
+                "finding": template_name,
+                "severity": severity,
+                "matched_url": matched_url,
+                "endpoint": matched_url,
+                "host": match_host,
+                "ip": ip,
+                "tags": tags,
+                "classification": classification,
+                "cve": cve,
+                "cwe": cwe,
+                "cvss": cvss,
+                "curl_command": curl_command,
+                "timestamp": timestamp,
+                "request": request,
+                "response": response,
+                "pass_name": current_pass_name,
+                "source": "nuclei",
+            }
+
+            events.append({
+                "type": "log",
+                "message": f"\nFinding:\nSeverity: {severity.upper()}\nTemplate: {template_name}\nMatched URL:\n{matched_url}"
+            })
+            events.append({
+                "type": "scan_summary",
+                "event": "FindingDetected",
+                "pass_name": current_pass_name,
+                "finding": finding,
+            })
+
+            matched_host_key = None
+            if match_host:
+                if match_host in target_hosts:
+                    matched_host_key = match_host
+                else:
+                    for th in target_hosts:
+                        if match_host.endswith("." + th) or th.endswith("." + match_host):
+                            matched_host_key = th
+                            break
+
+            if matched_host_key:
+                crawled_findings[matched_host_key].append(finding)
+                total_findings_found += 1
+                pass_findings_found += 1
+                if severity in severity_counts:
+                    severity_counts[severity] += 1
+                if severity in current_pass_severity_counts:
+                    current_pass_severity_counts[severity] += 1
+
+                events.append({
+                    "type": "asset",
+                    "data": {
+                        "domain": matched_host_key,
+                        "type": "subdomain",
+                        "status": "live",
+                        "metadata": {
+                            "source": "nuclei",
+                            "nuclei": {
+                                "findings": [finding],
+                                "scanned_at": int(time.time()),
+                            },
+                        },
+                        "discovered_by": "nuclei",
+                        "sources": ["nuclei"],
+                    },
+                })
+
+            return events
+
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8", newline="\n") as f:
+                temp_path = f.name
+                f.write("\n".join(urls) + "\n")
+
+            wsl_temp_path = self._windows_path_to_wsl(temp_path) if is_windows else temp_path
+            yield {"type": "log", "message": f"\n========== {scan_label} =========="}
+            yield {"type": "log", "message": f"Scanning {len(urls)} targets across {len(passes)} pass(es)..."}
+
+            for pass_info in passes:
+                pass_name = pass_info["name"]
+                pass_tags = pass_info["tags"]
+                pass_severity = pass_info["severity"]
+
+                yield {"type": "scan_summary", "event": "NucleiPassStarted", "pass_name": pass_name}
+                yield {"type": "log", "message": f"\n[*] Starting pass: {pass_name} (tags: {pass_tags})"}
+
+                args = ["/home/kali/go/bin/nuclei"] if is_windows else []
+                nuclei_flags = [
+                    "-l", wsl_temp_path,
+                    "-tags", pass_tags,
+                    "-severity", pass_severity,
+                    "-jsonl",
+                    "-silent",
+                    "-duc",
+                    "-rl", "150",
+                    "-c", "25",
+                    "-bs", "25",
+                ]
+                cmd = [executable, *args, *nuclei_flags]
+                yield {"type": "log", "message": f"[*] Executing: {' '.join(cmd)}"}
+
+                from app.job_control import register_process, unregister_process, check_job_status
+                await check_job_status()
+
+                process = None
+                t = None
+                pass_findings_found = 0
+                pass_severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+                pass_start_ts = time.time()
+                timeout_exceeded = False
+
+                try:
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                    )
+                    register_process(process)
+
+                    q = queue.Queue()
+                    t = threading.Thread(target=read_stdout, args=(process.stdout, q))
+                    t.daemon = True
+                    t.start()
+
+                    last_progress_time = time.time()
+
+                    while True:
+                        await check_job_status()
+
+                        if time.time() - pass_start_ts > PASS_TIMEOUT_SECONDS:
+                            timeout_exceeded = True
+                            yield {"type": "log", "message": f"[-] Pass {pass_name} timed out. Terminating..."}
+                            break
+
+                        try:
+                            raw_line = q.get_nowait()
+                        except queue.Empty:
+                            if process.poll() is not None:
+                                break
+                            now = time.time()
+                            if now - last_progress_time > 15:
+                                elapsed = int(now - pass_start_ts)
+                                yield {"type": "scan_summary", "event": "ProgressUpdated", "pass_name": pass_name, "elapsed": elapsed, "findings_count": pass_findings_found}
+                                yield {"type": "log", "message": f"Nuclei running... {elapsed}s"}
+                                last_progress_time = now
+                            await asyncio.sleep(0.2)
+                            continue
+
+                        if raw_line is None:
+                            break
+
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+
+                        for ev in process_line(line, pass_name, pass_severity_counts):
+                            yield ev
+
+                        last_progress_time = time.time()
+                        await asyncio.sleep(0)
+
+                    if timeout_exceeded and process and process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+
+                    drain_start = time.time()
+                    while True:
+                        try:
+                            raw_line = q.get_nowait()
+                            if raw_line is None:
+                                break
+                            line = raw_line.strip()
+                            if line:
+                                for ev in process_line(line, pass_name, pass_severity_counts):
+                                    yield ev
+                        except queue.Empty:
+                            if not t.is_alive():
+                                break
+                            if time.time() - drain_start > 5:
+                                break
+                            await asyncio.sleep(0.05)
+
+                    if t and t.is_alive():
+                        t.join(timeout=5)
+
+                except Exception as pass_exc:
+                    logger.error(f"[-] Pass {pass_name} failed: {pass_exc}", exc_info=True)
+                    yield {"type": "log", "message": f"[-] Pass {pass_name} failed: {str(pass_exc)}"}
+
+                finally:
+                    if process:
+                        unregister_process(process)
+                        if process.poll() is None:
+                            process.terminate()
+                            try:
+                                process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                process.wait()
+                    if t and t.is_alive():
+                        t.join(timeout=5)
+
+                    yield {
+                        "type": "scan_summary",
+                        "event": "PassSummary",
+                        "pass_name": pass_name,
+                        "findings_found": pass_findings_found,
+                        "urls_scanned": len(urls),
+                        "severity_counts": pass_severity_counts,
+                    }
+                    yield {"type": "scan_summary", "event": "NucleiPassCompleted", "pass_name": pass_name}
+                    yield {"type": "log", "message": f"[*] Completed pass: {pass_name}"}
+
+        except Exception as exc:
+            logger.error(f"[-] {scan_label} scan failed: {exc}", exc_info=True)
+            yield {"type": "log", "message": f"[-] {scan_label} scan failed: {str(exc)}"}
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+        duration_s = int(time.time() - start_ts)
+        yield {"type": "log", "message": f"\n{scan_label} completed."}
+        yield {
+            "type": "scan_summary",
+            "provider": scan_label,
+            "urls_scanned": len(urls),
+            "findings_found": total_findings_found,
+            "duration_seconds": duration_s,
+            "severity_counts": severity_counts,
+        }
+        logger.info(f"{scan_label} provider completed — {total_findings_found} findings")
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Host-level scan  (live HTTPX hosts → exposure / misconfig / tech)
+    # ──────────────────────────────────────────────────────────────────────
+
+    async def discover_host_scan(
+        self, live_host_urls: List[str]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Scan bare live hosts for technology, misconfig, and exposure issues.
+
+        Input:  ``live_host_urls`` – list of bare HTTP/HTTPS host URLs produced by HTTPX
+                                     (e.g. ["https://app.example.com", "http://admin.example.com"]).
+        Passes: NUCLEI_HOST_PASSES (tech, exposure, misconfig, config, panel, default-login, dns, ssl).
+        """
+        urls = []
+        seen: set = set()
+        for u in live_host_urls:
+            norm = self.normalize_url(u)
+            if norm and norm not in seen:
+                seen.add(norm)
+                urls.append(norm)
+
+        async for event in self._run_passes(NUCLEI_HOST_PASSES, urls, "Nuclei Host Scan"):
+            # Re-label the provider field so the frontend pipeline card reads correctly.
+            if event.get("type") == "scan_summary" and event.get("provider") == "Nuclei Host Scan":
+                event = {**event, "provider": "Nuclei Host Scan"}
+            yield event
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Endpoint-level scan  (GF-classified interesting URLs → bug-classes)
+    # ──────────────────────────────────────────────────────────────────────
+
+    async def discover_endpoint_scan(
+        self, gf_urls: List[str]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Scan GF-classified interesting endpoints for exploitable bug-classes.
+
+        Input:  ``gf_urls`` – deduplicated list of URLs from GF categories
+                              xss, sqli, ssrf, lfi, ssti, idor, redirect.
+        Passes: NUCLEI_ENDPOINT_PASSES (sqli, xss, ssrf, lfi, ssti, redirect,
+                idor, injection, xxe, cve, rce, oast).
+        """
+        urls = []
+        seen: set = set()
+        for u in gf_urls:
+            norm = self.normalize_url(u)
+            if norm and norm not in seen:
+                seen.add(norm)
+                urls.append(norm)
+
+        async for event in self._run_passes(NUCLEI_ENDPOINT_PASSES, urls, "Nuclei Endpoint Scan"):
+            if event.get("type") == "scan_summary" and event.get("provider") == "Nuclei Endpoint Scan":
+                event = {**event, "provider": "Nuclei Endpoint Scan"}
+            yield event
+

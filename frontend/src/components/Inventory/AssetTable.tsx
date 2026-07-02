@@ -8,6 +8,7 @@ import { NormalizedUrlTab } from "./NormalizedUrlTab";
 import type { NormalizedUrlRecord } from "./NormalizedUrlTab";
 import { GfTab } from "./GfTab";
 import type { GfUrlRecord } from "./GfTab";
+import { NucleiTab } from "./NucleiTab";
 
 const getRootDomain = (domain: string): string => {
   const parts = domain.split(".");
@@ -31,6 +32,7 @@ interface Asset {
   metadata: Record<string, any>;
   discovered_by: string;
   created_at: string;
+  updated_at?: string;
   sources?: string[];
 }
 
@@ -41,9 +43,11 @@ interface AssetTableProps {
   takeoverRecords?: TakeoverRecord[];
   normalizedUrlRecords?: NormalizedUrlRecord[];
   gfRecords?: GfUrlRecord[];
+  initialTab?: "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei";
+  initialSeverityFilter?: string | null;
 }
 
-type InventoryTab = "assets" | "dns" | "takeovers" | "normalized_urls" | "gf";
+type InventoryTab = "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei";
 
 export const AssetTable: React.FC<AssetTableProps> = ({
   assets,
@@ -52,14 +56,22 @@ export const AssetTable: React.FC<AssetTableProps> = ({
   takeoverRecords = [],
   normalizedUrlRecords = [],
   gfRecords = [],
+  initialTab,
+  initialSeverityFilter = null,
 }) => {
-  const [activeInventoryTab, setActiveInventoryTab] = useState<InventoryTab>("assets");
+  const [activeInventoryTab, setActiveInventoryTab] = useState<InventoryTab>(initialTab || "assets");
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [activeTabs, setActiveTabs] = useState<Record<string, string>>({});
   const [showExportDropdown, setShowExportDropdown] = useState(false);
+
+  React.useEffect(() => {
+    if (initialTab) {
+      setActiveInventoryTab(initialTab);
+    }
+  }, [initialTab]);
 
   const handleExportFullInventory = () => {
     const headers = [
@@ -178,12 +190,43 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     return total;
   }, [gfRecords]);
 
+  const nucleiFindings = React.useMemo(() => {
+    const findingsList: any[] = [];
+    const seen = new Set<string>();
+    assets.forEach((asset) => {
+      const findings = asset.metadata?.nuclei?.findings || [];
+      findings.forEach((f: any) => {
+        const key = `${f.template_id || f.template || "unknown"}:${f.matched_url || f.endpoint || ""}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          findingsList.push({
+            ...f,
+            severity: f.severity || "info",
+            template: f.template || f.template_id || "unknown",
+            template_id: f.template_id || f.template || "unknown",
+            template_name: f.template_name || f.name || f.template || "unknown",
+            matched_url: f.matched_url || f.endpoint || "",
+            endpoint: f.endpoint || f.matched_url || "",
+            host: f.host || asset.domain,
+            tags: f.tags || [],
+            cve: f.cve || "",
+            timestamp: f.timestamp || asset.updated_at || new Date().toISOString(),
+            pass_name: f.pass_name || "",
+            source: f.source || "nuclei",
+          });
+        }
+      });
+    });
+    return findingsList;
+  }, [assets]);
+
   const inventoryTabs: { id: InventoryTab; label: string; count?: number }[] = [
     { id: "assets", label: "Assets", count: assets.length },
     { id: "dns", label: "DNS", count: dnsRecords.length },
     { id: "takeovers", label: "Takeovers", count: takeoverRecords.length },
     { id: "normalized_urls", label: "Normalized URLs", count: displayedNormalizedUrls.length },
     { id: "gf", label: "Interesting URLs", count: gfTotalCount },
+    { id: "nuclei", label: "Nuclei Findings", count: nucleiFindings.length },
   ];
 
   return (
@@ -228,6 +271,15 @@ export const AssetTable: React.FC<AssetTableProps> = ({
       {/* GF Interesting URLs Tab */}
       {activeInventoryTab === "gf" && (
         <GfTab records={gfRecords} projectName={projectName} />
+      )}
+
+      {/* Nuclei Findings Tab */}
+      {activeInventoryTab === "nuclei" && (
+        <NucleiTab
+          findings={nucleiFindings}
+          projectName={projectName}
+          initialSeverityFilter={initialSeverityFilter}
+        />
       )}
 
       {/* Existing Assets Tab */}
