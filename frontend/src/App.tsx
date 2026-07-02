@@ -19,6 +19,7 @@ interface Project {
   name: string;
   description?: string;
   seed_domains: string[];
+  target_type?: string;
 }
 
 interface DashboardStats {
@@ -67,7 +68,7 @@ interface ScanState {
   jobId: string | null;
   scanStatus: string | null;
   currentStage: string;
-  stages: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
+  stages: Record<string, string>;
   providerCounts: Record<string, number>;
   dnsx_resolved: number | null;
   dnsx_nxdomain: number | null;
@@ -90,7 +91,7 @@ interface ScanState {
   completedProviders: Set<string>;
   activeJobObject: any | null;
   lastCompletedJobObject: any | null;
-  providerStatus: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
+  providerStatus: Record<string, string>;
   lastWsEventTime: number;
 }
 
@@ -154,11 +155,11 @@ const initialScanState: ScanState = {
 };
 
 const transitionToStage = (
-  currentStages: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">,
+  currentStages: Record<string, string>,
   newStage: string
 ): {
   currentStage: string;
-  stages: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
+  stages: Record<string, string>;
 } => {
   const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei_host", "nuclei_endpoint", "nuclei"];
   const targetIdx = PIPELINE_ORDER.indexOf(newStage.toLowerCase());
@@ -167,7 +168,9 @@ const transitionToStage = (
     if (newStage.toLowerCase() === "completed") {
       const nextStages = { ...currentStages };
       PIPELINE_ORDER.forEach((s) => {
-        nextStages[s] = "COMPLETED";
+        if (nextStages[s] !== "SKIPPED") {
+          nextStages[s] = "COMPLETED";
+        }
       });
       return { currentStage: "completed", stages: nextStages };
     }
@@ -177,11 +180,17 @@ const transitionToStage = (
   const nextStages = { ...currentStages };
   PIPELINE_ORDER.forEach((stage, idx) => {
     if (idx < targetIdx) {
-      nextStages[stage] = "COMPLETED";
+      if (nextStages[stage] !== "SKIPPED") {
+        nextStages[stage] = "COMPLETED";
+      }
     } else if (idx === targetIdx) {
-      nextStages[stage] = "RUNNING";
+      if (nextStages[stage] !== "SKIPPED") {
+        nextStages[stage] = "RUNNING";
+      }
     } else {
-      nextStages[stage] = "PENDING";
+      if (nextStages[stage] !== "SKIPPED") {
+        nextStages[stage] = "PENDING";
+      }
     }
   });
 
@@ -189,13 +198,13 @@ const transitionToStage = (
 };
 
 const updateProviderStatus = (
-  current: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">,
+  current: Record<string, string>,
   provider: string,
-  newStatus: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED"
-): Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED"> => {
+  newStatus: string
+): Record<string, string> => {
   const p = provider.toLowerCase();
   const currentStatus = current[p];
-  if (currentStatus === "COMPLETED") {
+  if (currentStatus === "COMPLETED" || currentStatus === "SKIPPED") {
     return current;
   }
   const next = { ...current };
@@ -694,8 +703,26 @@ const MainDashboard: React.FC = () => {
 
         const isWsActive = prev.jobId && (Date.now() - prev.lastWsEventTime < 8000);
         
+        const targetType = activeProjectRef.current?.target_type || "DOMAIN";
+        const isLocalHost = (activeProjectRef.current?.seed_domains || []).includes("localhost");
+        const isNewPath = targetType !== "DOMAIN" || isLocalHost;
+
         let nextStages = { ...prev.stages };
         let nextProviderStatus = { ...prev.providerStatus };
+        
+        // Initialize skipped stages for new paths
+        if (isNewPath) {
+          nextStages["discovery"] = "SKIPPED";
+          nextStages["dnsx"] = "SKIPPED";
+          nextStages["subzy"] = "SKIPPED";
+          nextProviderStatus["discovery"] = "SKIPPED";
+          nextProviderStatus["dnsx"] = "SKIPPED";
+          nextProviderStatus["subzy"] = "SKIPPED";
+          ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
+            nextProviderStatus[sp] = "SKIPPED";
+          });
+        }
+
         let nextCurrentStage = prev.currentStage;
 
         if (!isWsActive && activeJobFromServer) {
@@ -703,19 +730,33 @@ const MainDashboard: React.FC = () => {
             nextCurrentStage = "completed";
             const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei_host", "nuclei_endpoint", "nuclei"];
             PIPELINE_ORDER.forEach((stage) => {
-              nextStages[stage] = "COMPLETED";
-              nextProviderStatus[stage] = "COMPLETED";
+              if (isNewPath && ["discovery", "dnsx", "subzy"].includes(stage)) {
+                nextStages[stage] = "SKIPPED";
+                nextProviderStatus[stage] = "SKIPPED";
+              } else {
+                nextStages[stage] = "COMPLETED";
+                nextProviderStatus[stage] = "COMPLETED";
+              }
             });
-            ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
-              nextProviderStatus[sp] = "COMPLETED";
-            });
+            if (isNewPath) {
+              ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
+                nextProviderStatus[sp] = "SKIPPED";
+              });
+            } else {
+              ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
+                nextProviderStatus[sp] = "COMPLETED";
+              });
+            }
           } else if (activeJobFromServer.status === "failed") {
             nextCurrentStage = "failed";
             const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei_host", "nuclei_endpoint", "nuclei"];
             const jobPhase = (activeJobFromServer.current_phase || "waiting").toLowerCase();
             const currentIdx = PIPELINE_ORDER.indexOf(jobPhase);
             PIPELINE_ORDER.forEach((stage, idx) => {
-              if (idx < currentIdx) {
+              if (isNewPath && ["discovery", "dnsx", "subzy"].includes(stage)) {
+                nextStages[stage] = "SKIPPED";
+                nextProviderStatus[stage] = "SKIPPED";
+              } else if (idx < currentIdx) {
                 nextStages[stage] = "COMPLETED";
                 nextProviderStatus[stage] = "COMPLETED";
               } else if (idx === currentIdx) {
@@ -726,25 +767,33 @@ const MainDashboard: React.FC = () => {
                 nextProviderStatus[stage] = "PENDING";
               }
             });
-            if (jobPhase === "discovery") {
+            if (isNewPath) {
               ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
-                nextProviderStatus[sp] = "FAILED";
+                nextProviderStatus[sp] = "SKIPPED";
               });
             } else {
-              ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
-                nextProviderStatus[sp] = "COMPLETED";
-              });
+              if (jobPhase === "discovery") {
+                ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
+                  nextProviderStatus[sp] = "FAILED";
+                });
+              } else {
+                ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
+                  nextProviderStatus[sp] = "COMPLETED";
+                });
+              }
             }
           } else {
             const jobPhase = activeJobFromServer.current_phase || "waiting";
-            const transition = transitionToStage(prev.stages, jobPhase);
+            const transition = transitionToStage(nextStages, jobPhase);
             nextStages = transition.stages;
             nextCurrentStage = transition.currentStage;
             
             const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
             const currentIdx = PIPELINE_ORDER.indexOf(jobPhase.toLowerCase());
             PIPELINE_ORDER.forEach((stage, idx) => {
-              if (idx < currentIdx) {
+              if (isNewPath && ["discovery", "dnsx", "subzy"].includes(stage)) {
+                nextProviderStatus[stage] = "SKIPPED";
+              } else if (idx < currentIdx) {
                 nextProviderStatus[stage] = "COMPLETED";
               } else if (idx === currentIdx) {
                 nextProviderStatus[stage] = activeJobFromServer.status === "paused" ? "RUNNING" : (activeJobFromServer.status === "stopped" ? "FAILED" : "RUNNING");
@@ -752,7 +801,7 @@ const MainDashboard: React.FC = () => {
                 nextProviderStatus[stage] = "PENDING";
               }
             });
-            if (jobPhase.toLowerCase() === "discovery") {
+            if (!isNewPath && jobPhase.toLowerCase() === "discovery") {
               ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
                 if (nextProviderStatus[sp] !== "COMPLETED" && nextProviderStatus[sp] !== "FAILED") {
                   nextProviderStatus[sp] = "RUNNING";
@@ -846,17 +895,37 @@ const MainDashboard: React.FC = () => {
       );
       setIsReconnect(false);
       setScanState((_prev) => {
-        const transition = transitionToStage(initialScanState.stages, "discovery");
+        const targetType = activeProject?.target_type || "DOMAIN";
+        const isLocalHost = (activeProject?.seed_domains || []).includes("localhost");
+        const isNewPath = targetType !== "DOMAIN" || isLocalHost;
+
+        let initialStages = { ...initialScanState.stages };
+        let initialProviderStatus = { ...initialScanState.providerStatus };
+        if (isNewPath) {
+          initialStages["discovery"] = "SKIPPED";
+          initialStages["dnsx"] = "SKIPPED";
+          initialStages["subzy"] = "SKIPPED";
+          initialProviderStatus["discovery"] = "SKIPPED";
+          initialProviderStatus["dnsx"] = "SKIPPED";
+          initialProviderStatus["subzy"] = "SKIPPED";
+          ["subfinder", "assetfinder", "chaos", "amass"].forEach((sp) => {
+            initialProviderStatus[sp] = "SKIPPED";
+          });
+        }
+
+        const startStage = (isNewPath && (targetType === "IP" || isLocalHost)) ? "naabu" : ((isNewPath) ? "httpx" : "discovery");
+        const transition = transitionToStage(initialStages, startStage);
+        
+        let providerStatusUpdates = { ...initialProviderStatus };
+        providerStatusUpdates[startStage] = "RUNNING";
+
         return {
           ...initialScanState,
           jobId: job.id,
           activeJobObject: job,
           stages: transition.stages,
           currentStage: transition.currentStage,
-          providerStatus: {
-            ...initialScanState.providerStatus,
-            discovery: "RUNNING",
-          },
+          providerStatus: providerStatusUpdates,
         };
       });
     } catch (err) {

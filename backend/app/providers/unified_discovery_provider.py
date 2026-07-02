@@ -91,7 +91,38 @@ def _normalise(domain: str) -> str:
 
 
 def _is_valid(domain: str) -> bool:
+    # Also permit localhost, local IP/host structures, URLs, and port mappings as valid
+    domain_lower = domain.lower()
+    if (
+        "localhost" in domain_lower
+        or "127.0.0.1" in domain_lower
+        or ":" in domain_lower
+        or domain_lower.startswith(("http://", "https://"))
+    ):
+        return True
     return bool(domain and _VALID_HOSTNAME_RE.match(domain))
+
+
+def detect_target_type(input_str: str) -> str:
+    import re
+    input_str = input_str.strip()
+    
+    # 1. URL
+    if input_str.lower().startswith(("http://", "https://")):
+        return "URL"
+        
+    # 2. IP Address
+    ip_pattern = r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$"
+    if re.match(ip_pattern, input_str):
+        return "IP"
+        
+    # 3. Hostname with Port
+    host_port_pattern = r"^[^/:]+:[0-9]+$"
+    if re.match(host_port_pattern, input_str):
+        return "HOST_PORT"
+        
+    # 4. DOMAIN
+    return "DOMAIN"
 
 
 # ---------------------------------------------------------------------------
@@ -169,166 +200,206 @@ class UnifiedDiscoveryProvider(BaseProvider):
         self, seed_domains: List[str]
     ) -> AsyncGenerator[Dict[str, Any], None]:
 
-        start_msg = (
-            f"[*] Unified Discovery Engine starting for: {', '.join(seed_domains)}\n"
-            f"    Pipeline: Passive → DNSx → Subzy → Naabu → HTTPX → Katana → Uro → GF → Nuclei"
-        )
-        logger.info(start_msg)
-        yield {"type": "log", "message": start_msg}
+        # Target Detection
+        seed = seed_domains[0] if seed_domains else ""
+        target_type = detect_target_type(seed)
+        is_localhost = seed.strip().lower() == "localhost"
+        is_new_path = target_type in ("URL", "IP", "HOST_PORT") or is_localhost
 
-        # ================================================================
-        # PHASE 1: Concurrent passive discovery
-        # ================================================================
+        yield {"type": "log", "message": f"Detected target type: {target_type}"}
 
         provider_counts: Dict[str, int] = {}
-        discovered_subdomains: List[str] = []
-        event_queue: asyncio.Queue = asyncio.Queue()
-
-        async def run_passive(provider: BaseProvider, label: str) -> None:
-            logger.info("[*] Launching passive provider: %s", label)
-            count = 0
-            try:
-                async for event in provider.discover(seed_domains):
-                    if event.get("type") == "asset":
-                        raw = event["data"].get("domain", "")
-                        norm = _normalise(raw)
-                        if _is_valid(norm):
-                            await event_queue.put(("asset", norm, label))
-                            discovered_subdomains.append(norm)
-                            count += 1
-            except Exception as exc:
-                err = f"[-] {label} failed: {exc}"
-                logger.error(err)
-                await event_queue.put(("provider_error", label, str(exc)))
-            finally:
-                provider_counts[label] = count
-                logger.info("[+] %s finished → %s raw subdomains", label, count)
-                await event_queue.put(("provider_done", label, count))
-
-        tasks = [
-            asyncio.create_task(run_passive(p, lbl))
-            for p, lbl in self.PASSIVE_PROVIDERS
-        ]
-        remaining = len(tasks)
-
-        while remaining > 0 or not event_queue.empty():
-            try:
-                item = await asyncio.wait_for(event_queue.get(), timeout=0.2)
-            except asyncio.TimeoutError:
-                remaining = sum(1 for t in tasks if not t.done())
-                continue
-
-            kind = item[0]
-            if kind == "asset":
-                _, domain, source = item
-                yield {
-                    "type": "asset",
-                    "data": {
-                        "domain": domain,
-                        "type": "subdomain",
-                        "status": "unknown",
-                        "open_ports": [],
-                        "metadata": {"source": "unified_discovery"},
-                        "discovered_by": "Unified Discovery",
-                        "sources": [source],
-                    },
-                }
-            elif kind == "provider_done":
-                _, label, count = item
-                done_msg = f"[+] {label.capitalize()} completed → {count} subdomains"
-                logger.info(done_msg)
-                yield {
-                    "type": "log",
-                    "message": done_msg,
-                    "provider_stat": {"provider": label, "count": count},
-                }
-                remaining = sum(1 for t in tasks if not t.done())
-            elif kind == "provider_error":
-                _, label, error = item
-                yield {
-                    "type": "log",
-                    "message": f"[-] {label} encountered an error: {error}",
-                }
-
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Global deduplication after Phase 1
-        unique_subdomains = sorted(set(discovered_subdomains))
-        total_unique = len(unique_subdomains)
-
-        phase1_summary = (
-            f"\n[√] Passive Discovery complete.\n"
-            f"    Subfinder   : {provider_counts.get('subfinder', 0)}\n"
-            f"    Assetfinder : {provider_counts.get('assetfinder', 0)}\n"
-            f"    Chaos       : {provider_counts.get('chaos', 0)}\n"
-            f"    Amass       : {provider_counts.get('amass', 0)}\n"
-            f"    ─────────────────────────\n"
-            f"    Total Unique : {total_unique}"
-        )
-        logger.info(phase1_summary)
-        yield {"type": "log", "message": phase1_summary}
-
-        if not unique_subdomains:
-            yield {"type": "log", "message": "[*] No subdomains discovered. Aborting pipeline."}
-            yield {
-                "type": "scan_summary",
-                "provider_counts": provider_counts,
-                "total_unique": 0,
-                "live_hosts": 0,
-            }
-            return
-
-        # ================================================================
-        # PHASE 2: DNS Resolution (DNSx)
-        # ================================================================
-
-        resolved_subdomains: List[str] = []
+        total_unique = 0
+        subzy_vulnerable = 0
+        
         dnsx_resolved = 0
         dnsx_nxdomain = 0
         dnsx_wildcards = 0
 
-        dnsx_provider = DnsxProvider()
-        async for event in self._run_phase(dnsx_provider, unique_subdomains, "DNSx Resolution"):
-            if event.get("type") == "asset":
-                asset = event.get("data", {})
-                if asset.get("status") in ("resolved", "live"):
-                    domain_norm = _normalise(asset.get("domain", ""))
-                    if _is_valid(domain_norm):
-                        resolved_subdomains.append(domain_norm)
-            elif event.get("type") == "scan_summary" and event.get("provider") == "DNSx":
-                dnsx_resolved   = event.get("resolved", 0)
-                dnsx_nxdomain   = event.get("nxdomain", 0)
-                dnsx_wildcards  = event.get("wildcards_filtered", 0)
-            yield event
+        if is_new_path:
+            yield {"type": "log", "message": "Skipping Passive Discovery"}
+            yield {"type": "log", "message": "Skipping DNS Resolution"}
+            yield {"type": "log", "message": "Skipping Subdomain Takeover Check (Subzy)"}
+            
+            # Emit skipped statuses for passive sub-providers so UI shows them as SKIPPED
+            for p_name in ("subfinder", "assetfinder", "chaos", "amass"):
+                yield {
+                    "type": "scan_summary",
+                    "provider": p_name,
+                    "status": "SKIPPED"
+                }
+            yield {
+                "type": "scan_summary",
+                "provider": "Discovery",
+                "status": "SKIPPED"
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": "DNSx",
+                "status": "SKIPPED"
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": "Subzy",
+                "status": "SKIPPED"
+            }
+            
+            unique_resolved = [seed]
+            
+            if target_type == "IP" or is_localhost:
+                yield {"type": "log", "message": "Starting from Naabu"}
+            else:
+                yield {"type": "log", "message": "Starting from HTTPX"}
 
-        if not resolved_subdomains:
-            # Fall back to all unique subdomains (DNSx may not be installed)
-            logger.warning("[*] DNSx returned no resolved subdomains; using all unique subdomains.")
+        else:
+            # ================================================================
+            # PHASE 1: Concurrent passive discovery
+            # ================================================================
+
+            discovered_subdomains: List[str] = []
+            event_queue: asyncio.Queue = asyncio.Queue()
+
+            async def run_passive(provider: BaseProvider, label: str) -> None:
+                logger.info("[*] Launching passive provider: %s", label)
+                count = 0
+                try:
+                    async for event in provider.discover(seed_domains):
+                        if event.get("type") == "asset":
+                            raw = event["data"].get("domain", "")
+                            norm = _normalise(raw)
+                            if _is_valid(norm):
+                                await event_queue.put(("asset", norm, label))
+                                discovered_subdomains.append(norm)
+                                count += 1
+                except Exception as exc:
+                    err = f"[-] {label} failed: {exc}"
+                    logger.error(err)
+                    await event_queue.put(("provider_error", label, str(exc)))
+                finally:
+                    provider_counts[label] = count
+                    logger.info("[+] %s finished → %s raw subdomains", label, count)
+                    await event_queue.put(("provider_done", label, count))
+
+            tasks = [
+                asyncio.create_task(run_passive(p, lbl))
+                for p, lbl in self.PASSIVE_PROVIDERS
+            ]
+            remaining = len(tasks)
+
+            while remaining > 0 or not event_queue.empty():
+                try:
+                    item = await asyncio.wait_for(event_queue.get(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    remaining = sum(1 for t in tasks if not t.done())
+                    continue
+
+                kind = item[0]
+                if kind == "asset":
+                    _, domain, source = item
+                    yield {
+                        "type": "asset",
+                        "data": {
+                            "domain": domain,
+                            "type": "subdomain",
+                            "status": "unknown",
+                            "open_ports": [],
+                            "metadata": {"source": "unified_discovery"},
+                            "discovered_by": "Unified Discovery",
+                            "sources": [source],
+                        },
+                    }
+                elif kind == "provider_done":
+                    _, label, count = item
+                    done_msg = f"[+] {label.capitalize()} completed → {count} subdomains"
+                    logger.info(done_msg)
+                    yield {
+                        "type": "log",
+                        "message": done_msg,
+                        "provider_stat": {"provider": label, "count": count},
+                    }
+                    remaining = sum(1 for t in tasks if not t.done())
+                elif kind == "provider_error":
+                    _, label, error = item
+                    yield {
+                        "type": "log",
+                        "message": f"[-] {label} encountered an error: {error}",
+                    }
+
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Global deduplication after Phase 1
+            unique_subdomains = sorted(set(discovered_subdomains))
+            total_unique = len(unique_subdomains)
+
+            phase1_summary = (
+                f"\n[√] Passive Discovery complete.\n"
+                f"    Subfinder   : {provider_counts.get('subfinder', 0)}\n"
+                f"    Assetfinder : {provider_counts.get('assetfinder', 0)}\n"
+                f"    Chaos       : {provider_counts.get('chaos', 0)}\n"
+                f"    Amass       : {provider_counts.get('amass', 0)}\n"
+                f"    ─────────────────────────\n"
+                f"    Total Unique : {total_unique}"
+            )
+            logger.info(phase1_summary)
+            yield {"type": "log", "message": phase1_summary}
+
+            if not unique_subdomains:
+                yield {"type": "log", "message": "[*] No subdomains discovered. Aborting pipeline."}
+                yield {
+                    "type": "scan_summary",
+                    "provider_counts": provider_counts,
+                    "total_unique": 0,
+                    "live_hosts": 0,
+                }
+                return
+
+            # ================================================================
+            # PHASE 2: DNS Resolution (DNSx)
+            # ================================================================
+
+            resolved_subdomains: List[str] = []
+
+            dnsx_provider = DnsxProvider()
+            async for event in self._run_phase(dnsx_provider, unique_subdomains, "DNSx Resolution"):
+                if event.get("type") == "asset":
+                    asset = event.get("data", {})
+                    if asset.get("status") in ("resolved", "live"):
+                        domain_norm = _normalise(asset.get("domain", ""))
+                        if _is_valid(domain_norm):
+                            resolved_subdomains.append(domain_norm)
+                elif event.get("type") == "scan_summary" and event.get("provider") == "DNSx":
+                    dnsx_resolved   = event.get("resolved", 0)
+                    dnsx_nxdomain   = event.get("nxdomain", 0)
+                    dnsx_wildcards  = event.get("wildcards_filtered", 0)
+                yield event
+
+            if not resolved_subdomains:
+                # Fall back to all unique subdomains (DNSx may not be installed)
+                logger.warning("[*] DNSx returned no resolved subdomains; using all unique subdomains.")
+                yield {
+                    "type": "log",
+                    "message": (
+                        "[*] DNSx returned no resolved results. "
+                        "Falling back to full subdomain list for subsequent stages."
+                    ),
+                }
+                resolved_subdomains = list(unique_subdomains)
+
+            unique_resolved = sorted(set(resolved_subdomains))
             yield {
                 "type": "log",
-                "message": (
-                    "[*] DNSx returned no resolved results. "
-                    "Falling back to full subdomain list for subsequent stages."
-                ),
+                "message": f"[√] DNSx: {len(unique_resolved)} resolved subdomains ready.",
             }
-            resolved_subdomains = list(unique_subdomains)
 
-        unique_resolved = sorted(set(resolved_subdomains))
-        yield {
-            "type": "log",
-            "message": f"[√] DNSx: {len(unique_resolved)} resolved subdomains ready.",
-        }
+            # ================================================================
+            # PHASE 3: Subdomain Takeover (Subzy)
+            # ================================================================
 
-        # ================================================================
-        # PHASE 3: Subdomain Takeover (Subzy)
-        # ================================================================
-
-        subzy_vulnerable = 0
-        subzy_provider = SubzyProvider()
-        async for event in self._run_phase(subzy_provider, unique_resolved, "Subzy Takeover Check"):
-            if event.get("type") == "scan_summary" and event.get("provider") == "Subzy":
-                subzy_vulnerable = event.get("vulnerable", 0)
-            yield event
+            subzy_provider = SubzyProvider()
+            async for event in self._run_phase(subzy_provider, unique_resolved, "Subzy Takeover Check"):
+                if event.get("type") == "scan_summary" and event.get("provider") == "Subzy":
+                    subzy_vulnerable = event.get("vulnerable", 0)
+                yield event
 
         # ================================================================
         # PHASE 4: Port Scanning (Naabu)
@@ -336,12 +407,23 @@ class UnifiedDiscoveryProvider(BaseProvider):
 
         naabu_hosts_with_ports = 0
         naabu_open_ports = 0
-        naabu_provider = NaabuProvider()
-        async for event in self._run_phase(naabu_provider, unique_resolved, "Naabu Port Scan"):
-            if event.get("type") == "scan_summary":
-                naabu_hosts_with_ports = event.get("hosts_with_open_ports", 0)
-                naabu_open_ports       = event.get("open_ports", 0)
-            yield event
+        
+        skip_naabu = is_new_path and target_type in ("URL", "HOST_PORT")
+
+        if skip_naabu:
+            yield {"type": "log", "message": "Skipping Port Scanning (Naabu)"}
+            yield {
+                "type": "scan_summary",
+                "provider": "Naabu",
+                "status": "SKIPPED"
+            }
+        else:
+            naabu_provider = NaabuProvider()
+            async for event in self._run_phase(naabu_provider, unique_resolved, "Naabu Port Scan"):
+                if event.get("type") == "scan_summary":
+                    naabu_hosts_with_ports = event.get("hosts_with_open_ports", 0)
+                    naabu_open_ports       = event.get("open_ports", 0)
+                yield event
 
         # ================================================================
         # PHASE 5: HTTP Probing (HTTPX)
@@ -353,9 +435,10 @@ class UnifiedDiscoveryProvider(BaseProvider):
         host_to_live_url: Dict[str, str] = {}
         host_to_urls: Dict[str, List[str]] = defaultdict(list)
 
+        target_label = "targets" if is_new_path else "resolved subdomains"
         httpx_start_msg = (
             f"\n========== HTTPX Probing ==========\n"
-            f"[*] Launching HTTPX on {len(unique_resolved)} resolved subdomains..."
+            f"[*] Launching HTTPX on {len(unique_resolved)} {target_label}..."
         )
         logger.info(httpx_start_msg)
         yield {"type": "log", "message": httpx_start_msg}
@@ -581,12 +664,21 @@ class UnifiedDiscoveryProvider(BaseProvider):
         # Final summary
         # ================================================================
 
+        if is_new_path:
+            p_discovery_str = "SKIPPED"
+            dnsx_str = "SKIPPED"
+            subzy_str = "SKIPPED"
+        else:
+            p_discovery_str = f"{total_unique} unique subdomains"
+            dnsx_str = f"{dnsx_resolved} | NXDOMAIN: {dnsx_nxdomain} | Wildcards: {dnsx_wildcards}"
+            subzy_str = f"{subzy_vulnerable}"
+
         final_summary_msg = (
             f"\n{'='*10} Pipeline Complete {'='*10}\n"
             f"[√] Unified Discovery Pipeline finished.\n"
-            f"    Passive Discovery  : {total_unique} unique subdomains\n"
-            f"    DNSx Resolved      : {dnsx_resolved} | NXDOMAIN: {dnsx_nxdomain} | Wildcards: {dnsx_wildcards}\n"
-            f"    Subzy Vulnerable   : {subzy_vulnerable}\n"
+            f"    Passive Discovery  : {p_discovery_str}\n"
+            f"    DNS Resolution     : {dnsx_str}\n"
+            f"    Subzy              : {subzy_str}\n"
             f"    HTTPX Live Hosts   : {live_hosts}\n"
             f"    Naabu Open Ports   : {naabu_open_ports} across {naabu_hosts_with_ports} hosts\n"
             f"    Katana URLs (Unique): {katana_urls_discovered} across {katana_hosts_scanned} hosts\n"

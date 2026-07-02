@@ -103,8 +103,8 @@ interface OverviewDashboardProps {
   onResumeScan?: () => void;
   onStopScan?: () => void;
   onResetScan?: () => void;
-  stages?: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
-  providerStatus?: Record<string, "PENDING" | "RUNNING" | "COMPLETED" | "FAILED">;
+  stages?: Record<string, string>;
+  providerStatus?: Record<string, string>;
   onSelectSeverity?: (severity: string) => void;
 }
 
@@ -192,14 +192,18 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
 
 
 
-  const getProviderStatus = (tool: string): "waiting" | "running" | "completed" | "failed" | "paused" | "stopped" => {
+  const getProviderStatus = (tool: string): "waiting" | "running" | "completed" | "failed" | "paused" | "stopped" | "skipped" => {
     const jobStatus = activeJob?.status;
     const t = tool.toLowerCase();
+
+    // 0. Explicit skipped checks
+    if (providerStatus[t] === "SKIPPED") return "skipped";
 
     // 1. Job completed/failed cases
     if (jobStatus === "completed" || currentPhase === "completed") return "completed";
     if (jobStatus === "failed") {
       if (providerStatus[t] === "COMPLETED") return "completed";
+      if (providerStatus[t] === "SKIPPED") return "skipped";
       return "failed";
     }
 
@@ -242,9 +246,10 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     return "waiting";
   };
 
-  const getElementStatus = (phase: string): "waiting" | "running" | "completed" | "failed" | "paused" | "stopped" => {
+  const getElementStatus = (phase: string): "waiting" | "running" | "completed" | "failed" | "paused" | "stopped" | "skipped" => {
     if (phase === "discovery") {
       const status = stages.discovery || "PENDING";
+      if (status === "SKIPPED") return "skipped";
       if (status === "COMPLETED") return "completed";
       if (status === "FAILED") return "failed";
       if (status === "RUNNING") {
@@ -262,6 +267,9 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
       return "waiting";
     }
 
+    const explicitStatus = providerStatus[phase] || "PENDING";
+    if (explicitStatus === "SKIPPED") return "skipped";
+
     return getProviderStatus(phase);
   };
 
@@ -274,6 +282,9 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     if (status === "completed") {
       badgeClass += "bg-cyber-success/10 border border-cyber-success/30 text-cyber-success";
       icon = <span className="text-[10px] font-bold">✓</span>;
+    } else if (status === "skipped") {
+      badgeClass += "bg-slate-500/10 border border-slate-500/30 text-slate-500 line-through opacity-60";
+      icon = <span className="text-[10px] opacity-40">»</span>;
     } else if (status === "running") {
       badgeClass += "bg-cyber-accent/20 border border-cyber-accent/50 text-cyber-accent animate-pulse font-bold";
       icon = <RefreshCw className="w-2.5 h-2.5 animate-spin" />;

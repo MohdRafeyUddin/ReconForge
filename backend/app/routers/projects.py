@@ -5,16 +5,23 @@ from typing import List
 from app.database import get_database
 from app.auth import get_current_user
 from app.models import ProjectCreate, ProjectResponse, serialize_doc
+from app.providers.unified_discovery_provider import detect_target_type
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 
 @router.post("", response_model=ProjectResponse)
 async def create_project(project_in: ProjectCreate, current_user: dict = Depends(get_current_user)):
     db = get_database()
+    
+    # Resolve target_type from seed domains
+    seed = project_in.seed_domains[0] if project_in.seed_domains else ""
+    detected_type = detect_target_type(seed)
+    
     project_dict = {
         "name": project_in.name,
         "description": project_in.description,
         "seed_domains": project_in.seed_domains,
+        "target_type": detected_type,
         "owner_id": str(current_user["_id"]),
         "created_at": datetime.utcnow()
     }

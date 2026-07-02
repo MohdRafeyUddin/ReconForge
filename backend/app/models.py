@@ -42,6 +42,7 @@ class ProjectBase(BaseModel):
     name: str
     description: Optional[str] = ""
     seed_domains: List[str] = []
+    target_type: Optional[str] = "DOMAIN"
 
 class ProjectCreate(ProjectBase):
     pass
