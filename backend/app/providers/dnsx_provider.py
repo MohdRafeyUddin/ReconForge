@@ -153,7 +153,8 @@ class DnsxProvider(BaseProvider):
             return
 
         is_windows = platform.system().lower() == "windows"
-        executable = "wsl" if is_windows else "/home/kali/go/bin/dnsx"
+        tool_path = self.detect_tool("dnsx")
+        executable = "wsl" if is_windows else tool_path
         temp_path = ""
         start_ts = time.time()
 
@@ -180,8 +181,7 @@ class DnsxProvider(BaseProvider):
             )
 
             # Construct command
-            dnsx_bin = "/home/kali/go/bin/dnsx"
-            args = [dnsx_bin] if is_windows else []
+            args = [tool_path] if is_windows else []
             dnsx_flags = [
                 "-l", list_path,
                 "-a",           # collect A records
@@ -342,6 +342,16 @@ class DnsxProvider(BaseProvider):
         )
         logger.info(complete_msg)
         yield {"type": "log", "message": complete_msg}
+
+        hosts_in = len(hosts)
+        hosts_resolved = resolved_count
+        dead_count = hosts_in - hosts_resolved
+
+        if dead_count > 0:
+            dead_log = f"[*] {dead_count} host(s) failed DNS resolution and will be excluded from all downstream scanning stages."
+            logger.info(dead_log)
+            yield {"type": "log", "message": dead_log}
+
         yield {
             "type": "scan_summary",
             "provider": self.name,
@@ -349,4 +359,7 @@ class DnsxProvider(BaseProvider):
             "nxdomain": nxdomain_count,
             "wildcards_filtered": wildcard_count,
             "duration_seconds": duration_s,
+            "hosts_in": hosts_in,
+            "hosts_resolved": hosts_resolved,
+            "hosts_dead": dead_count,
         }

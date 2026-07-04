@@ -106,6 +106,8 @@ interface OverviewDashboardProps {
   stages?: Record<string, string>;
   providerStatus?: Record<string, string>;
   onSelectSeverity?: (severity: string) => void;
+  pipelineHalted?: { reason: string; message: string } | null;
+  providerSkippedReasons?: Record<string, string>;
 }
 
 const COLORS = ["#3B82F6", "#06B6D4", "#10B981", "#F59E0B", "#EF4444"];
@@ -133,6 +135,8 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   stages = {},
   providerStatus = {},
   onSelectSeverity,
+  pipelineHalted = null,
+  providerSkippedReasons = {},
 }) => {
   const [selectedProvider, setSelectedProvider] = useState("Unified Discovery");
   const [providers, setProviders] = useState<string[]>(FALLBACK_PROVIDERS);
@@ -438,6 +442,26 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   const infoCount = assets.reduce((t, a) => t + (a.metadata?.nuclei?.findings?.filter(f => (f.severity || "").toLowerCase() === "info").length || 0), 0);
   const totalNucleiFindings = criticalCount + highCount + mediumCount + lowCount + infoCount;
 
+  // Risk score calculations
+  const hosts = assets.filter(a => a.type && ["subdomain", "domain", "ip", "service"].includes(a.type.toLowerCase()));
+  const criticalRiskCount = hosts.filter(h => h.risk && h.risk.score >= 90).length;
+  const highRiskCount = hosts.filter(h => h.risk && h.risk.score >= 70 && h.risk.score < 90).length;
+  const mediumRiskCount = hosts.filter(h => h.risk && h.risk.score >= 40 && h.risk.score < 70).length;
+  const lowRiskCount = hosts.filter(h => h.risk && h.risk.score >= 1 && h.risk.score < 40).length;
+  const infoRiskCount = hosts.filter(h => h.risk && h.risk.score === 0).length;
+  const notScoredCount = hosts.filter(h => !h.risk).length;
+
+  const hostsWithRisk = hosts.map(h => {
+    const risk = h.risk;
+    const score = risk?.score ?? 0;
+    const importance = risk?.importance_score ?? 0;
+    const exposure = risk?.exposure_score ?? 0;
+    const priorityScore = score + importance + exposure;
+    return { ...h, priorityScore };
+  });
+  hostsWithRisk.sort((a, b) => b.priorityScore - a.priorityScore);
+  const topRiskAssets = hostsWithRisk.filter(h => h.risk).slice(0, 5);
+
   // Recompute ports distribution dynamically from assets
   const portCounts: Record<number, number> = {};
   assets.forEach((a) => {
@@ -516,17 +540,32 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
       rawCount = totalNucleiFindings;
     }
 
-    const countDisplay = (activeJob && pStatus === "waiting") ? "-" : rawCount;
+    const isSkippedUpstream = providerSkippedReasons[p.tool] === "no_live_hosts_upstream";
+    const countDisplay = isSkippedUpstream
+      ? "Skipped — no live hosts"
+      : (activeJob && pStatus === "waiting") ? "-" : rawCount;
+
     return {
       ...p,
-      status: pStatus,
+      status: isSkippedUpstream ? "skipped" : pStatus,
       countDisplay,
       count: rawCount,
+      isSkippedUpstream,
     };
   });
 
   return (
     <div className="space-y-6">
+      {/* Pipeline Halted Banner */}
+      {pipelineHalted && pipelineHalted.reason === "no_live_hosts" && (
+        <div className="bg-cyber-danger/10 border border-cyber-danger/30 rounded-xl p-4 flex items-center space-x-3 text-cyber-danger glass animate-pulse">
+          <span className="text-xl">⚠</span>
+          <div className="text-xs font-mono font-bold leading-relaxed">
+            No live hosts found — scan stopped early. Nothing to crawl or scan. Check Naabu/HTTPX raw output in the logs panel if this seems unexpected.
+          </div>
+        </div>
+      )}
+
       {/* Phase Tracker for Active Scan */}
       <div className="bg-dark-card border border-dark-border rounded-xl p-4 glass animate-fadeIn">
         <div className="flex flex-col md:flex-row items-center justify-between gap-4">
@@ -645,15 +684,18 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           {providerBreakdown.map((p) => (
             <div key={p.label} className="bg-dark-bg border border-dark-border rounded-lg p-3 flex flex-col items-center text-center relative overflow-hidden">
               <div className="flex items-center gap-1.5 mb-1.5 justify-center">
-                {p.status === "completed" && <span className="text-cyber-success text-xs font-bold">✓</span>}
+                {(p.status === "completed" && !p.isSkippedUpstream) && <span className="text-cyber-success text-xs font-bold">✓</span>}
                 {p.status === "running" && <RefreshCw className="w-3 h-3 animate-spin text-cyber-accent" />}
                 {p.status === "waiting" && <span className="text-slate-500 text-xs">○</span>}
                 {p.status === "failed" && <span className="text-cyber-danger text-xs font-bold">✕</span>}
                 {p.status === "paused" && <Pause className="w-3 h-3 text-cyber-warning animate-pulse" />}
                 {p.status === "stopped" && <Square className="w-3 h-3 text-cyber-danger fill-current" />}
+                {p.status === "skipped" && <span className="text-slate-500 text-xs font-bold">»</span>}
                 <span className="text-[10px] font-mono text-slate-400 uppercase tracking-widest">{p.label}</span>
               </div>
-              <span className="text-2xl font-mono font-bold" style={{ color: p.color }}>{p.countDisplay}</span>
+              <span className={`font-mono font-bold text-center ${p.isSkippedUpstream ? "text-[10px] text-slate-500 py-1" : "text-2xl"}`} style={{ color: p.isSkippedUpstream ? undefined : p.color }}>
+                {p.countDisplay}
+              </span>
               <span className="text-[9px] text-slate-500 mt-1 capitalize">{p.status}</span>
               
               {/* Progress bar for sub-providers (Subfinder, Assetfinder, Chaos, Amass) */}
@@ -724,6 +766,82 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           />
         </div>
       )}
+      {/* Risk Scoring Panel */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        {/* Risk Overview Card */}
+        <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass flex flex-col justify-between">
+          <div>
+            <h4 className="text-xs font-mono text-slate-400 uppercase tracking-wider mb-4 border-b border-dark-border pb-2 flex items-center justify-between">
+              <span>Risk Overview</span>
+              <span className="text-[10px] font-mono text-slate-500 uppercase">ASM Scoring</span>
+            </h4>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="bg-dark-bg border border-red-500/20 rounded-lg p-3.5 flex flex-col items-center text-center">
+                <span className="text-[9px] font-mono text-slate-500 uppercase tracking-wider mb-1">Critical Risk</span>
+                <span className="text-2xl font-mono font-bold text-red-500">{criticalRiskCount}</span>
+              </div>
+              <div className="bg-dark-bg border border-orange-500/20 rounded-lg p-3.5 flex flex-col items-center text-center">
+                <span className="text-[9px] font-mono text-slate-500 uppercase tracking-wider mb-1">High Risk</span>
+                <span className="text-2xl font-mono font-bold text-orange-500">{highRiskCount}</span>
+              </div>
+              <div className="bg-dark-bg border border-yellow-500/20 rounded-lg p-3.5 flex flex-col items-center text-center">
+                <span className="text-[9px] font-mono text-slate-500 uppercase tracking-wider mb-1">Medium Risk</span>
+                <span className="text-2xl font-mono font-bold text-yellow-500">{mediumRiskCount}</span>
+              </div>
+            </div>
+          </div>
+          <div className="mt-4 pt-3 border-t border-dark-border/40 text-[10px] font-mono text-slate-500 flex justify-between">
+            <span>Low Risk: {lowRiskCount}</span>
+            <span>Info: {infoRiskCount}</span>
+            <span>Unscored Hosts: {notScoredCount}</span>
+          </div>
+        </div>
+
+        {/* Top Risk Assets */}
+        <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">
+          <h4 className="text-xs font-mono text-slate-400 uppercase tracking-wider mb-4 border-b border-dark-border pb-2 flex items-center justify-between">
+            <span>Top Priority Critical Assets</span>
+            <span className="text-[10px] font-mono text-slate-500 uppercase">Weighted Ranking</span>
+          </h4>
+          <div className="space-y-2">
+            {topRiskAssets.length === 0 ? (
+              <div className="text-center py-6 text-xs text-slate-500 font-mono">
+                No scored assets found. Scans may be running or pending scoring.
+              </div>
+            ) : (
+              topRiskAssets.map((asset) => {
+                const score = asset.risk?.score ?? 0;
+                let badgeColor = "bg-slate-500/10 text-slate-400 border-slate-500/20";
+                if (score >= 90) badgeColor = "bg-red-500/10 text-red-500 border-red-500/20";
+                else if (score >= 70) badgeColor = "bg-orange-500/10 text-orange-500 border-orange-500/20";
+                else if (score >= 40) badgeColor = "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
+                else if (score >= 1) badgeColor = "bg-blue-500/10 text-blue-400 border-blue-500/20";
+                
+                const mainReason = asset.risk?.reasons?.[0] || "No critical findings detected";
+                
+                return (
+                  <div key={asset.id} className="flex items-center justify-between p-2.5 bg-dark-bg border border-dark-border rounded-lg hover:bg-dark-hover/10 transition-all">
+                    <div className="flex flex-col min-w-0 pr-2">
+                      <span className="text-xs font-mono text-slate-300 truncate font-semibold">{asset.domain}</span>
+                      <span className="text-[10px] text-slate-500 font-mono truncate">{mainReason}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {asset.risk?.exposure_factors?.includes("Internet Exposed") && (
+                        <span className="text-[9px] font-mono uppercase bg-cyber-primary/10 text-cyber-primary px-1.5 py-0.5 rounded border border-cyber-primary/20">
+                          Exposed
+                        </span>
+                      )}
+                      <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded border ${badgeColor}`}>
+                        {score}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </div>
 
       {/* Vulnerability Summary Card */}
       <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">

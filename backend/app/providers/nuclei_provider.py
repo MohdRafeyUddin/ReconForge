@@ -132,11 +132,18 @@ class NucleiProvider(BaseProvider):
             msg = "Nuclei completed. No URLs to scan."
             logger.info(msg)
             yield {"type": "log", "message": msg}
-            yield {"type": "scan_summary", "provider": self.name, "urls_scanned": 0, "findings_found": 0}
+            yield {
+                "type": "scan_summary",
+                "provider": self.name,
+                "urls_scanned": 0,
+                "findings_found": 0,
+                "skipped_reason": "no_live_hosts_upstream"
+            }
             return
 
         is_windows = platform.system().lower() == "windows"
-        executable = "wsl" if is_windows else "/home/kali/go/bin/nuclei"
+        tool_path = self.detect_tool("nuclei")
+        executable = "wsl" if is_windows else tool_path
         temp_path = ""
         start_ts = time.time()
 
@@ -334,7 +341,7 @@ class NucleiProvider(BaseProvider):
                 yield {"type": "log", "message": "Templates loaded."}
                 yield {"type": "log", "message": f"Scanning {len(urls)} URLs..."}
 
-                args = ["/home/kali/go/bin/nuclei"] if is_windows else []
+                args = [tool_path] if is_windows else []
                 # Removed -stats flag
                 nuclei_flags = [
                     "-l", wsl_temp_path,
@@ -561,16 +568,21 @@ class NucleiProvider(BaseProvider):
             msg = f"{scan_label}: No targets to scan."
             logger.info(msg)
             yield {"type": "log", "message": msg}
+            prov_name = "nuclei_host" if "host" in scan_label.lower() else "nuclei_endpoint"
             yield {
                 "type": "scan_summary",
-                "provider": scan_label,
+                "provider": prov_name,
+                "status": "completed",
+                "count": 0,
                 "urls_scanned": 0,
                 "findings_found": 0,
             }
+            yield {"type": "log", "message": f"[√] Provider {prov_name} completed"}
             return
 
         is_windows = platform.system().lower() == "windows"
-        executable = "wsl" if is_windows else "/home/kali/go/bin/nuclei"
+        tool_path = self.detect_tool("nuclei")
+        executable = "wsl" if is_windows else tool_path
         temp_path = ""
         start_ts = time.time()
 
@@ -734,7 +746,7 @@ class NucleiProvider(BaseProvider):
                 yield {"type": "scan_summary", "event": "NucleiPassStarted", "pass_name": pass_name}
                 yield {"type": "log", "message": f"\n[*] Starting pass: {pass_name} (tags: {pass_tags})"}
 
-                args = ["/home/kali/go/bin/nuclei"] if is_windows else []
+                args = [tool_path] if is_windows else []
                 nuclei_flags = [
                     "-l", wsl_temp_path,
                     "-tags", pass_tags,
@@ -868,6 +880,22 @@ class NucleiProvider(BaseProvider):
                     }
                     yield {"type": "scan_summary", "event": "NucleiPassCompleted", "pass_name": pass_name}
                     yield {"type": "log", "message": f"[*] Completed pass: {pass_name}"}
+                    if pass_name == "HostExposure":
+                        yield {
+                            "type": "scan_summary",
+                            "provider": "nuclei_host",
+                            "status": "completed",
+                            "count": total_findings_found
+                        }
+                        yield {"type": "log", "message": "[√] Provider nuclei_host completed"}
+                    elif pass_name == "EndpointCritical":
+                        yield {
+                            "type": "scan_summary",
+                            "provider": "nuclei_endpoint",
+                            "status": "completed",
+                            "count": total_findings_found
+                        }
+                        yield {"type": "log", "message": "[√] Provider nuclei_endpoint completed"}
 
         except Exception as exc:
             logger.error(f"[-] {scan_label} scan failed: {exc}", exc_info=True)
@@ -889,6 +917,14 @@ class NucleiProvider(BaseProvider):
             "duration_seconds": duration_s,
             "severity_counts": severity_counts,
         }
+        prov_name = "nuclei_host" if "host" in scan_label.lower() else "nuclei_endpoint"
+        yield {
+            "type": "scan_summary",
+            "provider": prov_name,
+            "status": "completed",
+            "count": total_findings_found
+        }
+        yield {"type": "log", "message": f"[√] Provider {prov_name} completed"}
         logger.info(f"{scan_label} provider completed — {total_findings_found} findings")
 
     # ──────────────────────────────────────────────────────────────────────
@@ -911,6 +947,20 @@ class NucleiProvider(BaseProvider):
             if norm and norm not in seen:
                 seen.add(norm)
                 urls.append(norm)
+
+        if not urls:
+            msg = "Nuclei Host Scan completed. No URLs to scan."
+            logger.info(msg)
+            yield {"type": "log", "message": msg}
+            yield {
+                "type": "scan_summary",
+                "provider": "nuclei_host",
+                "status": "completed",
+                "count": 0,
+                "skipped_reason": "no_live_hosts_upstream"
+            }
+            yield {"type": "log", "message": "[√] Provider nuclei_host completed"}
+            return
 
         async for event in self._run_passes(NUCLEI_HOST_PASSES, urls, "Nuclei Host Scan"):
             # Re-label the provider field so the frontend pipeline card reads correctly.
@@ -939,6 +989,20 @@ class NucleiProvider(BaseProvider):
             if norm and norm not in seen:
                 seen.add(norm)
                 urls.append(norm)
+
+        if not urls:
+            msg = "Nuclei Endpoint Scan completed. No URLs to scan."
+            logger.info(msg)
+            yield {"type": "log", "message": msg}
+            yield {
+                "type": "scan_summary",
+                "provider": "nuclei_endpoint",
+                "status": "completed",
+                "count": 0,
+                "skipped_reason": "no_live_hosts_upstream"
+            }
+            yield {"type": "log", "message": "[√] Provider nuclei_endpoint completed"}
+            return
 
         async for event in self._run_passes(NUCLEI_ENDPOINT_PASSES, urls, "Nuclei Endpoint Scan"):
             if event.get("type") == "scan_summary" and event.get("provider") == "Nuclei Endpoint Scan":

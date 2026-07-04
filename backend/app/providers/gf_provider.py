@@ -167,11 +167,13 @@ class GfProvider(BaseProvider):
                 "provider": self.name,
                 "urls_classified": 0,
                 "matches_by_category": {},
+                "skipped_reason": "no_live_hosts_upstream"
             }
             return
 
         is_windows = platform.system().lower() == "windows"
-        resolved_cmd = ["wsl", "/home/kali/go/bin/gf"] if is_windows else ["/home/kali/go/bin/gf"]
+        tool_path = self.detect_tool("gf")
+        resolved_cmd = ["wsl", tool_path] if is_windows else [tool_path]
 
         temp_path = ""
         start_ts = time.time()

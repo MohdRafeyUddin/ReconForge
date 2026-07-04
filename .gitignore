@@ -1,78 +1,41 @@
 # Python
 __pycache__/
+*.pyc
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-*.egg-info/
-.eggs/
-*.egg
-pip-wheel-metadata/
-*.manifest
-*.spec
-htmlcov/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-
-# FastAPI / API
-.env
-.env.*
-*.local
-*.local.json
-*.local.yaml
-*.local.yml
-*.pem
-*.key
-*.p12
-*.crt
-*.cer
-config.local.py
-secrets.json
-credentials.json
-api_keys.txt
-
-# Virtual environments
-.venv/
 venv/
-env/
-ENV/
-backend/venv/
-frontend/node_modules/
+.env
 
-# Node / React
+# Node
 node_modules/
+dist/
+build/
 frontend/dist/
 frontend/build/
-frontend/.vite/
-frontend/coverage/
+frontend/node_modules/
+backend/venv/
 
-# VS Code
-.vscode/
-
-# MongoDB local data
-mongodb-data/
-*.lock
-*.db
-*.sqlite3
-
-# Logs and temp files
+# ReconForge runtime data
+scan_results/
+screenshots/
+reports/
+logs/
 *.log
-*.tmp
-*.temp
-*.swp
-*.swo
 
-# OS files
+# Security/private
+nuclei-custom-templates/*.yaml
+config/private/*
+api_keys.txt
+
+# Database
+*.db
+mongodb_data/
+mongodb-data/
+
+# IDE
+.vscode/
+.idea/
+
+# OS/System files
 .DS_Store
 Thumbs.db
 Desktop.ini
-
-# JetBrains / editors
-.idea/

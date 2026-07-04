@@ -129,11 +129,18 @@ class KatanaProvider(BaseProvider):
             msg = "Katana completed. No LIVE targets to crawl."
             logger.info(msg)
             yield {"type": "log", "message": msg}
-            yield {"type": "scan_summary", "provider": self.name, "targets_scanned": 0, "urls_found": 0}
+            yield {
+                "type": "scan_summary",
+                "provider": self.name,
+                "targets_scanned": 0,
+                "urls_found": 0,
+                "skipped_reason": "no_live_hosts_upstream"
+            }
             return
 
         is_windows = platform.system().lower() == "windows"
-        executable = "wsl" if is_windows else "/home/kali/go/bin/katana"
+        tool_path = self.detect_tool("katana")
+        executable = "wsl" if is_windows else tool_path
         
         # Structure to collect results aggregated by target hostname
         # hostname -> {urls, js_files, endpoints, forms, third_party_urls, classified_endpoints}
@@ -179,7 +186,7 @@ class KatanaProvider(BaseProvider):
                 yield {"type": "log", "message": f"\n[*] Starting Crawl Session: {target}"}
                 hosts_crawled += 1
 
-                args = ["/home/kali/go/bin/katana"] if is_windows else []
+                args = [tool_path] if is_windows else []
                 katana_flags = [
                     "-u", target,
                     "-jc",            # Enable JavaScript crawling

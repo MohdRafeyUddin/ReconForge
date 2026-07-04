@@ -139,19 +139,20 @@ class SubfinderProvider(BaseProvider):
         yield {"type": "log", "message": msg}
 
         is_windows = platform.system().lower() == "windows"
+        tool_path = self.detect_tool("subfinder")
 
         for domain in seed_domains:
 
             if is_windows:
                 executable = "wsl"
                 args = [
-                    "/home/kali/go/bin/subfinder",
+                    tool_path,
                     "-d",
                     domain,
                     "-silent"
                 ]
             else:
-                executable = "/home/kali/go/bin/subfinder"
+                executable = tool_path
                 args = [
                     "-d",
                     domain,

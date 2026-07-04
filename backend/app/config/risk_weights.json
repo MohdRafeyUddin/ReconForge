@@ -1,0 +1,16 @@
+{
+  "nuclei_severity": {
+    "critical": 40,
+    "high": 25,
+    "medium": 10,
+    "low": 5
+  },
+  "exposed_admin_panel": 20,
+  "sensitive_file_leak": 20,
+  "open_database_port": 15,
+  "outdated_technology": 10,
+  "no_https": 5,
+  "subdomain_takeover": 30,
+  "confirmed_open_redirect": 10,
+  "confirmed_xss": 20
+}

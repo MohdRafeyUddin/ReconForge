@@ -88,6 +88,9 @@ interface ScanState {
   takeoverRecords: TakeoverRecord[];
   normalizedUrlRecords: NormalizedUrlRecord[];
   gfRecords: GfUrlRecord[];
+  riskScores: any[];
+  pipelineHalted: { reason: string; message: string } | null;
+  providerSkippedReasons: Record<string, string>;
   completedProviders: Set<string>;
   activeJobObject: any | null;
   lastCompletedJobObject: any | null;
@@ -133,6 +136,9 @@ const initialScanState: ScanState = {
   takeoverRecords: [],
   normalizedUrlRecords: [],
   gfRecords: [],
+  riskScores: [],
+  pipelineHalted: null,
+  providerSkippedReasons: {},
   completedProviders: new Set<string>(),
   activeJobObject: null,
   providerStatus: {
@@ -150,6 +156,12 @@ const initialScanState: ScanState = {
     nuclei_host: "PENDING",
     nuclei_endpoint: "PENDING",
     nuclei: "PENDING",
+    gau: "PENDING",
+    subjs: "PENDING",
+    linkfinder: "PENDING",
+    gowitness: "PENDING",
+    dalfox: "PENDING",
+    openredirex: "PENDING",
   },
   lastWsEventTime: 0,
 };
@@ -288,10 +300,11 @@ const MainDashboard: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("dashboard");
-  const [initialInventoryTab, setInitialInventoryTab] = useState<"assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei">("assets");
+  const [initialInventoryTab, setInitialInventoryTab] = useState<"assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei" | "historical_urls" | "js_files" | "screenshots">("assets");
   const [initialSeverityFilter, setInitialSeverityFilter] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isReconnect, setIsReconnect] = useState(false);
+  const [scanMode, setScanMode] = useState<"fast" | "deep">("fast");
 
   const [scanState, setScanState] = useState<ScanState>(initialScanState);
 
@@ -479,11 +492,12 @@ const MainDashboard: React.FC = () => {
     if (!activeProject) return;
     const projectId = activeProject.id;
     try {
-      const [assetList, subdomainList, dashboardStats, jobsList] = await Promise.all([
+      const [assetList, subdomainList, dashboardStats, jobsList, riskScores] = await Promise.all([
         apiCall(`/assets/project/${projectId}`),
         apiCall(`/assets/project/${projectId}/subdomains`),
         apiCall(`/assets/project/${projectId}/dashboard-stats`),
         apiCall(`/jobs/project/${projectId}`),
+        apiCall(`/projects/${projectId}/risk-scores`).catch(() => []),
       ]);
 
       if (activeProjectRef.current?.id !== projectId) {
@@ -503,6 +517,10 @@ const MainDashboard: React.FC = () => {
       let uro_input = 0;
       let uro_normalised = 0;
       let uro_removed = 0;
+      const completedFromLogs = new Set<string>();
+      const skippedFromLogs = new Set<string>();
+      let pipelineHaltedObj: { reason: string; message: string } | null = null;
+      const skippedReasonsMap: Record<string, string> = {};
 
       [...jobsList].reverse().forEach((job: any) => {
         if (Array.isArray(job.logs)) {
@@ -524,6 +542,50 @@ const MainDashboard: React.FC = () => {
               uro_input = parseInt(uroMatch[1]);
               uro_normalised = parseInt(uroMatch[2]);
               uro_removed = parseInt(uroMatch[3]);
+            }
+
+            const completedMatch = log.match(/\[√\] Provider (\S+) completed/i);
+            if (completedMatch) {
+              completedFromLogs.add(completedMatch[1].toLowerCase());
+            }
+            const skippedMatch = log.match(/\[!\] Provider (\S+) skipped/i);
+            if (skippedMatch) {
+              skippedFromLogs.add(skippedMatch[1].toLowerCase());
+            }
+
+            if (log.includes("No live HTTP hosts were found")) {
+              pipelineHaltedObj = {
+                reason: "no_live_hosts",
+                message: "No live HTTP hosts were found. Katana, GAU, SubJS, LinkFinder, GoWitness, GF, and Nuclei were all skipped because there is nothing for them to scan."
+              };
+            }
+
+            if (log.includes("Katana completed. No LIVE targets to crawl.")) {
+              skippedReasonsMap["katana"] = "no_live_hosts_upstream";
+            }
+            if (log.includes("GAU completed. No target hosts provided.")) {
+              skippedReasonsMap["gau"] = "no_live_hosts_upstream";
+            }
+            if (log.includes("SubJS completed. No input URLs provided.")) {
+              skippedReasonsMap["subjs"] = "no_live_hosts_upstream";
+            }
+            if (log.includes("GoWitness completed. No target URLs provided.")) {
+              skippedReasonsMap["gowitness"] = "no_live_hosts_upstream";
+            }
+            if (log.includes("GF completed. No URLs provided.")) {
+              skippedReasonsMap["gf"] = "no_live_hosts_upstream";
+            }
+            if (log.includes("Nuclei Host Scan completed. No URLs to scan.")) {
+              skippedReasonsMap["nuclei_host"] = "no_live_hosts_upstream";
+            }
+            if (log.includes("Nuclei Endpoint Scan completed. No URLs to scan.")) {
+              skippedReasonsMap["nuclei_endpoint"] = "no_live_hosts_upstream";
+            }
+            if (log.includes("Dalfox completed. No input URLs provided.")) {
+              skippedReasonsMap["dalfox"] = "no_live_hosts_upstream";
+            }
+            if (log.includes("OpenRedirex completed. No input URLs provided.")) {
+              skippedReasonsMap["openredirex"] = "no_live_hosts_upstream";
             }
           });
         }
@@ -826,6 +888,33 @@ const MainDashboard: React.FC = () => {
         const subzySafe = takeovers.filter((r) => r.status.toLowerCase() === "not vulnerable").length;
         const subzyUnkn = takeovers.filter((r) => r.status.toLowerCase() === "unknown").length;
 
+        // Restore provider statuses from parsed logs
+        completedFromLogs.forEach((p) => {
+          if (nextProviderStatus[p] !== "FAILED") {
+            nextProviderStatus[p] = "COMPLETED";
+          }
+        });
+        skippedFromLogs.forEach((p) => {
+          nextProviderStatus[p] = "SKIPPED";
+        });
+
+        // Force running to completed if pipeline complete message was in the logs of the active job
+        let hasPipelineComplete = false;
+        if (activeJobFromServer && Array.isArray(activeJobFromServer.logs)) {
+          hasPipelineComplete = activeJobFromServer.logs.some((l: string) => 
+            l.toLowerCase().includes("pipeline complete") || l.toLowerCase().includes("unified discovery pipeline finished")
+          );
+        }
+        if (hasPipelineComplete || (activeJobFromServer && activeJobFromServer.status === "completed")) {
+          Object.keys(nextProviderStatus).forEach((key) => {
+            if (nextProviderStatus[key] === "RUNNING" || nextProviderStatus[key] === "PENDING") {
+              if (nextProviderStatus[key] !== "SKIPPED" && nextProviderStatus[key] !== "FAILED") {
+                nextProviderStatus[key] = "COMPLETED";
+              }
+            }
+          });
+        }
+
         return {
           ...prev,
           jobId: activeJobFromServer && ["running", "pending", "paused", "stopped"].includes(activeJobFromServer.status) ? activeJobFromServer.id : null,
@@ -861,6 +950,9 @@ const MainDashboard: React.FC = () => {
             });
             return cats;
           })(),
+          riskScores: riskScores,
+          pipelineHalted: pipelineHaltedObj,
+          providerSkippedReasons: skippedReasonsMap,
         };
       });
     } catch (err) {
@@ -890,7 +982,7 @@ const MainDashboard: React.FC = () => {
     if (!activeProject) return;
     try {
       const job = await apiCall(
-        `/jobs/project/${activeProject.id}/provider/${encodeURIComponent(providerName)}`,
+        `/jobs/project/${activeProject.id}/provider/${encodeURIComponent(providerName)}?scan_mode=${scanMode}`,
         { method: "POST" }
       );
       setIsReconnect(false);
@@ -1230,6 +1322,47 @@ const MainDashboard: React.FC = () => {
                   };
                 });
               }
+            } else if (data.type === "risk_score_event") {
+              setScanState((prev) => {
+                if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                  return prev;
+                }
+                const updatedScores = [...prev.riskScores];
+                const scoreObj = {
+                  asset: data.asset,
+                  score: data.score,
+                  level: data.level,
+                  reasons: data.reasons,
+                  exposure_factors: data.exposure_factors,
+                  recommended_priority: data.recommended_priority,
+                  importance_score: data.importance_score,
+                  exposure_score: data.exposure_score,
+                  updated_at: data.updated_at
+                };
+                const idx = updatedScores.findIndex(s => s.asset.toLowerCase() === data.asset.toLowerCase());
+                if (idx !== -1) {
+                  updatedScores[idx] = scoreObj;
+                } else {
+                  updatedScores.push(scoreObj);
+                }
+
+                const updatedAssets = prev.assets.map(asset => {
+                  if (asset.domain.toLowerCase() === data.asset.toLowerCase()) {
+                    return {
+                      ...asset,
+                      risk: scoreObj
+                    };
+                  }
+                  return asset;
+                });
+
+                return {
+                  ...prev,
+                  riskScores: updatedScores,
+                  assets: updatedAssets,
+                  lastWsEventTime: Date.now()
+                };
+              });
             } else if (data.type === "provider_stat") {
               const { provider, count } = data;
               setScanState((prev) => {
@@ -1248,81 +1381,104 @@ const MainDashboard: React.FC = () => {
                 };
               });
             } else if (data.type === "scan_summary") {
+              if (data.event === "PipelineHalted") {
+                setScanState((prev) => {
+                  if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                    return prev;
+                  }
+                  return {
+                    ...prev,
+                    pipelineHalted: { reason: data.reason, message: data.message }
+                  };
+                });
+              }
               if (data.provider) {
                 setScanState((prev) => {
                   if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
                     return prev;
                   }
                   const providerName = data.provider.toLowerCase();
-                  let nextStageData = transitionToStage(prev.stages, providerName);
-                  let nextProviderStatus = updateProviderStatus(prev.providerStatus, providerName, "COMPLETED");
+                  let nextStageData = { currentStage: prev.currentStage, stages: prev.stages };
+                  let nextProviderStatus = { ...prev.providerStatus };
+                  let nextProviderSkippedReasons = { ...prev.providerSkippedReasons };
+
+                  if (data.skipped_reason) {
+                    nextProviderSkippedReasons[providerName] = data.skipped_reason;
+                  }
                   
-                  const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei"];
+                  if (data.status) {
+                    nextProviderStatus[providerName] = data.status.toUpperCase();
+                  } else {
+                    nextProviderStatus = updateProviderStatus(prev.providerStatus, providerName, "COMPLETED");
+                  }
+                  
+                  const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei_host", "nuclei_endpoint", "nuclei"];
                   const currentIdx = PIPELINE_ORDER.indexOf(providerName);
-                  if (currentIdx !== -1 && currentIdx < PIPELINE_ORDER.length - 1) {
-                    const nextStageName = PIPELINE_ORDER[currentIdx + 1];
-                    nextStageData = transitionToStage(nextStageData.stages, nextStageName);
-                    nextProviderStatus = updateProviderStatus(nextProviderStatus, nextStageName, "RUNNING");
-                  } else if (currentIdx === PIPELINE_ORDER.length - 1) {
-                    nextStageData = transitionToStage(nextStageData.stages, "completed");
+                  if (currentIdx !== -1) {
+                    nextStageData = transitionToStage(prev.stages, providerName);
+                    if (currentIdx < PIPELINE_ORDER.length - 1) {
+                      const nextStageName = PIPELINE_ORDER[currentIdx + 1];
+                      nextStageData = transitionToStage(nextStageData.stages, nextStageName);
+                      nextProviderStatus = updateProviderStatus(nextProviderStatus, nextStageName, "RUNNING");
+                    } else {
+                      nextStageData = transitionToStage(nextStageData.stages, "completed");
+                    }
                   }
 
                   let extraStats: Partial<ScanState> = {};
-                  if (data.provider === "DNSx") {
+                  let nextProviderCounts = { ...prev.providerCounts };
+                  if (data.count !== undefined) {
+                    nextProviderCounts[providerName] = data.count;
+                    if (providerName === "nuclei_host" || providerName === "nuclei_endpoint") {
+                      nextProviderCounts.nuclei = (nextProviderCounts.nuclei_host ?? 0) + (nextProviderCounts.nuclei_endpoint ?? 0);
+                    }
+                    extraStats.providerCounts = nextProviderCounts;
+                  }
+
+                  const upperProvider = data.provider.toUpperCase();
+                  if (upperProvider === "DNSX") {
                     extraStats = {
+                      ...extraStats,
                       dnsx_resolved: data.resolved ?? prev.dnsx_resolved,
                       dnsx_nxdomain: data.nxdomain ?? prev.dnsx_nxdomain,
                       dnsx_wildcards: data.wildcards_filtered ?? prev.dnsx_wildcards,
                     };
-                  } else if (data.provider === "Subzy") {
+                  } else if (upperProvider === "SUBZY") {
                     extraStats = {
+                      ...extraStats,
                       subzy_vulnerable: data.vulnerable ?? prev.subzy_vulnerable,
                       subzy_not_vulnerable: data.not_vulnerable ?? prev.subzy_not_vulnerable,
                       subzy_unknown: data.unknown ?? prev.subzy_unknown,
                     };
-                  } else if (data.provider === "Uro") {
+                  } else if (upperProvider === "URO") {
                     extraStats = {
+                      ...extraStats,
                       uro_input: data.input_urls ?? prev.uro_input,
                       uro_normalised: data.normalised_urls ?? prev.uro_normalised,
                       uro_removed: data.removed ?? prev.uro_removed,
                     };
-                  } else if (data.provider === "GF") {
+                  } else if (upperProvider === "GF") {
                     extraStats = {
+                      ...extraStats,
                       gf_total: data.urls_classified ?? prev.gf_total,
                       gf_categories: data.matches_by_category
                         ? { ...prev.gf_categories, ...data.matches_by_category }
                         : prev.gf_categories,
                     };
-                  } else if (data.provider === "Nuclei Host Scan") {
-                    // Host scan completed — mark nuclei_host as COMPLETED.
+                  } else if (upperProvider === "NUCLEI HOST SCAN") {
                     const nucleiHostFindings = data.findings_found ?? 0;
-                    extraStats = {
-                      providerCounts: {
-                        ...prev.providerCounts,
-                        nuclei_host: nucleiHostFindings,
-                        // Aggregate into the legacy nuclei key so Security Findings card still works.
-                        nuclei: (prev.providerCounts.nuclei ?? 0) + nucleiHostFindings,
-                      },
-                    } as any;
-                  } else if (data.provider === "Nuclei Endpoint Scan") {
-                    // Endpoint scan completed — mark nuclei_endpoint as COMPLETED.
+                    nextProviderCounts.nuclei_host = nucleiHostFindings;
+                    nextProviderCounts.nuclei = (nextProviderCounts.nuclei_host ?? 0) + (nextProviderCounts.nuclei_endpoint ?? 0);
+                    extraStats.providerCounts = nextProviderCounts;
+                  } else if (upperProvider === "NUCLEI ENDPOINT SCAN") {
                     const nucleiEndpointFindings = data.findings_found ?? 0;
-                    extraStats = {
-                      providerCounts: {
-                        ...prev.providerCounts,
-                        nuclei_endpoint: nucleiEndpointFindings,
-                        nuclei: (prev.providerCounts.nuclei ?? 0) + nucleiEndpointFindings,
-                      },
-                    } as any;
-                  } else if (data.provider === "Nuclei") {
-                    // Legacy single-mode Nuclei summary (backward compat).
+                    nextProviderCounts.nuclei_endpoint = nucleiEndpointFindings;
+                    nextProviderCounts.nuclei = (nextProviderCounts.nuclei_host ?? 0) + (nextProviderCounts.nuclei_endpoint ?? 0);
+                    extraStats.providerCounts = nextProviderCounts;
+                  } else if (upperProvider === "NUCLEI") {
                     const nucleiFindings = data.findings_found ?? 0;
-                    extraStats = {
-                      providerCounts: {
-                        ...prev.providerCounts,
-                        nuclei: nucleiFindings,
-                      },
-                    } as any;
+                    nextProviderCounts.nuclei = nucleiFindings;
+                    extraStats.providerCounts = nextProviderCounts;
                   }
 
                   return {
@@ -1330,6 +1486,7 @@ const MainDashboard: React.FC = () => {
                     stages: nextStageData.stages,
                     currentStage: nextStageData.currentStage,
                     providerStatus: nextProviderStatus,
+                    providerSkippedReasons: nextProviderSkippedReasons,
                     ...extraStats,
                     lastWsEventTime: Date.now(),
                   };
@@ -1368,14 +1525,20 @@ const MainDashboard: React.FC = () => {
                   
                   if (data.status === "completed" || data.status === "failed") {
                     nextStageData = transitionToStage(prev.stages, "completed");
-                    const PIPELINE_ORDER = ["discovery", "dnsx", "subzy", "naabu", "httpx", "katana", "uro", "gf", "nuclei_host", "nuclei_endpoint", "nuclei"];
-                    PIPELINE_ORDER.forEach((s) => {
-                      nextProviderStatus[s] = data.status === "completed" ? "COMPLETED" : "FAILED";
+                    Object.keys(nextProviderStatus).forEach((s) => {
+                      if (nextProviderStatus[s] !== "SKIPPED" && nextProviderStatus[s] !== "FAILED" && nextProviderStatus[s] !== "COMPLETED") {
+                        nextProviderStatus[s] = data.status === "completed" ? "COMPLETED" : "FAILED";
+                      }
                     });
                     isCleanClose = true;
                     if (ws) ws.close();
                   } else if (data.status === "stopped") {
                     nextStageData = { currentStage: "stopped", stages: prev.stages };
+                    Object.keys(nextProviderStatus).forEach((s) => {
+                      if (nextProviderStatus[s] === "RUNNING" || nextProviderStatus[s] === "PENDING") {
+                        nextProviderStatus[s] = "FAILED";
+                      }
+                    });
                     isCleanClose = true;
                     if (ws) ws.close();
                   }
@@ -1770,13 +1933,38 @@ const MainDashboard: React.FC = () => {
               ))}
             </div>
 
-            <button
-              onClick={fetchProjectData}
-              className="flex items-center space-x-1 px-3 py-1.5 bg-dark-card hover:bg-dark-hover border border-dark-border text-slate-400 hover:text-slate-200 rounded text-xs font-bold transition-all cursor-pointer"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Sync Telemetry</span>
-            </button>
+            <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-1 bg-dark-bg border border-dark-border rounded p-0.5 font-mono text-[10px]">
+                <button
+                  onClick={() => setScanMode("fast")}
+                  className={`px-2 py-1 rounded transition-colors cursor-pointer uppercase font-bold ${
+                    scanMode === "fast" 
+                      ? "bg-cyber-accent text-dark-bg font-extrabold" 
+                      : "text-slate-400 hover:text-slate-200 font-semibold"
+                  }`}
+                >
+                  Fast Scan
+                </button>
+                <button
+                  onClick={() => setScanMode("deep")}
+                  className={`px-2 py-1 rounded transition-colors cursor-pointer uppercase font-bold ${
+                    scanMode === "deep" 
+                      ? "bg-red-500 text-white font-extrabold" 
+                      : "text-slate-400 hover:text-slate-200 font-semibold"
+                  }`}
+                >
+                  Deep Scan
+                </button>
+              </div>
+
+              <button
+                onClick={fetchProjectData}
+                className="flex items-center space-x-1 px-3 py-1.5 bg-dark-card hover:bg-dark-hover border border-dark-border text-slate-400 hover:text-slate-200 rounded text-xs font-bold transition-all cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Sync Telemetry</span>
+              </button>
+            </div>
           </div>
 
           {/* Tab Panels */}
@@ -1797,6 +1985,8 @@ const MainDashboard: React.FC = () => {
                 onResetScan={handleResetScan}
                 stages={stages}
                 providerStatus={providerStatus}
+                pipelineHalted={scanState.pipelineHalted}
+                providerSkippedReasons={scanState.providerSkippedReasons}
                 onSelectSeverity={(severity: string) => {
                   setInitialInventoryTab("nuclei");
                   setInitialSeverityFilter(severity);

@@ -90,7 +90,8 @@ class NaabuProvider(BaseProvider):
             return
 
         is_windows = platform.system().lower() == "windows"
-        executable = "wsl" if is_windows else "/home/kali/go/bin/naabu"
+        tool_path = self.detect_tool("naabu")
+        executable = "wsl" if is_windows else tool_path
         temp_path = ""
         open_ports_by_host: Dict[str, set[int]] = defaultdict(set)
         start_ts = time.time()
@@ -108,7 +109,7 @@ class NaabuProvider(BaseProvider):
                 temp_path = target_file.name
 
             list_path = self._windows_path_to_wsl(temp_path) if is_windows else temp_path
-            args = ["/home/kali/go/bin/naabu"] if is_windows else []
+            args = [tool_path] if is_windows else []
             naabu_flags = [
                 "-list",
                 list_path,
@@ -222,11 +223,23 @@ class NaabuProvider(BaseProvider):
             duration_s,
         )
         yield {"type": "log", "message": complete_msg}
+
+        hosts_in = len(hosts)
+        hosts_with_ports = len(open_ports_by_host)
+        hosts_no_ports = hosts_in - hosts_with_ports
+
+        if hosts_no_ports > 0:
+            no_ports_log = f"[*] {hosts_no_ports} host(s) resolved but showed no open ports and will not be probed by HTTPX."
+            logger.info(no_ports_log)
+            yield {"type": "log", "message": no_ports_log}
+
         yield {
             "type": "scan_summary",
             "provider": self.name,
-            "hosts_scanned": len(hosts),
-            "hosts_with_open_ports": len(open_ports_by_host),
+            "hosts_scanned": hosts_in,
+            "hosts_with_open_ports": hosts_with_ports,
+            "hosts_no_ports": hosts_no_ports,
             "open_ports": total_ports,
             "duration_seconds": duration_s,
+            "hosts_in": hosts_in,
         }

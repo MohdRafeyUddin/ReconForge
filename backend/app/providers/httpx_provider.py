@@ -87,17 +87,31 @@ class HttpxProvider(BaseProvider):
             complete_msg = "[√] Httpx scan complete. No hosts provided."
             logger.info(complete_msg)
             yield {"type": "log", "message": complete_msg}
-            yield {"type": "scan_summary", "provider": self.name, "hosts_processed": 0}
+            yield {
+                "type": "scan_summary",
+                "provider": self.name,
+                "hosts_processed": 0,
+                "hosts_in": 0,
+                "hosts_live": 0,
+                "hosts_dead": 0,
+            }
+            yield {
+                "type": "scan_summary",
+                "event": "PipelineHalted",
+                "reason": "no_live_hosts",
+                "message": "No live HTTP hosts were found. Katana, GAU, SubJS, LinkFinder, GoWitness, GF, and Nuclei were all skipped because there is nothing for them to scan."
+            }
             return
 
         is_windows = platform.system().lower() == "windows"
+        tool_path = self.detect_tool("httpx")
 
-        executable = "wsl" if is_windows else "/home/kali/go/bin/httpx"
+        executable = "wsl" if is_windows else tool_path
         args: List[str]
         if is_windows:
             # wsl binary expects a Linux command path as its first arg
             args = [
-                "/home/kali/go/bin/httpx",
+                tool_path,
             ]
         else:
             args = []
@@ -309,11 +323,31 @@ class HttpxProvider(BaseProvider):
         logger.info(complete_msg)
         yield {"type": "log", "message": complete_msg}
 
+        hosts_in = len(hosts)
+        hosts_live = live_hosts
+        hosts_dead = hosts_in - hosts_live
+
+        if hosts_dead > 0:
+            dead_log = f"[*] {hosts_dead} host(s) had open ports but returned no live HTTP response and will be excluded from crawling/URL discovery/vulnerability scanning."
+            logger.info(dead_log)
+            yield {"type": "log", "message": dead_log}
+
         yield {
             "type": "scan_summary",
             "provider": self.name,
             "hosts_processed": hosts_processed,
             "live_hosts": live_hosts,
             "duration_seconds": duration_s,
+            "hosts_in": hosts_in,
+            "hosts_live": hosts_live,
+            "hosts_dead": hosts_dead,
         }
+
+        if hosts_live == 0:
+            yield {
+                "type": "scan_summary",
+                "event": "PipelineHalted",
+                "reason": "no_live_hosts",
+                "message": "No live HTTP hosts were found. Katana, GAU, SubJS, LinkFinder, GoWitness, GF, and Nuclei were all skipped because there is nothing for them to scan."
+            }
 

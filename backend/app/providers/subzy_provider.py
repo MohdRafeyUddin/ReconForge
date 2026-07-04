@@ -146,7 +146,8 @@ class SubzyProvider(BaseProvider):
             return
 
         is_windows = platform.system().lower() == "windows"
-        executable = "wsl" if is_windows else "/home/kali/go/bin/subzy"
+        tool_path = self.detect_tool("subzy")
+        executable = "wsl" if is_windows else tool_path
         temp_path = ""
         start_ts = time.time()
 
@@ -171,8 +172,7 @@ class SubzyProvider(BaseProvider):
                 self._windows_path_to_wsl(temp_path) if is_windows else temp_path
             )
 
-            subzy_bin = "/home/kali/go/bin/subzy"
-            args = [subzy_bin] if is_windows else []
+            args = [tool_path] if is_windows else []
             subzy_flags = [
                 "run",
                 "--targets", list_path,

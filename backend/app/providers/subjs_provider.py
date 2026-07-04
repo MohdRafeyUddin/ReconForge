@@ -1,0 +1,206 @@
+import asyncio
+import logging
+import os
+import platform
+import subprocess
+import time
+from typing import AsyncGenerator, Dict, Any, List
+from urllib.parse import urlparse
+from app.providers.base import BaseProvider
+
+logger = logging.getLogger("reconforge.providers.subjs")
+
+class SubjsProvider(BaseProvider):
+    @property
+    def name(self) -> str:
+        return "SubJS"
+
+    @property
+    def description(self) -> str:
+        return "Discovers JavaScript files from live HTTPX URLs."
+
+    async def discover(self, seed_domains: List[str]) -> AsyncGenerator[Dict[str, Any], None]:
+        urls = list(dict.fromkeys(u.strip() for u in seed_domains if u and u.strip()))
+        
+        yield {"type": "log", "message": "\n========== SubJS JavaScript Discovery =========="}
+
+        if not urls:
+            msg = "SubJS completed. No input URLs provided."
+            logger.info(msg)
+            yield {"type": "log", "message": msg}
+            yield {
+                "type": "scan_summary",
+                "provider": "subjs",
+                "js_files": 0,
+                "skipped_reason": "no_live_hosts_upstream"
+            }
+            return
+
+        yield {"type": "log", "message": "Launching SubJS..."}
+        
+        tool_path = self.detect_tool("subjs")
+        is_windows = platform.system().lower() == "windows"
+        
+        # Verify tool works/exists
+        test_cmd = ["wsl", "test", "-x", tool_path] if is_windows else ["test", "-x", tool_path]
+        try:
+            res = subprocess.run(test_cmd, capture_output=True, timeout=5)
+            if res.returncode != 0 and not tool_path.startswith("subjs"):
+                # Graceful skip
+                warn_msg = f"[!] SubJS executable not found or not executable at {tool_path}. Skipping SubJS."
+                logger.warning(warn_msg)
+                yield {"type": "log", "message": warn_msg}
+                yield {
+                    "type": "scan_summary",
+                    "provider": "subjs",
+                    "js_files": 0,
+                    "status": "SKIPPED"
+                }
+                yield {"type": "log", "message": "[!] Provider subjs skipped"}
+                return
+        except Exception as exc:
+            warn_msg = f"[!] Error detecting SubJS executable: {exc}. Skipping SubJS."
+            logger.warning(warn_msg)
+            yield {"type": "log", "message": warn_msg}
+            yield {
+                "type": "scan_summary",
+                "provider": "subjs",
+                "js_files": 0,
+                "status": "SKIPPED"
+            }
+            yield {"type": "log", "message": "[!] Provider subjs skipped"}
+            return
+
+        yield {"type": "log", "message": f"[*] Scanning {len(urls)} URLs for JS files..."}
+        
+        # Build command
+        if is_windows:
+            cmd = ["wsl", tool_path]
+        else:
+            cmd = [tool_path]
+            
+        exec_msg = f"[*] Executing command: {' '.join(cmd)}"
+        logger.info(exec_msg)
+        yield {"type": "log", "message": exec_msg}
+        
+        start_ts = time.time()
+        js_files_found = set()
+        
+        try:
+            from app.job_control import register_process, unregister_process, check_job_status
+            await check_job_status()
+            
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1
+            )
+            register_process(process)
+            
+            # Write URLs to stdin
+            try:
+                process.stdin.write("\n".join(urls) + "\n")
+                process.stdin.close()
+            except Exception as e:
+                logger.error(f"Error writing to SubJS stdin: {e}")
+                
+            # Read stdout with timeout protection (300 seconds)
+            timeout = 300
+            loop = asyncio.get_event_loop()
+            
+            async def read_stream():
+                assert process.stdout is not None
+                while True:
+                    await check_job_status()
+                    line = await loop.run_in_executor(None, process.stdout.readline)
+                    if not line:
+                        break
+                    js_url = line.strip()
+                    if not js_url or not js_url.startswith(("http://", "https://")):
+                        continue
+                        
+                    if js_url not in js_files_found:
+                        js_files_found.add(js_url)
+                        try:
+                            parsed = urlparse(js_url)
+                            host = parsed.hostname or parsed.netloc
+                        except Exception:
+                            host = "unknown"
+                            
+                        # Emit standard asset for MongoDB persistence
+                        yield {
+                            "type": "asset",
+                            "data": {
+                                "domain": js_url,
+                                "type": "js_file",
+                                "status": "live",
+                                "metadata": {
+                                    "url": js_url,
+                                    "host": host,
+                                    "size": "unknown",
+                                    "source": "subjs"
+                                },
+                                "discovered_by": "subjs",
+                                "sources": ["subjs"]
+                            }
+                        }
+                        
+                        # Emit js_event for live WS stream
+                        yield {
+                            "type": "js_event",
+                            "data": {
+                                "url": js_url,
+                                "host": host,
+                                "size": "unknown",
+                                "source": "subjs"
+                            }
+                        }
+                        
+                        # Yield log event
+                        yield {
+                            "type": "log",
+                            "message": f"[+] Discovered JS file: {js_url}"
+                        }
+                    await asyncio.sleep(0)
+                    
+            try:
+                async for event in read_stream():
+                    yield event
+            except asyncio.TimeoutError:
+                logger.warning(f"[-] SubJS scan timed out after {timeout}s. Terminating process.")
+                yield {"type": "log", "message": f"[-] SubJS scan timed out after {timeout} seconds."}
+            finally:
+                unregister_process(process)
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                        
+            exit_code = process.wait()
+            if exit_code != 0:
+                logger.warning(f"[-] SubJS exited with code {exit_code}")
+                yield {"type": "log", "message": f"[-] SubJS exited with code {exit_code}"}
+                
+        except Exception as exc:
+            err_msg = f"[-] SubJS execution failed: {exc}"
+            logger.exception(err_msg)
+            yield {"type": "log", "message": err_msg}
+            
+        duration_s = int(time.time() - start_ts)
+        complete_msg = f"[√] SubJS completed. Total JavaScript files discovered: {len(js_files_found)}"
+        yield {"type": "log", "message": complete_msg}
+        yield {
+            "type": "scan_summary",
+            "provider": "subjs",
+            "status": "completed",
+            "count": len(js_files_found)
+        }
+        yield {"type": "log", "message": "[√] Provider subjs completed"}

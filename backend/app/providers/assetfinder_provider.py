@@ -33,18 +33,19 @@ class AssetfinderProvider(BaseProvider):
         yield {"type": "log", "message": msg}
 
         is_windows = platform.system().lower() == "windows"
+        tool_path = self.detect_tool("assetfinder")
 
         for domain in seed_domains:
 
             if is_windows:
                 executable = "wsl"
                 args = [
-                    "/home/kali/go/bin/assetfinder",
+                    tool_path,
                     "--subs-only",
                     domain
                 ]
             else:
-                executable = "/home/kali/go/bin/assetfinder"
+                executable = tool_path
                 args = [
                     "--subs-only",
                     domain

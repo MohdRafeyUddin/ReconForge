@@ -89,7 +89,8 @@ class UroProvider(BaseProvider):
             return
 
         is_windows = platform.system().lower() == "windows"
-        resolved_cmd = ["wsl", "/home/kali/.local/bin/uro"] if is_windows else ["/home/kali/.local/bin/uro"]
+        tool_path = self.detect_tool("uro")
+        resolved_cmd = ["wsl", tool_path] if is_windows else [tool_path]
 
         temp_path = ""
         start_ts = time.time()

@@ -64,6 +64,8 @@ class AssetBase(BaseModel):
     project_id: str
     discovered_by: str
     sources: List[str] = []
+    risk: Optional[Dict[str, Any]] = None
+    risk_history: Optional[List[Dict[str, Any]]] = None
 
 class AssetResponse(AssetBase):
     id: str

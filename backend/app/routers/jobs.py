@@ -128,8 +128,16 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
     await manager.broadcast(job_id, {"type": "log", "message": start_msg})
 
     try:
-        # Run plugin generator
-        async for event in provider.discover(seed_domains):
+        # Run plugin generator with scan_mode if supported
+        import inspect
+        job = await db.jobs.find_one({"_id": ObjectId(job_id)})
+        scan_mode = job.get("scan_mode", "fast") if job else "fast"
+        sig = inspect.signature(provider.discover)
+        if "scan_mode" in sig.parameters:
+            generator = provider.discover(seed_domains, scan_mode=scan_mode)
+        else:
+            generator = provider.discover(seed_domains)
+        async for event in generator:
             event_type = event.get("type")
 
             if event_type == "log":
@@ -208,36 +216,74 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                 await manager.broadcast(job_id, {"type": "log", "message": alert_msg})
                 await manager.broadcast(job_id, {"type": "asset_discovered", "asset": serialize_doc(broadcast_asset)})
 
-            elif event_type in ("url_event", "gf_event"):
+            elif event_type in ("url_event", "gf_event", "js_event", "screenshot_event", "finding_event"):
                 import time
                 url_data = event.get("data") or {}
-                url_val = url_data.get("url")
+                url_val = url_data.get("url") or url_data.get("matched_url")
                 if url_val:
                     if event_type == "url_event":
-                        existing = await db.assets.find_one({
-                            "project_id": project_id,
-                            "domain": url_val,
-                            "type": "uro_url"
-                        })
-                        if not existing:
-                            await db.assets.insert_one({
+                        source = url_data.get("source", "uro")
+                        if source in ("gau", "linkfinder", "merged", "katana"):
+                            existing = await db.assets.find_one({
                                 "project_id": project_id,
                                 "domain": url_val,
-                                "type": "uro_url",
-                                "status": "live",
-                                "metadata": {
-                                    "source": "uro",
-                                    "uro": {
-                                        "original_url": url_data.get("original_url", url_val),
-                                        "normalized_url": url_val,
-                                        "duplicate_removed": url_data.get("duplicate_removed", False),
-                                    }
-                                },
-                                "discovered_by": "uro",
-                                "sources": ["uro"],
-                                "created_at": datetime.utcnow(),
-                                "updated_at": datetime.utcnow()
+                                "type": "historical_url"
                             })
+                            if existing:
+                                current_sources = existing.get("sources", [])
+                                new_sources = list(set(current_sources + url_data.get("sources", [source])))
+                                await db.assets.update_one(
+                                    {"_id": existing["_id"]},
+                                    {"$set": {
+                                        "sources": new_sources,
+                                        "metadata.sources": new_sources,
+                                        "updated_at": datetime.utcnow()
+                                    }}
+                                )
+                            else:
+                                await db.assets.insert_one({
+                                    "project_id": project_id,
+                                    "domain": url_val,
+                                    "type": "historical_url",
+                                    "status": "live",
+                                    "metadata": {
+                                        "url": url_val,
+                                        "source": source,
+                                        "sources": url_data.get("sources", [source]),
+                                        "has_params": url_data.get("has_params", False),
+                                        "extension": url_data.get("extension", ""),
+                                        "discovered_at": url_data.get("discovered_at", int(time.time()))
+                                    },
+                                    "discovered_by": source,
+                                    "sources": url_data.get("sources", [source]),
+                                    "created_at": datetime.utcnow(),
+                                    "updated_at": datetime.utcnow()
+                                })
+                        else:
+                            existing = await db.assets.find_one({
+                                "project_id": project_id,
+                                "domain": url_val,
+                                "type": "uro_url"
+                            })
+                            if not existing:
+                                await db.assets.insert_one({
+                                    "project_id": project_id,
+                                    "domain": url_val,
+                                    "type": "uro_url",
+                                    "status": "live",
+                                    "metadata": {
+                                        "source": "uro",
+                                        "uro": {
+                                            "original_url": url_data.get("original_url", url_val),
+                                            "normalized_url": url_val,
+                                            "duplicate_removed": url_data.get("duplicate_removed", False),
+                                        }
+                                    },
+                                    "discovered_by": "uro",
+                                    "sources": ["uro"],
+                                    "created_at": datetime.utcnow(),
+                                    "updated_at": datetime.utcnow()
+                                })
                     elif event_type == "gf_event":
                         existing = await db.assets.find_one({
                             "project_id": project_id,
@@ -282,6 +328,81 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                                 "created_at": datetime.utcnow(),
                                 "updated_at": datetime.utcnow()
                             })
+                    elif event_type == "js_event":
+                        existing = await db.assets.find_one({
+                            "project_id": project_id,
+                            "domain": url_val,
+                            "type": "js_file"
+                        })
+                        if not existing:
+                            await db.assets.insert_one({
+                                "project_id": project_id,
+                                "domain": url_val,
+                                "type": "js_file",
+                                "status": "live",
+                                "metadata": {
+                                    "url": url_val,
+                                    "host": url_data.get("host", ""),
+                                    "size": url_data.get("size", "unknown"),
+                                    "source": "subjs"
+                                },
+                                "discovered_by": "subjs",
+                                "sources": ["subjs"],
+                                "created_at": datetime.utcnow(),
+                                "updated_at": datetime.utcnow()
+                            })
+                    elif event_type == "screenshot_event":
+                        existing = await db.assets.find_one({
+                            "project_id": project_id,
+                            "domain": url_val,
+                            "type": "screenshot"
+                        })
+                        if not existing:
+                            await db.assets.insert_one({
+                                "project_id": project_id,
+                                "domain": url_val,
+                                "type": "screenshot",
+                                "status": "live",
+                                "metadata": {
+                                    "url": url_val,
+                                    "title": url_data.get("title", ""),
+                                    "screenshot_path": url_data.get("screenshot_path", ""),
+                                    "timestamp": url_data.get("timestamp", datetime.utcnow().isoformat()),
+                                    "source": "gowitness",
+                                    "host": url_data.get("host", "")
+                                },
+                                "discovered_by": "gowitness",
+                                "sources": ["gowitness"],
+                                "created_at": datetime.utcnow(),
+                                "updated_at": datetime.utcnow()
+                            })
+                    elif event_type == "finding_event":
+                        existing = await db.assets.find_one({
+                            "project_id": project_id,
+                            "domain": url_val,
+                            "type": "finding",
+                            "discovered_by": url_data.get("source")
+                        })
+                        if not existing:
+                            await db.assets.insert_one({
+                                "project_id": project_id,
+                                "domain": url_val,
+                                "type": "finding",
+                                "status": "live",
+                                "metadata": {
+                                    "source": url_data.get("source"),
+                                    "severity": url_data.get("severity"),
+                                    "matched_url": url_val,
+                                    "payload": url_data.get("payload", ""),
+                                    "parameter": url_data.get("parameter", ""),
+                                    "evidence": url_data.get("evidence", ""),
+                                    "timestamp": url_data.get("timestamp", datetime.utcnow().isoformat())
+                                },
+                                "discovered_by": url_data.get("source"),
+                                "sources": [url_data.get("source")],
+                                "created_at": datetime.utcnow(),
+                                "updated_at": datetime.utcnow()
+                            })
                 await manager.broadcast(job_id, event)
 
             elif event_type == "scan_summary":
@@ -294,6 +415,51 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                     if key != "type" and value is not None
                 })
                 await manager.broadcast(job_id, summary_payload)
+
+        # Run Risk Scoring Engine automatically on Unified Discovery completion
+        if provider_name == "Unified Discovery":
+            try:
+                start_log = "[*] Calculating risk scores..."
+                logger.info(start_log)
+                await db.jobs.update_one({"_id": ObjectId(job_id)}, {"$push": {"logs": start_log}})
+                await manager.broadcast(job_id, {"type": "log", "message": start_log})
+                
+                from app.services.risk_scoring import recalculate_all_scores
+                scores = await recalculate_all_scores(project_id)
+                
+                start_log_count = f"[*] Calculating risk scores for {len(scores)} assets..."
+                logger.info(start_log_count)
+                await db.jobs.update_one({"_id": ObjectId(job_id)}, {"$push": {"logs": start_log_count}})
+                await manager.broadcast(job_id, {"type": "log", "message": start_log_count})
+                
+                for s in scores:
+                    asset_log = f"[✓] {s['asset']} scored {s['score']} ({s['level']})"
+                    await db.jobs.update_one({"_id": ObjectId(job_id)}, {"$push": {"logs": asset_log}})
+                    await manager.broadcast(job_id, {"type": "log", "message": asset_log})
+                    
+                    ws_payload = {
+                        "type": "risk_score_event",
+                        "asset": s["asset"],
+                        "score": s["score"],
+                        "level": s["level"],
+                        "reasons": s["reasons"],
+                        "exposure_factors": s["exposure_factors"],
+                        "recommended_priority": s["recommended_priority"],
+                        "importance_score": s.get("importance_score", 0),
+                        "exposure_score": s.get("exposure_score", 0),
+                        "updated_at": s["updated_at"].isoformat() if isinstance(s["updated_at"], datetime) else s["updated_at"]
+                    }
+                    await manager.broadcast(job_id, ws_payload)
+                    
+                complete_log = "[*] Risk scoring complete."
+                logger.info(complete_log)
+                await db.jobs.update_one({"_id": ObjectId(job_id)}, {"$push": {"logs": complete_log}})
+                await manager.broadcast(job_id, {"type": "log", "message": complete_log})
+            except Exception as rse:
+                logger.error(f"Error running risk scoring: {rse}", exc_info=True)
+                err_log = f"[-] Risk scoring calculation failed: {str(rse)}"
+                await db.jobs.update_one({"_id": ObjectId(job_id)}, {"$push": {"logs": err_log}})
+                await manager.broadcast(job_id, {"type": "log", "message": err_log})
 
         # Complete job
         complete_msg = f"[√] Job {job_id} completed successfully."
@@ -322,6 +488,7 @@ async def launch_job(
     project_id: str, 
     provider_name: str, 
     background_tasks: BackgroundTasks,
+    scan_mode: str = "fast",
     current_user: dict = Depends(get_current_user)
 ):
     db = get_database()
@@ -341,6 +508,7 @@ async def launch_job(
     job_dict = {
         "project_id": project_id,
         "provider_name": provider_name,
+        "scan_mode": scan_mode,
         "status": "pending",
         "logs": [],
         "started_at": datetime.utcnow(),

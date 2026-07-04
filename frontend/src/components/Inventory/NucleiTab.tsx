@@ -67,6 +67,7 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
   const [filterPass, setFilterPass] = useState("all");
   const [showExport, setShowExport] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [filterSource, setFilterSource] = useState("all");
 
   // Sync initialSeverityFilter prop (e.g. from clicking dashboard severity card)
   useEffect(() => {
@@ -116,10 +117,11 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
       const matchesTemplate = filterTemplate === "all" || (f.template || f.template_id) === filterTemplate;
       const matchesTag = filterTag === "all" || (f.tags || []).includes(filterTag);
       const matchesPass = filterPass === "all" || f.pass_name === filterPass;
+      const matchesSource = filterSource === "all" || (f.source || f.metadata?.source || "").toLowerCase() === filterSource.toLowerCase();
 
-      return matchesSearch && matchesSeverity && matchesHost && matchesTemplate && matchesTag && matchesPass;
+      return matchesSearch && matchesSeverity && matchesHost && matchesTemplate && matchesTag && matchesPass && matchesSource;
     });
-  }, [findings, search, filterSeverity, filterHost, filterTemplate, filterTag, filterPass]);
+  }, [findings, search, filterSeverity, filterHost, filterTemplate, filterTag, filterPass, filterSource]);
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -182,7 +184,7 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
     return (
       <div className="bg-dark-card border border-dark-border rounded-xl glass p-8 text-center text-slate-500 uppercase tracking-widest font-mono text-xs flex flex-col items-center justify-center gap-2">
         <AlertCircle className="w-8 h-8 text-slate-600 animate-pulse" />
-        No Nuclei findings detected.
+        No Security findings detected.
       </div>
     );
   }
@@ -214,6 +216,17 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
             <option value="medium">Medium</option>
             <option value="low">Low</option>
             <option value="info">Info</option>
+          </select>
+
+          <select
+            value={filterSource}
+            onChange={(e) => setFilterSource(e.target.value)}
+            className="bg-dark-input border border-dark-border rounded text-xs px-2.5 py-1.5 text-slate-300 focus:outline-none focus:border-cyber-accent font-mono cursor-pointer"
+          >
+            <option value="all">All Sources</option>
+            <option value="nuclei">Nuclei</option>
+            <option value="dalfox">Dalfox</option>
+            <option value="openredirex">OpenRedirex</option>
           </select>
 
           <select
@@ -340,7 +353,9 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
                           {f.severity}
                         </span>
                       </td>
-                      <td className="p-4 font-bold text-slate-200">{f.template_id || f.template || "unknown"}</td>
+                      <td className="p-4 font-bold text-slate-200">
+                        {f.template_id || f.template || (f.source || f.metadata?.source || "unknown").toUpperCase()}
+                      </td>
                       <td className="p-4 max-w-xs truncate text-slate-300" title={f.matched_url || f.endpoint || ""}>
                         {f.matched_url || f.endpoint || ""}
                       </td>
@@ -382,6 +397,32 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
                                 <div>
                                   <span className="text-slate-500">Template Name:</span>{" "}
                                   <span className="text-slate-200 font-bold">{f.template_name}</span>
+                                </div>
+                              )}
+                              {(f.source || f.metadata?.source) && (
+                                <div>
+                                  <span className="text-slate-500">Source:</span>{" "}
+                                  <span className="text-slate-300 uppercase font-semibold">{f.source || f.metadata?.source}</span>
+                                </div>
+                              )}
+                              {(f.parameter || f.metadata?.parameter) && (
+                                <div>
+                                  <span className="text-slate-500">Parameter:</span>{" "}
+                                  <span className="text-cyber-warning font-semibold">{f.parameter || f.metadata?.parameter}</span>
+                                </div>
+                              )}
+                              {(f.payload || f.metadata?.payload) && (
+                                <div>
+                                  <span className="text-slate-500">Payload:</span>{" "}
+                                  <span className="text-red-400 select-all break-all">{f.payload || f.metadata?.payload}</span>
+                                </div>
+                              )}
+                              {(f.evidence || f.metadata?.evidence) && (
+                                <div>
+                                  <span className="text-slate-500">Evidence:</span>{" "}
+                                  <pre className="text-slate-400 text-[9px] bg-dark-bg p-2.5 rounded border border-dark-border/50 mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap">
+                                    {f.evidence || f.metadata?.evidence}
+                                  </pre>
                                 </div>
                               )}
                               {f.template_id && (

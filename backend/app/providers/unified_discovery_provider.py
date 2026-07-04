@@ -69,6 +69,13 @@ from app.providers.katana_provider import KatanaProvider
 from app.providers.uro_provider import UroProvider
 from app.providers.gf_provider import GfProvider
 from app.providers.nuclei_provider import NucleiProvider
+from app.providers.gau_provider import GauProvider
+from app.providers.subjs_provider import SubjsProvider
+from app.providers.linkfinder_provider import LinkfinderProvider
+from app.providers.gowitness_provider import GowitnessProvider
+from app.providers.dalfox_provider import DalfoxProvider
+from app.providers.openredirex_provider import OpenredirexProvider
+from app.providers.url_merge import merge_urls
 
 logger = logging.getLogger("reconforge.providers.unified")
 
@@ -197,7 +204,7 @@ class UnifiedDiscoveryProvider(BaseProvider):
     # ------------------------------------------------------------------
 
     async def discover(
-        self, seed_domains: List[str]
+        self, seed_domains: List[str], scan_mode: str = "fast"
     ) -> AsyncGenerator[Dict[str, Any], None]:
 
         # Target Detection
@@ -317,6 +324,13 @@ class UnifiedDiscoveryProvider(BaseProvider):
                         "message": done_msg,
                         "provider_stat": {"provider": label, "count": count},
                     }
+                    yield {
+                        "type": "scan_summary",
+                        "provider": label.lower(),
+                        "status": "completed",
+                        "count": count
+                    }
+                    yield {"type": "log", "message": f"[√] Provider {label.lower()} completed"}
                     remaining = sum(1 for t in tasks if not t.done())
                 elif kind == "provider_error":
                     _, label, error = item
@@ -373,6 +387,14 @@ class UnifiedDiscoveryProvider(BaseProvider):
                     dnsx_wildcards  = event.get("wildcards_filtered", 0)
                 yield event
 
+            yield {
+                "type": "scan_summary",
+                "provider": "dnsx",
+                "status": "completed",
+                "count": dnsx_resolved
+            }
+            yield {"type": "log", "message": "[√] Provider dnsx completed"}
+
             if not resolved_subdomains:
                 # Fall back to all unique subdomains (DNSx may not be installed)
                 logger.warning("[*] DNSx returned no resolved subdomains; using all unique subdomains.")
@@ -401,6 +423,14 @@ class UnifiedDiscoveryProvider(BaseProvider):
                     subzy_vulnerable = event.get("vulnerable", 0)
                 yield event
 
+            yield {
+                "type": "scan_summary",
+                "provider": "subzy",
+                "status": "completed",
+                "count": subzy_vulnerable
+            }
+            yield {"type": "log", "message": "[√] Provider subzy completed"}
+
         # ================================================================
         # PHASE 4: Port Scanning (Naabu)
         # ================================================================
@@ -414,9 +444,10 @@ class UnifiedDiscoveryProvider(BaseProvider):
             yield {"type": "log", "message": "Skipping Port Scanning (Naabu)"}
             yield {
                 "type": "scan_summary",
-                "provider": "Naabu",
+                "provider": "naabu",
                 "status": "SKIPPED"
             }
+            yield {"type": "log", "message": "[!] Provider naabu skipped"}
         else:
             naabu_provider = NaabuProvider()
             async for event in self._run_phase(naabu_provider, unique_resolved, "Naabu Port Scan"):
@@ -424,6 +455,14 @@ class UnifiedDiscoveryProvider(BaseProvider):
                     naabu_hosts_with_ports = event.get("hosts_with_open_ports", 0)
                     naabu_open_ports       = event.get("open_ports", 0)
                 yield event
+
+            yield {
+                "type": "scan_summary",
+                "provider": "naabu",
+                "status": "completed",
+                "count": naabu_open_ports
+            }
+            yield {"type": "log", "message": "[√] Provider naabu completed"}
 
         # ================================================================
         # PHASE 5: HTTP Probing (HTTPX)
@@ -468,45 +507,179 @@ class UnifiedDiscoveryProvider(BaseProvider):
             logger.error(err_msg)
             yield {"type": "log", "message": f"{err_msg} (non-fatal — continuing pipeline)"}
 
-        unique_live_hosts = sorted({h for h in live_host_targets if _is_valid(h)})
-        unique_live_urls  = sorted(set(live_host_urls))
-
+        yield {
+            "type": "scan_summary",
+            "provider": "httpx",
+            "status": "completed",
+            "count": live_hosts
+        }
+        yield {"type": "log", "message": "[√] Provider httpx completed"}
+        # PHASE 6: Concurrent crawling and discovery (Katana, GAU, SubJS, GoWitness)
         # ================================================================
-        # PHASE 6: Web Crawling (Katana)
-        # ================================================================
+        yield {"type": "log", "message": f"\n========== Crawling & Discovery ({scan_mode.upper()} MODE) =========="}
 
-        katana_hosts_scanned  = 0
-        katana_urls_discovered = 0
         all_katana_urls: List[str] = []
+        all_gau_urls: List[str] = []
+        all_js_files: List[str] = []
+        
+        katana_hosts_scanned = 0
+        katana_urls_discovered = 0
+        gowitness_screenshots = 0
 
+        # Launch parallel tasks
+        event_queue = asyncio.Queue()
+        
+        async def run_worker(provider, targets, label):
+            try:
+                async for event in provider.discover(targets):
+                    await event_queue.put((label, event))
+            except Exception as exc:
+                logger.error(f"Concurrent worker {label} failed: {exc}", exc_info=True)
+                await event_queue.put((label, {"type": "log", "message": f"[-] Worker {label} failed: {exc}"}))
+            finally:
+                await event_queue.put((label, "__done__"))
+
+        # Setup targets
+        unique_live_hosts = sorted({h for h in live_host_targets if _is_valid(h)})
+        unique_live_urls = sorted(set(live_host_urls))
+
+        tasks = []
         if unique_live_urls:
-            katana_provider = KatanaProvider()
-            async for event in self._run_phase(katana_provider, unique_live_urls, "Katana Web Crawl"):
-                if event.get("type") == "scan_summary":
-                    katana_hosts_scanned   = event.get("hosts_scanned", 0)
+            tasks.append(asyncio.create_task(run_worker(KatanaProvider(), unique_live_urls, "katana")))
+            tasks.append(asyncio.create_task(run_worker(GauProvider(), unique_live_hosts, "gau")))
+            tasks.append(asyncio.create_task(run_worker(SubjsProvider(), unique_live_urls, "subjs")))
+            if scan_mode == "deep":
+                tasks.append(asyncio.create_task(run_worker(GowitnessProvider(), unique_live_urls, "gowitness")))
+        else:
+            yield {"type": "log", "message": "[*] No live HTTPX targets; skipping concurrent crawlers."}
+            for p in ("katana", "gau", "subjs"):
+                yield {"type": "scan_summary", "provider": p, "status": "SKIPPED"}
+                yield {"type": "log", "message": f"[!] Provider {p} skipped"}
+            if scan_mode == "deep":
+                yield {"type": "scan_summary", "provider": "gowitness", "status": "SKIPPED"}
+                yield {"type": "log", "message": "[!] Provider gowitness skipped"}
+
+        active_tasks = len(tasks)
+
+        while active_tasks > 0 or not event_queue.empty():
+            try:
+                label, event = await asyncio.wait_for(event_queue.get(), timeout=0.2)
+            except asyncio.TimeoutError:
+                active_tasks = sum(1 for t in tasks if not t.done())
+                continue
+
+            if event == "__done__":
+                active_tasks = sum(1 for t in tasks if not t.done())
+                if label == "katana":
+                    yield {
+                        "type": "scan_summary",
+                        "provider": "katana",
+                        "status": "completed",
+                        "count": katana_urls_discovered
+                    }
+                    yield {"type": "log", "message": "[√] Provider katana completed"}
+                elif label == "gau":
+                    yield {
+                        "type": "scan_summary",
+                        "provider": "gau",
+                        "status": "completed",
+                        "count": len(all_gau_urls)
+                    }
+                    yield {"type": "log", "message": "[√] Provider gau completed"}
+                elif label == "subjs":
+                    yield {
+                        "type": "scan_summary",
+                        "provider": "subjs",
+                        "status": "completed",
+                        "count": len(all_js_files)
+                    }
+                    yield {"type": "log", "message": "[√] Provider subjs completed"}
+                elif label == "gowitness":
+                    yield {
+                        "type": "scan_summary",
+                        "provider": "gowitness",
+                        "status": "completed",
+                        "count": gowitness_screenshots
+                    }
+                    yield {"type": "log", "message": "[√] Provider gowitness completed"}
+                continue
+
+            # Store result lists and pass-through standard events
+            if event.get("type") == "asset" and label == "katana":
+                asset_data = event.get("data", {})
+                k_meta = asset_data.get("metadata", {}).get("katana", {})
+                k_urls = k_meta.get("urls", [])
+                all_katana_urls.extend(k_urls)
+            elif event.get("type") == "url_event" and label == "gau":
+                all_gau_urls.append(event.get("data", {}).get("url"))
+            elif event.get("type") == "js_event" and label == "subjs":
+                all_js_files.append(event.get("data", {}).get("url"))
+            
+            if event.get("type") == "scan_summary":
+                if label == "katana":
+                    katana_hosts_scanned = event.get("hosts_scanned", 0)
                     katana_urls_discovered = event.get("urls_discovered", 0)
-                elif event.get("type") == "asset":
-                    asset_data = event.get("data", {})
-                    domain = _normalise(asset_data.get("domain", ""))
-                    k_meta = asset_data.get("metadata", {}).get("katana", {})
-                    k_urls = k_meta.get("urls", [])
-                    if k_urls:
-                        host_to_urls[domain].extend(k_urls)
-                        all_katana_urls.extend(k_urls)
+                elif label == "gowitness":
+                    gowitness_screenshots = event.get("screenshots", 0)
+
+            yield event
+
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # ================================================================
+        # PHASE 6B: JS Endpoint Extraction (LinkFinder)
+        # ================================================================
+        all_linkfinder_urls: List[str] = []
+        linkfinder_endpoints = 0
+        
+        if all_js_files:
+            linkfinder_provider = LinkfinderProvider()
+            async for event in self._run_phase(linkfinder_provider, all_js_files, "LinkFinder Endpoint Extraction"):
+                if event.get("type") == "url_event" and event.get("data", {}).get("source") == "linkfinder":
+                    all_linkfinder_urls.append(event.get("data", {}).get("url"))
+                elif event.get("type") == "scan_summary" and event.get("provider") == "LinkFinder":
+                    linkfinder_endpoints = event.get("extracted_endpoints", 0)
                 yield event
-        elif unique_resolved:
-            yield {"type": "log", "message": "[*] No LIVE URLs from HTTPX; skipping Katana."}
+
+            yield {
+                "type": "scan_summary",
+                "provider": "linkfinder",
+                "status": "completed",
+                "count": linkfinder_endpoints
+            }
+            yield {"type": "log", "message": "[√] Provider linkfinder completed"}
+        else:
+            yield {"type": "log", "message": "[*] No JS files discovered; skipping LinkFinder."}
+            yield {"type": "scan_summary", "provider": "linkfinder", "status": "SKIPPED"}
+            yield {"type": "log", "message": "[!] Provider linkfinder skipped"}
 
         # ================================================================
-        # PHASE 7: URL Deduplication (Uro)
+        # PHASE 7: URL Merge Engine & Normalisation
         # ================================================================
-
+        yield {"type": "log", "message": "\n========== URL Merge Engine =========="}
+        
+        merged_urls = merge_urls(all_katana_urls, all_gau_urls, all_linkfinder_urls, scan_mode=scan_mode)
+        
+        for item in merged_urls:
+            yield {
+                "type": "url_event",
+                "data": {
+                    "url": item["url"],
+                    "original_url": item["url"],
+                    "source": "merged",
+                    "sources": item["sources"]
+                }
+            }
+            
+        merged_raw_list = [item["url"] for item in merged_urls]
+        yield {"type": "log", "message": f"[√] URL Merge Engine completed. Merged {len(merged_raw_list)} URLs."}
+        
         uro_normalised_urls: List[str] = []
         uro_removed = 0
 
-        if all_katana_urls:
+        if merged_raw_list:
             uro_provider = UroProvider()
-            async for event in self._run_phase(uro_provider, all_katana_urls, "Uro URL Normalisation"):
+            async for event in self._run_phase(uro_provider, merged_raw_list, "Uro URL Normalisation"):
                 if event.get("type") == "url_event":
                     url_data = event.get("data", {})
                     norm_url = url_data.get("url", "")
@@ -515,40 +688,32 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 elif event.get("type") == "scan_summary" and event.get("provider") == "Uro":
                     uro_removed = event.get("removed", 0)
                 yield event
-        elif unique_live_urls:
-            yield {"type": "log", "message": "[*] No Katana URLs; skipping Uro."}
 
-        # If Uro produced no output (not installed), fall back to raw Katana URLs
-        if not uro_normalised_urls and all_katana_urls:
-            reason = getattr(uro_provider, "last_run_status", "unknown")
-            if reason == "executable_not_found":
-                reason_str = "Uro executable not found"
-            elif reason == "zero_urls":
-                reason_str = "Uro returned zero URLs"
-            elif reason.startswith("non_zero_exit_code_"):
-                code = reason.replace("non_zero_exit_code_", "")
-                reason_str = f"Uro exited with non-zero code: {code}"
-            else:
-                reason_str = f"Uro failed with status: {reason}"
-
-            logger.warning("[*] Uro yielded no normalised URLs (%s); falling back to raw Katana URLs.", reason_str)
             yield {
-                "type": "log",
-                "message": f"[*] Uro yielded no normalised URLs ({reason_str}). Using raw Katana URLs for GF and Nuclei.",
+                "type": "scan_summary",
+                "provider": "uro",
+                "status": "completed",
+                "count": len(uro_normalised_urls)
             }
-            uro_normalised_urls = list(dict.fromkeys(all_katana_urls))
+            yield {"type": "log", "message": "[√] Provider uro completed"}
+        else:
+            yield {"type": "log", "message": "[*] No merged URLs; skipping Uro."}
+            yield {"type": "scan_summary", "provider": "uro", "status": "SKIPPED"}
+            yield {"type": "log", "message": "[!] Provider uro skipped"}
+
+        if not uro_normalised_urls and merged_raw_list:
+            uro_normalised_urls = list(dict.fromkeys(merged_raw_list))
 
         # ================================================================
         # PHASE 8: URL Classification (GF)
         # ================================================================
-
         gf_classified = 0
-        # Collect GF-classified URLs for the bug-class categories that benefit
-        # from parameterised endpoint scanning.  Other categories (debug, upload,
-        # aws, graphql) are informational and are intentionally excluded.
         ENDPOINT_SCAN_CATEGORIES = {"xss", "sqli", "ssrf", "lfi", "ssti", "idor", "redirect", "rce"}
         gf_endpoint_urls: List[str] = []
         gf_seen_endpoint_urls: set = set()
+        
+        gf_xss_urls: List[str] = []
+        gf_redirect_urls: List[str] = []
 
         if uro_normalised_urls:
             gf_provider = GfProvider()
@@ -559,110 +724,146 @@ class UnifiedDiscoveryProvider(BaseProvider):
                     gf_data = event.get("data", {})
                     url = gf_data.get("url", "")
                     categories = set(gf_data.get("categories", []))
-                    # Only include URLs that matched an exploit-relevant category.
                     if url and categories & ENDPOINT_SCAN_CATEGORIES:
                         if url not in gf_seen_endpoint_urls:
                             gf_seen_endpoint_urls.add(url)
                             gf_endpoint_urls.append(url)
+                        if "xss" in categories:
+                            gf_xss_urls.append(url)
+                        if "redirect" in categories:
+                            gf_redirect_urls.append(url)
                 yield event
-        elif unique_live_urls:
+
+            yield {
+                "type": "scan_summary",
+                "provider": "gf",
+                "status": "completed",
+                "count": gf_classified
+            }
+            yield {"type": "log", "message": "[√] Provider gf completed"}
+        else:
             yield {"type": "log", "message": "[*] No normalised URLs; skipping GF."}
+            yield {"type": "scan_summary", "provider": "gf", "status": "SKIPPED"}
+            yield {"type": "log", "message": "[!] Provider gf skipped"}
 
         # ================================================================
-        # PHASE 9: Vulnerability Scanning (Nuclei — two concurrent scans)
-        #
-        #   Host Scan     → live HTTPX hosts   → tech / exposure / misconfig
-        #   Endpoint Scan → GF-classified URLs → sqli / xss / ssrf / lfi / ssti …
-        #
-        # The two scans run concurrently via asyncio tasks that push events onto
-        # a shared async queue.  Neither scan can block the other.
+        # PHASE 9: Concurrent Vulnerability Scans (Nuclei, Dalfox, OpenRedirex)
         # ================================================================
-
+        yield {"type": "log", "message": f"\n========== Vulnerability Scanning ({scan_mode.upper()} MODE) =========="}
+        
         nuclei_host_findings = 0
         nuclei_endpoint_findings = 0
-
-        # Deduplicated host-scan targets: one URL per live host.
+        dalfox_findings = 0
+        openredirex_findings = 0
+        
         host_scan_targets: List[str] = list(dict.fromkeys(unique_live_urls)) if unique_live_urls else []
+        
+        scan_queue = asyncio.Queue()
+        
+        async def run_scanner(provider_func, targets, label):
+            try:
+                async for event in provider_func(targets):
+                    await scan_queue.put((label, event))
+            except Exception as exc:
+                logger.error(f"Concurrent scanner {label} failed: {exc}", exc_info=True)
+                await scan_queue.put((label, {"type": "log", "message": f"[-] Scanner {label} failed: {exc}"}))
+            finally:
+                await scan_queue.put((label, "__done__"))
 
-        if not host_scan_targets and not gf_endpoint_urls:
-            yield {"type": "log", "message": "[*] No targets for Nuclei; skipping."}
+        scan_tasks = []
+        if host_scan_targets:
+            scan_tasks.append(asyncio.create_task(run_scanner(NucleiProvider().discover_host_scan, host_scan_targets, "nuclei_host")))
         else:
-            nuclei_provider = NucleiProvider()
-            nuclei_queue: asyncio.Queue = asyncio.Queue()
-            SENTINEL = object()
+            yield {"type": "scan_summary", "provider": "nuclei_host", "status": "SKIPPED"}
+            yield {"type": "log", "message": "[!] Provider nuclei_host skipped"}
 
-            async def run_host_scan() -> None:
-                try:
-                    if host_scan_targets:
-                        async for event in nuclei_provider.discover_host_scan(host_scan_targets):
-                            await nuclei_queue.put(event)
-                    else:
-                        await nuclei_queue.put({
-                            "type": "log",
-                            "message": "[*] No live hosts for Nuclei Host Scan; skipping.",
-                        })
-                except Exception as exc:
-                    logger.error("Nuclei Host Scan task failed: %s", exc, exc_info=True)
-                    await nuclei_queue.put({"type": "log", "message": f"[-] Nuclei Host Scan failed: {exc}"})
-                finally:
-                    await nuclei_queue.put(("__done__", "host"))
+        if gf_endpoint_urls:
+            scan_tasks.append(asyncio.create_task(run_scanner(NucleiProvider().discover_endpoint_scan, gf_endpoint_urls, "nuclei_endpoint")))
+        else:
+            yield {"type": "scan_summary", "provider": "nuclei_endpoint", "status": "SKIPPED"}
+            yield {"type": "log", "message": "[!] Provider nuclei_endpoint skipped"}
+            
+        if scan_mode == "deep":
+            if gf_xss_urls:
+                scan_tasks.append(asyncio.create_task(run_scanner(DalfoxProvider().discover, gf_xss_urls, "dalfox")))
+            else:
+                yield {"type": "log", "message": "[*] No GF XSS URLs found; skipping Dalfox."}
+                yield {"type": "scan_summary", "provider": "dalfox", "status": "SKIPPED"}
+                yield {"type": "log", "message": "[!] Provider dalfox skipped"}
+                
+            if gf_redirect_urls:
+                scan_tasks.append(asyncio.create_task(run_scanner(OpenredirexProvider().discover, gf_redirect_urls, "openredirex")))
+            else:
+                yield {"type": "log", "message": "[*] No GF Redirect URLs found; skipping OpenRedirex."}
+                yield {"type": "scan_summary", "provider": "openredirex", "status": "SKIPPED"}
+                yield {"type": "log", "message": "[!] Provider openredirex skipped"}
+        else:
+            yield {"type": "scan_summary", "provider": "dalfox", "status": "SKIPPED"}
+            yield {"type": "log", "message": "[!] Provider dalfox skipped"}
+            yield {"type": "scan_summary", "provider": "openredirex", "status": "SKIPPED"}
+            yield {"type": "log", "message": "[!] Provider openredirex skipped"}
 
-            async def run_endpoint_scan() -> None:
-                try:
-                    if gf_endpoint_urls:
-                        async for event in nuclei_provider.discover_endpoint_scan(gf_endpoint_urls):
-                            await nuclei_queue.put(event)
-                    else:
-                        await nuclei_queue.put({
-                            "type": "log",
-                            "message": "[*] No GF-classified endpoint URLs for Nuclei Endpoint Scan; skipping.",
-                        })
-                except Exception as exc:
-                    logger.error("Nuclei Endpoint Scan task failed: %s", exc, exc_info=True)
-                    await nuclei_queue.put({"type": "log", "message": f"[-] Nuclei Endpoint Scan failed: {exc}"})
-                finally:
-                    await nuclei_queue.put(("__done__", "endpoint"))
-
-            host_task     = asyncio.create_task(run_host_scan())
-            endpoint_task = asyncio.create_task(run_endpoint_scan())
-            tasks_done = 0
-            expected_done = 2
-
-            yield {"type": "log", "message": "\n========== Nuclei Vulnerability Scanning =========="}
-            yield {"type": "log", "message": (
-                f"[*] Host Scan    → {len(host_scan_targets)} live host URLs\n"
-                f"[*] Endpoint Scan → {len(gf_endpoint_urls)} GF-classified URLs"
-            )}
-
-            while tasks_done < expected_done:
-                try:
-                    item = await asyncio.wait_for(nuclei_queue.get(), timeout=0.3)
-                except asyncio.TimeoutError:
-                    continue
-
-                if isinstance(item, tuple) and len(item) == 2 and item[0] == "__done__":
-                    tasks_done += 1
-                    continue
-
-                event = item
-                # Track per-scan findings totals from summary events.
-                if event.get("type") == "scan_summary" and event.get("provider") == "Nuclei Host Scan":
+        active_scanners = len(scan_tasks)
+        
+        while active_scanners > 0 or not scan_queue.empty():
+            try:
+                label, event = await asyncio.wait_for(scan_queue.get(), timeout=0.2)
+            except asyncio.TimeoutError:
+                active_scanners = sum(1 for t in scan_tasks if not t.done())
+                continue
+                
+            if event == "__done__":
+                active_scanners = sum(1 for t in scan_tasks if not t.done())
+                if label == "nuclei_host":
+                    yield {
+                        "type": "scan_summary",
+                        "provider": "nuclei_host",
+                        "status": "completed",
+                        "count": nuclei_host_findings
+                    }
+                    yield {"type": "log", "message": "[√] Provider nuclei_host completed"}
+                elif label == "nuclei_endpoint":
+                    yield {
+                        "type": "scan_summary",
+                        "provider": "nuclei_endpoint",
+                        "status": "completed",
+                        "count": nuclei_endpoint_findings
+                    }
+                    yield {"type": "log", "message": "[√] Provider nuclei_endpoint completed"}
+                elif label == "dalfox":
+                    yield {
+                        "type": "scan_summary",
+                        "provider": "dalfox",
+                        "status": "completed",
+                        "count": dalfox_findings
+                    }
+                    yield {"type": "log", "message": "[√] Provider dalfox completed"}
+                elif label == "openredirex":
+                    yield {
+                        "type": "scan_summary",
+                        "provider": "openredirex",
+                        "status": "completed",
+                        "count": openredirex_findings
+                    }
+                    yield {"type": "log", "message": "[√] Provider openredirex completed"}
+                continue
+                
+            if event.get("type") == "scan_summary":
+                if label == "nuclei_host":
                     nuclei_host_findings = event.get("findings_found", nuclei_host_findings)
-                elif event.get("type") == "scan_summary" and event.get("provider") == "Nuclei Endpoint Scan":
+                elif label == "nuclei_endpoint":
                     nuclei_endpoint_findings = event.get("findings_found", nuclei_endpoint_findings)
-                elif event.get("type") == "scan_summary" and event.get("event") == "FindingDetected":
-                    # Real-time finding — let it flow through unchanged.
-                    pass
+                elif label == "dalfox":
+                    dalfox_findings = event.get("confirmed_xss", dalfox_findings)
+                elif label == "openredirex":
+                    openredirex_findings = event.get("confirmed_redirects", openredirex_findings)
+                    
+            yield event
 
-                yield event
-
-            await asyncio.gather(host_task, endpoint_task, return_exceptions=True)
+        await asyncio.gather(*scan_tasks, return_exceptions=True)
 
         nuclei_findings_count = nuclei_host_findings + nuclei_endpoint_findings
-
-        # ================================================================
-        # Final summary
-        # ================================================================
+        total_security_findings = nuclei_findings_count + dalfox_findings + openredirex_findings
 
         if is_new_path:
             p_discovery_str = "SKIPPED"
@@ -681,12 +882,17 @@ class UnifiedDiscoveryProvider(BaseProvider):
             f"    Subzy              : {subzy_str}\n"
             f"    HTTPX Live Hosts   : {live_hosts}\n"
             f"    Naabu Open Ports   : {naabu_open_ports} across {naabu_hosts_with_ports} hosts\n"
-            f"    Katana URLs (Unique): {katana_urls_discovered} across {katana_hosts_scanned} hosts\n"
-            f"    Uro Normalised URLs : {len(uro_normalised_urls)} (removed {uro_removed})\n"
-            f"    GF Matches          : {gf_classified} | Endpoint targets: {len(gf_endpoint_urls)}\n"
-            f"    Nuclei Host Scan   : {nuclei_host_findings} findings\n"
-            f"    Nuclei Endpoint Scan : {nuclei_endpoint_findings} findings\n"
-            f"    Nuclei Findings    : {nuclei_findings_count}"
+            f"    Katana URLs        : {katana_urls_discovered} (crawled {katana_hosts_scanned} hosts)\n"
+            f"    GAU Historical URLs: {len(all_gau_urls)}\n"
+            f"    SubJS JS Files     : {len(all_js_files)}\n"
+            f"    LinkFinder Endpts  : {linkfinder_endpoints}\n"
+            f"    GoWitness Screenpts: {gowitness_screenshots}\n"
+            f"    Uro Normalised URLs: {len(uro_normalised_urls)} (removed {uro_removed})\n"
+            f"    GF Matches         : {gf_classified} | Endpoint targets: {len(gf_endpoint_urls)}\n"
+            f"    Nuclei Findings    : {nuclei_findings_count} (Host: {nuclei_host_findings}, Endpoint: {nuclei_endpoint_findings})\n"
+            f"    Dalfox Confirmed XSS: {dalfox_findings}\n"
+            f"    OpenRedirex Redirs : {openredirex_findings}\n"
+            f"    Security Findings  : {total_security_findings}"
         )
         logger.info(final_summary_msg)
         yield {"type": "log", "message": final_summary_msg}
@@ -709,12 +915,19 @@ class UnifiedDiscoveryProvider(BaseProvider):
             "naabu_open_ports":            naabu_open_ports,
             "katana_hosts_scanned":        katana_hosts_scanned,
             "katana_urls_discovered":      katana_urls_discovered,
+            "historical_urls":             len(all_gau_urls),
+            "js_files":                    len(all_js_files),
+            "extracted_endpoints":         linkfinder_endpoints,
+            "screenshots":                 gowitness_screenshots,
             "uro_normalised_urls":         len(uro_normalised_urls),
             "uro_removed":                 uro_removed,
-            "gf_classified":              gf_classified,
+            "gf_classified":               gf_classified,
             "gf_endpoint_urls":            len(gf_endpoint_urls),
             "nuclei_host_findings":        nuclei_host_findings,
             "nuclei_endpoint_findings":    nuclei_endpoint_findings,
             "nuclei_findings_count":       nuclei_findings_count,
+            "confirmed_xss":               dalfox_findings,
+            "confirmed_redirects":         openredirex_findings,
+            "security_findings":           total_security_findings
         }
 

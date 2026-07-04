@@ -1,4 +1,8 @@
 from abc import ABC, abstractmethod
+import os
+import shutil
+import platform
+import subprocess
 from typing import AsyncGenerator, Dict, Any, List
 
 class BaseProvider(ABC):
@@ -32,3 +36,59 @@ class BaseProvider(ABC):
         }
         """
         pass
+
+    @staticmethod
+    def wsl_path_convert(path: str) -> str:
+        if platform.system().lower() != "windows":
+            return path
+        drive, rest = os.path.splitdrive(os.path.abspath(path))
+        drive_letter = drive.rstrip(":").lower()
+        rest = rest.replace("\\", "/")
+        return f"/mnt/{drive_letter}{rest}"
+
+    @staticmethod
+    def detect_tool(tool_name: str) -> str:
+        is_windows = platform.system().lower() == "windows"
+        wsl_user = os.getenv("WSL_USER", "kali")
+        home_dir = f"/home/{wsl_user}" if is_windows else os.path.expanduser("~")
+        
+        candidates = [
+            tool_name,
+            f"{home_dir}/go/bin/{tool_name}",
+            f"{home_dir}/.local/bin/{tool_name}",
+            f"/usr/bin/{tool_name}",
+            f"/usr/local/bin/{tool_name}",
+        ]
+        
+        if not is_windows:
+            path_which = shutil.which(tool_name)
+            if path_which:
+                return path_which
+                
+        if is_windows:
+            for cand in candidates:
+                try:
+                    cmd = ["wsl", "which" if cand == tool_name else "test", "-f" if cand != tool_name else cand]
+                    if cand != tool_name:
+                        cmd.append(cand)
+                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+                    if proc.returncode == 0:
+                        return cand
+                except Exception:
+                    pass
+        else:
+            for cand in candidates:
+                if cand == tool_name:
+                    if shutil.which(cand):
+                        return cand
+                else:
+                    if os.path.exists(cand):
+                        return cand
+                        
+        # Final fallback
+        if tool_name == "linkfinder":
+            return f"{home_dir}/tools/LinkFinder/linkfinder.py"
+        elif tool_name == "openredirex":
+            return f"{home_dir}/tools/OpenRedirex/openredirex.py"
+        return f"{home_dir}/go/bin/{tool_name}"
+

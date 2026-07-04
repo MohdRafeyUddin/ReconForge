@@ -43,11 +43,11 @@ interface AssetTableProps {
   takeoverRecords?: TakeoverRecord[];
   normalizedUrlRecords?: NormalizedUrlRecord[];
   gfRecords?: GfUrlRecord[];
-  initialTab?: "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei";
+  initialTab?: "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei" | "historical_urls" | "js_files" | "screenshots";
   initialSeverityFilter?: string | null;
 }
 
-type InventoryTab = "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei";
+type InventoryTab = "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei" | "historical_urls" | "js_files" | "screenshots";
 
 export const AssetTable: React.FC<AssetTableProps> = ({
   assets,
@@ -157,8 +157,11 @@ export const AssetTable: React.FC<AssetTableProps> = ({
   };
 
   const filteredAssets = assets.filter((asset) => {
+    if (["js_file", "screenshot", "finding", "historical_url"].includes(asset.type)) {
+      return false;
+    }
     const matchesSearch = asset.domain.toLowerCase().includes(search.toLowerCase()) ||
-      (asset.metadata.ip_address && asset.metadata.ip_address.includes(search));
+      (asset.metadata && asset.metadata.ip_address && asset.metadata.ip_address.includes(search));
     const matchesType = filterType === "all" || asset.type === filterType;
     const matchesStatus = filterStatus === "all" || asset.status === filterStatus;
     
@@ -216,17 +219,76 @@ export const AssetTable: React.FC<AssetTableProps> = ({
           });
         }
       });
+
+      if (asset.type === "finding") {
+        const meta = asset.metadata || {};
+        const key = `flat:${meta.source || "unknown"}:${meta.matched_url || ""}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          findingsList.push({
+            severity: meta.severity || "info",
+            template: (meta.source || "unknown").toUpperCase(),
+            template_id: meta.source || "unknown",
+            template_name: meta.source ? `${meta.source.toUpperCase()} Confirmed Finding` : "Vulnerability",
+            matched_url: meta.matched_url || "",
+            endpoint: meta.matched_url || "",
+            host: meta.host || asset.domain,
+            tags: meta.tags || [],
+            cve: meta.cve || "",
+            timestamp: meta.timestamp || asset.created_at || new Date().toISOString(),
+            pass_name: "",
+            source: meta.source || "unknown",
+            payload: meta.payload || "",
+            parameter: meta.parameter || "",
+            evidence: meta.evidence || "",
+            metadata: meta
+          });
+        }
+      }
     });
     return findingsList;
   }, [assets]);
 
+  const historicalUrls = React.useMemo(() => {
+    return assets.filter(a => a.type === "historical_url").map(a => ({
+      url: a.domain,
+      source: a.metadata?.source || a.discovered_by || "unknown",
+      sources: a.metadata?.sources || a.sources || [],
+      has_params: a.metadata?.has_params || false,
+      extension: a.metadata?.extension || "",
+      timestamp: a.created_at || a.metadata?.discovered_at
+    }));
+  }, [assets]);
+
+  const javascriptFiles = React.useMemo(() => {
+    return assets.filter(a => a.type === "js_file").map(a => ({
+      url: a.domain,
+      host: a.metadata?.host || "",
+      size: a.metadata?.size || "unknown",
+      source: a.metadata?.source || a.discovered_by || "subjs"
+    }));
+  }, [assets]);
+
+  const screenshotsList = React.useMemo(() => {
+    return assets.filter(a => a.type === "screenshot").map(a => ({
+      url: a.domain,
+      title: a.metadata?.title || "",
+      screenshot_path: a.metadata?.screenshot_path || "",
+      timestamp: a.metadata?.timestamp || a.created_at,
+      source: a.metadata?.source || "gowitness"
+    }));
+  }, [assets]);
+
   const inventoryTabs: { id: InventoryTab; label: string; count?: number }[] = [
-    { id: "assets", label: "Assets", count: assets.length },
+    { id: "assets", label: "Assets", count: filteredAssets.length },
     { id: "dns", label: "DNS", count: dnsRecords.length },
     { id: "takeovers", label: "Takeovers", count: takeoverRecords.length },
     { id: "normalized_urls", label: "Normalized URLs", count: displayedNormalizedUrls.length },
     { id: "gf", label: "Interesting URLs", count: gfTotalCount },
-    { id: "nuclei", label: "Nuclei Findings", count: nucleiFindings.length },
+    { id: "nuclei", label: "Security Findings", count: nucleiFindings.length },
+    { id: "historical_urls", label: "Historical URLs", count: historicalUrls.length },
+    { id: "js_files", label: "JS Files", count: javascriptFiles.length },
+    { id: "screenshots", label: "Screenshots", count: screenshotsList.length },
   ];
 
   return (
@@ -273,13 +335,177 @@ export const AssetTable: React.FC<AssetTableProps> = ({
         <GfTab records={gfRecords} projectName={projectName} />
       )}
 
-      {/* Nuclei Findings Tab */}
+      {/* Security Findings Tab */}
       {activeInventoryTab === "nuclei" && (
         <NucleiTab
           findings={nucleiFindings}
           projectName={projectName}
           initialSeverityFilter={initialSeverityFilter}
         />
+      )}
+
+      {/* Historical URLs Tab */}
+      {activeInventoryTab === "historical_urls" && (
+        <div className="bg-dark-card border border-dark-border rounded-xl glass p-4">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">Historical URL Inventory</h3>
+            <span className="text-[10px] font-mono text-slate-500">{historicalUrls.length} total entries</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="bg-dark-bg/70 border-b border-dark-border text-slate-400 font-mono uppercase tracking-wider text-[10px]">
+                  <th className="p-3">URL</th>
+                  <th className="p-3">Parameters</th>
+                  <th className="p-3">Extension</th>
+                  <th className="p-3">Sources</th>
+                </tr>
+              </thead>
+              <tbody>
+                {historicalUrls.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="p-6 text-center text-slate-500 uppercase tracking-widest font-mono text-[10px]">
+                      No historical URLs discovered yet.
+                    </td>
+                  </tr>
+                ) : (
+                  historicalUrls.map((urlObj, idx) => (
+                    <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-hover/30 transition-colors font-mono text-[11px]">
+                      <td className="p-3 break-all select-all text-slate-300">{urlObj.url}</td>
+                      <td className="p-3">
+                        {urlObj.has_params ? (
+                          <span className="px-1.5 py-0.5 bg-yellow-500/20 border border-yellow-500/40 text-yellow-400 rounded text-[9px] font-bold">
+                            YES
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 bg-slate-500/10 border border-slate-500/25 text-slate-500 rounded text-[9px]">
+                            NO
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-3">
+                        {urlObj.extension ? (
+                          <span className="px-1.5 py-0.5 bg-cyber-accent/20 border border-cyber-accent/40 text-cyber-accent rounded text-[9px] font-bold uppercase">
+                            {urlObj.extension}
+                          </span>
+                        ) : (
+                          <span className="text-slate-600">-</span>
+                        )}
+                      </td>
+                      <td className="p-3">
+                        <div className="flex flex-wrap gap-1">
+                          {urlObj.sources.map((src: string) => (
+                            <span key={src} className="px-1.5 py-0.5 bg-blue-500/15 border border-blue-500/35 text-blue-400 rounded text-[9px] uppercase font-semibold">
+                              {src}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* JavaScript Files Tab */}
+      {activeInventoryTab === "js_files" && (
+        <div className="bg-dark-card border border-dark-border rounded-xl glass p-4">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">JavaScript File Inventory</h3>
+            <span className="text-[10px] font-mono text-slate-500">{javascriptFiles.length} total files</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="bg-dark-bg/70 border-b border-dark-border text-slate-400 font-mono uppercase tracking-wider text-[10px]">
+                  <th className="p-3">JS File URL</th>
+                  <th className="p-3">Target Host</th>
+                  <th className="p-3">Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {javascriptFiles.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className="p-6 text-center text-slate-500 uppercase tracking-widest font-mono text-[10px]">
+                      No JavaScript files discovered yet.
+                    </td>
+                  </tr>
+                ) : (
+                  javascriptFiles.map((jsObj, idx) => (
+                    <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-hover/30 transition-colors font-mono text-[11px]">
+                      <td className="p-3 break-all select-all text-slate-300">
+                        <a href={jsObj.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline">
+                          {jsObj.url}
+                        </a>
+                      </td>
+                      <td className="p-3 text-slate-400">{jsObj.host}</td>
+                      <td className="p-3">
+                        <span className="px-1.5 py-0.5 bg-blue-500/15 border border-blue-500/35 text-blue-400 rounded text-[9px] uppercase font-semibold">
+                          {jsObj.source}
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Screenshots Tab */}
+      {activeInventoryTab === "screenshots" && (
+        <div className="bg-dark-card border border-dark-border rounded-xl glass p-4">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">Captured Screenshots</h3>
+            <span className="text-[10px] font-mono text-slate-500">{screenshotsList.length} screenshots</span>
+          </div>
+          {screenshotsList.length === 0 ? (
+            <div className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono text-[10px]">
+              No screenshots captured yet. Run scan in deep mode.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+              {screenshotsList.map((screen, idx) => {
+                const imgUrl = screen.screenshot_path.startsWith("http") 
+                  ? screen.screenshot_path 
+                  : `http://127.0.0.1:8000${screen.screenshot_path}`;
+                  
+                return (
+                  <div key={idx} className="bg-dark-bg border border-dark-border rounded-lg overflow-hidden flex flex-col group hover:border-cyber-accent/60 transition-all">
+                    <div className="relative aspect-video bg-slate-900 border-b border-dark-border overflow-hidden">
+                      <img 
+                        src={imgUrl} 
+                        alt={screen.title} 
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                        onError={(e) => {
+                          (e.target as HTMLElement).style.display = 'none';
+                        }}
+                      />
+                    </div>
+                    <div className="p-3 flex flex-col justify-between flex-grow font-mono text-[10px]">
+                      <div className="mb-2">
+                        <a href={screen.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline break-all font-bold block mb-1">
+                          {screen.url}
+                        </a>
+                        <span className="text-slate-400 block text-[9px]">{screen.title}</span>
+                      </div>
+                      <div className="flex justify-between items-center text-[9px] text-slate-500 border-t border-dark-border/40 pt-2">
+                        <span>{screen.timestamp ? new Date(screen.timestamp).toLocaleDateString() : "-"}</span>
+                        <span className="px-1 py-0.2 bg-blue-500/10 border border-blue-500/30 text-blue-400 rounded uppercase font-semibold">
+                          {screen.source}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       )}
 
       {/* Existing Assets Tab */}
@@ -367,6 +593,9 @@ export const AssetTable: React.FC<AssetTableProps> = ({
               <th className="p-4">Asset / Subdomain</th>
               <th className="p-4">Type</th>
               <th className="p-4">Status</th>
+              <th className="p-4">Risk</th>
+              <th className="p-4">Exposure</th>
+              <th className="p-4">Priority</th>
               <th className="p-4">IP Address</th>
               <th className="p-4">Open Ports</th>
               <th className="p-4">Discovered By</th>
@@ -375,7 +604,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
           <tbody>
             {filteredAssets.length === 0 ? (
               <tr>
-                <td colSpan={7} className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono">
+                <td colSpan={10} className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono">
                   No assets match current criteria
                 </td>
               </tr>
@@ -424,6 +653,67 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                           {asset.status}
                         </span>
                       </td>
+                      <td className="p-4">
+                        {(() => {
+                          const score = (asset as any).risk?.score;
+                          const level = (asset as any).risk?.level;
+                          if (score === undefined || score === null) {
+                            return (
+                              <span className="px-2 py-0.5 rounded-full bg-slate-500/10 border border-slate-500/25 text-slate-500 text-[10px] font-medium font-mono">
+                                Not scored
+                              </span>
+                            );
+                          }
+                          let badgeColor = "bg-slate-500/10 border-slate-500/30 text-slate-400";
+                          if (score >= 90) badgeColor = "bg-red-500/10 border-red-500/30 text-red-500 font-bold";
+                          else if (score >= 70) badgeColor = "bg-orange-500/10 border-orange-500/30 text-orange-500 font-bold";
+                          else if (score >= 40) badgeColor = "bg-yellow-500/10 border-yellow-500/30 text-yellow-400";
+                          else if (score >= 1) badgeColor = "bg-blue-500/10 border-blue-500/30 text-blue-400";
+                          
+                          return (
+                            <button
+                              onClick={() => toggleExpand(asset.id)}
+                              className={`px-2 py-0.5 rounded border text-[10px] font-mono cursor-pointer transition-all hover:scale-105 ${badgeColor}`}
+                            >
+                              {score} ({level})
+                            </button>
+                          );
+                        })()}
+                      </td>
+                      <td className="p-4">
+                        {(() => {
+                          const risk = (asset as any).risk;
+                          if (!risk) return <span className="text-slate-600 font-mono">-</span>;
+                          const isExposed = risk.exposure_factors?.includes("Internet Exposed");
+                          return isExposed ? (
+                            <span className="px-1.5 py-0.5 rounded bg-cyber-primary/10 border border-cyber-primary/30 text-cyber-primary text-[10px] font-mono uppercase tracking-wider font-bold">
+                              Exposed
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded bg-slate-500/10 border border-slate-500/25 text-slate-500 text-[10px] font-mono uppercase tracking-wider">
+                              Internal
+                            </span>
+                          );
+                        })()}
+                      </td>
+                      <td className="p-4">
+                        {(() => {
+                          const risk = (asset as any).risk;
+                          if (!risk) return <span className="text-slate-600 font-mono">-</span>;
+                          const prio = risk.recommended_priority || "";
+                          let color = "text-slate-400";
+                          if (prio.includes("Immediate")) color = "text-red-500 font-bold";
+                          else if (prio.includes("High")) color = "text-orange-500";
+                          else if (prio.includes("Medium")) color = "text-yellow-400";
+                          else if (prio.includes("Low")) color = "text-blue-400";
+                          
+                          return (
+                            <span className={`text-[10px] font-mono ${color}`}>
+                              {prio.replace(" remediation required", "").replace(" remediation", "")}
+                            </span>
+                          );
+                        })()}
+                      </td>
                       <td className="p-4 font-mono text-slate-300">{ip}</td>
                       <td className="p-4 font-mono">
                         <div className="flex flex-wrap gap-1">
@@ -451,8 +741,8 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                     {/* Expandable Details Row */}
                     {isExpanded && (
                       <tr>
-                        <td colSpan={7} className="bg-dark-bg/30 p-4 border-b border-dark-border">
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-2 font-mono text-xs">
+                        <td colSpan={10} className="bg-dark-bg/30 p-4 border-b border-dark-border">
+                          <div className={`grid grid-cols-1 ${asset.risk ? "md:grid-cols-3" : "md:grid-cols-2"} gap-6 p-2 font-mono text-xs`}>
                             {/* Left Side: DNS/IP Meta */}
                             <div className="bg-dark-card border border-dark-border rounded-lg p-4">
                               <h5 className="font-bold text-cyber-accent border-b border-dark-border pb-1.5 mb-2.5 uppercase tracking-wider text-[10px]">
@@ -576,9 +866,56 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                               </div>
                             </div>
 
+                            {/* Risk Assessment & Exposure Breakdown */}
+                            {asset.risk ? (
+                              <div className="bg-dark-card border border-dark-border rounded-lg p-4">
+                                <h5 className="font-bold text-cyber-danger border-b border-dark-border pb-1.5 mb-2.5 uppercase tracking-wider text-[10px] flex justify-between items-center">
+                                  <span>Risk Breakdown ({asset.risk.level})</span>
+                                  <span className="text-[10px] text-slate-300 font-bold">{asset.risk.score}/100</span>
+                                </h5>
+                                <div className="space-y-2.5 font-mono text-[11px]">
+                                  <div>
+                                    <span className="text-slate-500">PRIORITY:</span>{" "}
+                                    <span className="text-white font-bold">{asset.risk.recommended_priority}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-slate-500 font-bold block mb-1">CONTRIBUTORS:</span>
+                                    <ul className="space-y-1 pl-1">
+                                      {asset.risk.reasons && asset.risk.reasons.length > 0 ? (
+                                        asset.risk.reasons.map((r: string, idx: number) => (
+                                          <li key={idx} className="text-slate-300 flex items-start gap-1">
+                                            <span className="text-cyber-danger">✓</span>
+                                            <span>{r}</span>
+                                          </li>
+                                        ))
+                                      ) : (
+                                        <li className="text-slate-500 italic">No specific risk contributors found.</li>
+                                      )}
+                                    </ul>
+                                  </div>
+                                  {asset.risk.exposure_factors && asset.risk.exposure_factors.length > 0 && (
+                                    <div className="mt-2.5 pt-2 border-t border-dark-border/40">
+                                      <span className="text-slate-500 font-bold block mb-1">EXPOSURE FACTORS:</span>
+                                      <div className="flex flex-wrap gap-1 mt-1">
+                                        {asset.risk.exposure_factors.map((f: string, idx: number) => (
+                                          <span key={idx} className="px-1.5 py-0.5 bg-cyber-primary/10 border border-cyber-primary/30 text-cyber-primary rounded text-[9px] uppercase font-bold">
+                                            {f}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="bg-dark-card border border-dark-border rounded-lg p-4 flex flex-col justify-center items-center text-center">
+                                <span className="text-slate-500 font-mono text-xs italic">Asset not yet scored. Run Unified Discovery to evaluate risk.</span>
+                              </div>
+                            )}
+
                             {/* Katana Crawl Results */}
                             {asset.metadata.katana && (
-                              <div className="col-span-1 md:col-span-2 bg-dark-card border border-dark-border rounded-lg p-4 mt-2">
+                              <div className={`col-span-1 ${asset.risk ? "md:col-span-3" : "md:col-span-2"} bg-dark-card border border-dark-border rounded-lg p-4 mt-2`}>
                                 <h5 className="font-bold text-cyber-accent border-b border-dark-border pb-1.5 mb-2.5 uppercase tracking-wider text-[10px] flex items-center justify-between">
                                   <span>Katana Crawl Results</span>
                                   <span className="text-[9px] text-slate-500 font-mono font-normal normal-case">
