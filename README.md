@@ -82,41 +82,197 @@ Screenshots of the dark-mode dashboard, vulnerability console, and risk priority
 
 ## 5. Installation
 
-### A. Prerequisite Security Tools
-ReconForge relies on several security tools. You can install all of them on Kali Linux or Ubuntu (WSL) using the following commands:
+### A. System & Tool Installation
 
+#### System Requirements
+Recommended:
+- Linux / Kali Linux / Ubuntu WSL2
+- Python 3.10+
+- Node.js 18+
+- Golang latest
+- MongoDB
+
+#### WSL Installation (Windows)
+Install WSL:
+```powershell
+wsl --install
+```
+
+Install Ubuntu:
+```powershell
+wsl --install -d Ubuntu
+```
+
+Update:
 ```bash
-# 1. Install System dependencies (Git, Go, Python, Node.js)
-sudo apt update
-sudo apt install -y git curl wget python3 python3-pip python3-venv golang nodejs npm
+sudo apt update && sudo apt upgrade -y
+```
 
-# 2. Install ProjectDiscovery tools
-go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-go install github.com/projectdiscovery/httpx/cmd/httpx@latest
-go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
-go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-go install github.com/projectdiscovery/katana/cmd/katana@latest
-go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+#### Install Base Packages
+```bash
+sudo apt install -y \
+  git \
+  curl \
+  wget \
+  python3 \
+  python3-pip \
+  python3-venv \
+  pipx \
+  nodejs \
+  npm \
+  golang \
+  unzip
+```
 
-# 3. Install other security scanners & tools
-go install github.com/tomnomnom/assetfinder@latest
-go install github.com/tomnomnom/gf@latest
-go install github.com/lc/subjs@latest
-go install github.com/lc/gau/v2/cmd/gau@latest
-go install github.com/sensepost/gowitness@latest
-go install github.com/hahwul/dalfox/v2@latest
-go install github.com/PentestPad/subzy@latest
-
-# 4. Install Python-based URL normalization utility
-pipx install uro
-
-# 5. Add Go/Local binaries to PATH (append to ~/.bashrc or ~/.zshrc)
+Configure Go:
+Add to `~/.bashrc`:
+```bash
 export PATH=$PATH:$HOME/go/bin:$HOME/.local/bin
+```
+
+Reload:
+```bash
 source ~/.bashrc
 ```
 
-For more detailed setup instructions, troubleshooting, or alternative package manager commands, refer to the full [Tool Installation Guide](docs/INSTALL_TOOLS.md).
+#### ProjectDiscovery Tools
+
+Subfinder:
+```bash
+go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+```
+
+HTTPX:
+```bash
+go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+```
+
+Naabu:
+```bash
+go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+```
+
+Nuclei:
+```bash
+go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+```
+
+Update templates:
+```bash
+nuclei -update-templates
+```
+
+DNSx:
+```bash
+go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+```
+
+Katana:
+```bash
+go install github.com/projectdiscovery/katana/cmd/katana@latest
+```
+
+Chaos:
+```bash
+go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+```
+
+#### Discovery Tools
+
+Assetfinder:
+```bash
+go install github.com/tomnomnom/assetfinder@latest
+```
+
+Amass:
+```bash
+sudo apt install amass -y
+```
+
+Subzy:
+```bash
+go install github.com/PentestPad/subzy@latest
+```
+
+#### URL / Endpoint Tools
+
+GAU:
+```bash
+go install github.com/lc/gau/v2/cmd/gau@latest
+```
+
+GF:
+```bash
+go install github.com/tomnomnom/gf@latest
+```
+
+Install GF patterns:
+```bash
+git clone https://github.com/1ndianl33t/Gf-Patterns
+mkdir ~/.gf
+cp Gf-Patterns/*.json ~/.gf/
+```
+
+URO:
+```bash
+pipx install uro
+```
+
+SubJS:
+```bash
+go install github.com/lc/subjs@latest
+```
+
+LinkFinder:
+```bash
+git clone https://github.com/GerbenJavado/LinkFinder.git
+cd LinkFinder
+pip install -r requirements.txt
+```
+
+#### Validation Tools
+
+Dalfox:
+```bash
+go install github.com/hahwul/dalfox/v2@latest
+```
+
+GoWitness:
+```bash
+go install github.com/sensepost/gowitness@latest
+```
+
+OpenRedirex:
+```bash
+git clone https://github.com/devanshbatham/OpenRedireX.git
+```
+
+Gitleaks:
+```bash
+sudo apt install gitleaks -y
+```
+
+#### Verify Installation
+Run:
+```bash
+subfinder -version
+httpx -version
+naabu -version
+nuclei -version
+dnsx -version
+katana -version
+assetfinder -h
+amass -version
+gf -h
+subzy -h
+gau --version
+subjs -h
+dalfox version
+gowitness version
+uro --help
+```
+
+For detailed installation instructions see [docs/INSTALL_TOOLS.md](docs/INSTALL_TOOLS.md)
 
 ### B. Backend setup
 1. Navigate to the backend directory:
