@@ -1,7 +1,9 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.database import connect_to_mongo, close_mongo_connection
@@ -29,14 +31,28 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Enable CORS for React frontend (defaulting to localhost:5173 for Vite)
+# Enable CORS for React frontend
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "https://recon-forge-f9ugyhgww-recon7.vercel.app",
+]
+env_origins = os.getenv("ALLOWED_ORIGINS")
+if env_origins:
+    allowed_origins.extend([o.strip() for o in env_origins.split(",") if o.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount screenshots statically
+os.makedirs("screenshots", exist_ok=True)
+app.mount("/screenshots", StaticFiles(directory="screenshots"), name="screenshots")
 
 # Mount API Routers
 app.include_router(auth.router, prefix=settings.API_V1_STR)

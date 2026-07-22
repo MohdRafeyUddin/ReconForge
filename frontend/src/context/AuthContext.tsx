@@ -1,5 +1,5 @@
 import React, { createContext, useState, useEffect, useContext } from "react";
-import { apiCall } from "../services/api";
+import { apiCall, API_BASE_URL } from "../services/api";
 
 export interface User {
   id: string;
@@ -43,7 +43,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = async (form: FormData) => {
     // Send standard urlencoded form data for OAuth2PasswordRequestForm
-    const response = await fetch("http://127.0.0.1:8000/api/v1/auth/login", {
+    const response = await fetch(`${API_BASE_URL}/auth/login`, {
       method: "POST",
       body: form,
     });

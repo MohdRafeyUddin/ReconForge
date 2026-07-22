@@ -9,6 +9,7 @@ import type { NormalizedUrlRecord } from "./NormalizedUrlTab";
 import { GfTab } from "./GfTab";
 import type { GfUrlRecord } from "./GfTab";
 import { NucleiTab } from "./NucleiTab";
+import { SCREENSHOT_BASE_URL } from "../../services/api";
 
 const getRootDomain = (domain: string): string => {
   const parts = domain.split(".");
@@ -473,7 +474,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
               {screenshotsList.map((screen, idx) => {
                 const imgUrl = screen.screenshot_path.startsWith("http") 
                   ? screen.screenshot_path 
-                  : `http://127.0.0.1:8000${screen.screenshot_path}`;
+                  : `${SCREENSHOT_BASE_URL}${screen.screenshot_path}`;
                   
                 return (
                   <div key={idx} className="bg-dark-bg border border-dark-border rounded-lg overflow-hidden flex flex-col group hover:border-cyber-accent/60 transition-all">
