@@ -908,9 +908,7 @@ const MainDashboard: React.FC = () => {
         if (hasPipelineComplete || (activeJobFromServer && activeJobFromServer.status === "completed")) {
           Object.keys(nextProviderStatus).forEach((key) => {
             if (nextProviderStatus[key] === "RUNNING" || nextProviderStatus[key] === "PENDING") {
-              if (nextProviderStatus[key] !== "SKIPPED" && nextProviderStatus[key] !== "FAILED") {
-                nextProviderStatus[key] = "COMPLETED";
-              }
+              nextProviderStatus[key] = "COMPLETED";
             }
           });
         }

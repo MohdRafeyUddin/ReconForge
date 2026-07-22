@@ -29,6 +29,9 @@ export interface NucleiFindingRecord {
   matcher_name?: string;
   extracted_results?: string[];
   metadata?: any;
+  parameter?: string;
+  payload?: string;
+  evidence?: string;
 }
 
 interface NucleiTabProps {

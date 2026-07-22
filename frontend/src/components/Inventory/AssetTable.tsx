@@ -34,6 +34,7 @@ interface Asset {
   created_at: string;
   updated_at?: string;
   sources?: string[];
+  risk?: any;
 }
 
 interface AssetTableProps {

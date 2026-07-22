@@ -88,6 +88,7 @@ interface Asset {
     };
     [key: string]: any;
   };
+  risk?: any;
 }
 
 interface OverviewDashboardProps {
