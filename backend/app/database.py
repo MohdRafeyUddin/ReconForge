@@ -181,6 +181,11 @@ async def connect_to_mongo():
         await db_helper.client.admin.command('ping')
         db_helper.is_mock = False
         logger.info("[✓] Connected to MongoDB database successfully!")
+        
+        # Initialize unique indexes for users
+        await db_helper.db.users.create_index("username", unique=True)
+        await db_helper.db.users.create_index("email", unique=True)
+        logger.info("[✓] Unique indexes for users collection initialized successfully.")
     except Exception as e:
         logger.warning(f"[!] MongoDB is unavailable ({e}). Falling back to IN-MEMORY DATABASE for this session.")
         db_helper.is_mock = True
