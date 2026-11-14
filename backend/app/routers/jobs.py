@@ -210,6 +210,12 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
 
             event_type = event.get("type")
 
+            if "raw_output" in event or event_type == "raw_output":
+                t_name = event.get("tool") or event.get("stage") or event.get("provider")
+                raw_val = event.get("raw_output") or event.get("output")
+                if t_name and raw_val:
+                    collected_raw_outputs[str(t_name)] = str(raw_val)
+
             if event_type == "log":
                 log_message = event.get("message")
                 logger.info(f"[{provider_name}] {log_message}")
@@ -485,6 +491,20 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                                     "created_at": now_dt,
                                     "updated_at": now_dt
                                 })
+                            try:
+                                from app.services.run_history import record_run_asset
+                                await record_run_asset(
+                                    db=db,
+                                    project_id=str(project_id),
+                                    job_id=str(job_id),
+                                    asset_type="historical_url",
+                                    value=url_val,
+                                    domain=url_val,
+                                    status="live",
+                                    metadata=url_data,
+                                )
+                            except Exception:
+                                pass
                         else:
                             existing = await db.assets.find_one({
                                 "project_id": project_id,
@@ -524,6 +544,20 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                                     "created_at": now_dt,
                                     "updated_at": now_dt
                                 })
+                            try:
+                                from app.services.run_history import record_run_asset
+                                await record_run_asset(
+                                    db=db,
+                                    project_id=str(project_id),
+                                    job_id=str(job_id),
+                                    asset_type="uro_url",
+                                    value=url_val,
+                                    domain=url_val,
+                                    status="live",
+                                    metadata=url_data,
+                                )
+                            except Exception:
+                                pass
                     elif event_type == "gf_event":
                         existing = await db.assets.find_one({
                             "project_id": project_id,
@@ -575,6 +609,20 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                                 "created_at": now_dt,
                                 "updated_at": now_dt
                             })
+                            try:
+                                from app.services.run_history import record_run_asset
+                                await record_run_asset(
+                                    db=db,
+                                    project_id=str(project_id),
+                                    job_id=str(job_id),
+                                    asset_type="gf_url",
+                                    value=url_val,
+                                    domain=url_val,
+                                    status="live",
+                                    metadata=url_data,
+                                )
+                            except Exception:
+                                pass
                     elif event_type == "js_event":
                         existing = await db.assets.find_one({
                             "project_id": project_id,
@@ -612,6 +660,20 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                                 "created_at": now_dt,
                                 "updated_at": now_dt
                             })
+                        try:
+                            from app.services.run_history import record_run_asset
+                            await record_run_asset(
+                                db=db,
+                                project_id=str(project_id),
+                                job_id=str(job_id),
+                                asset_type="js_file",
+                                value=url_val,
+                                domain=url_val,
+                                status="live",
+                                metadata=url_data,
+                            )
+                        except Exception:
+                            pass
                     elif event_type == "screenshot_event":
                         existing = await db.assets.find_one({
                             "project_id": project_id,
@@ -718,6 +780,20 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                                 "created_at": now_dt,
                                 "updated_at": now_dt
                             })
+                        try:
+                            from app.services.run_history import record_run_asset
+                            await record_run_asset(
+                                db=db,
+                                project_id=str(project_id),
+                                job_id=str(job_id),
+                                asset_type="finding",
+                                value=finding_key,
+                                domain=host or url_val,
+                                status="live",
+                                metadata=url_data,
+                            )
+                        except Exception:
+                            pass
                 await manager.broadcast(job_id, event)
 
             elif event_type == "scan_summary":
@@ -742,6 +818,12 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                 elif event_type == "param_event":
                     executed_phases.add("param_discovery")
                 elif event_type in ("stage_skipped", "stage_timeout", "stage_error"):
+                    stage_markers_list.append({
+                        "type": event_type.replace("stage_", ""),
+                        "stage": event.get("stage") or event.get("tool") or "unknown",
+                        "tool": event.get("tool") or "",
+                        "reason": event.get("reason") or event.get("error") or event.get("message") or "unknown",
+                    })
                     tool = str(event.get("tool") or event.get("stage") or "").lower()
                     if tool in ("ffuf", "feroxbuster", "content_discovery"):
                         executed_phases.discard("content_discovery")

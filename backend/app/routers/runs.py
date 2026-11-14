@@ -44,16 +44,23 @@ async def get_project_runs(
 @router.get("/{project_id}/runs/compare")
 async def compare_project_runs(
     project_id: str,
-    a: str = Query(..., description="Job ID of first run"),
-    b: str = Query(..., description="Job ID of second run"),
+    a: Optional[str] = Query(None, description="Job ID of first run"),
+    b: Optional[str] = Query(None, description="Job ID of second run"),
+    run_a: Optional[str] = Query(None, description="Job ID of first run (alias)"),
+    run_b: Optional[str] = Query(None, description="Job ID of second run (alias)"),
 ):
     """Compares two historical scan runs and returns added/removed assets per type."""
+    first = a or run_a
+    second = b or run_b
+    if not first or not second:
+        raise HTTPException(status_code=400, detail="Missing required query parameters 'a' (or 'run_a') and 'b' (or 'run_b')")
+
     db = get_database()
     if db is None:
         raise HTTPException(status_code=500, detail="Database unavailable")
 
     try:
-        comparison = await compare_runs(db, project_id, a, b)
+        comparison = await compare_runs(db, project_id, first, second)
         return serialize_doc(comparison)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
