@@ -8,6 +8,7 @@ import type { GfCategoryStats } from "./GfCard";
 import { Globe, Server, Radio, ShieldAlert, Play, Pause, Square, RotateCcw, RefreshCw, FileText, Link, AlertCircle, CheckCircle, Search, X, ExternalLink } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from "recharts";
 import { apiCall } from "../../services/api";
+import { HighlightText, ExactMatchBadge, getExactMatchFields } from "../Common/HighlightText";
 
 interface DashboardStats {
   total_assets: number;
@@ -554,6 +555,11 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     });
   }, [topHuntTargets, dashboardSearch]);
 
+  const exactMatchCount = useMemo(() => {
+    if (!dashboardSearch.trim()) return 0;
+    return matchingAssets.filter((a) => getExactMatchFields(a, dashboardSearch).length > 0).length;
+  }, [matchingAssets, dashboardSearch]);
+
 
   // Recompute ports distribution dynamically from assets
   const portCounts: Record<number, number> = {};
@@ -700,8 +706,19 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           )}
         </div>
         {dashboardSearch && (
-          <div className="text-xs font-mono text-cyber-accent shrink-0">
-            {matchingAssets.length} matching asset{matchingAssets.length === 1 ? "" : "s"}
+          <div className="flex items-center gap-2 text-xs font-mono shrink-0">
+            {exactMatchCount > 0 ? (
+              <span className="text-amber-300 bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 rounded font-bold">
+                🎯 {exactMatchCount} exact match{exactMatchCount === 1 ? "" : "es"}
+              </span>
+            ) : (
+              <span className="text-slate-400 bg-slate-800 border border-slate-700 px-2 py-0.5 rounded">
+                Partial matches
+              </span>
+            )}
+            <span className="text-cyber-accent">
+              {matchingAssets.length} matching asset{matchingAssets.length === 1 ? "" : "s"}
+            </span>
           </div>
         )}
       </div>
@@ -714,6 +731,11 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
               <Search className="w-4 h-4 text-cyber-accent" />
               <h4 className="text-xs font-bold uppercase tracking-wider text-slate-200">
                 Search Results for <span className="text-cyber-accent font-mono">"{dashboardSearch}"</span> ({matchingAssets.length})
+                {exactMatchCount > 0 && (
+                  <span className="ml-2 text-amber-300 text-[11px] font-normal lowercase">
+                    ({exactMatchCount} exact)
+                  </span>
+                )}
               </h4>
             </div>
             <button
@@ -738,6 +760,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                 const reasons = asset.hunt_reasons || (asset as any).risk?.reasons || [];
                 const findings = meta.nuclei?.findings || [];
                 const liveUrl = meta.url || (asset.domain.startsWith("http") ? asset.domain : `https://${asset.domain}`);
+                const exactFields = getExactMatchFields(asset, dashboardSearch);
 
                 return (
                   <div
@@ -755,9 +778,12 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                           rel="noopener noreferrer"
                           className="font-bold text-slate-200 hover:text-cyber-accent hover:underline flex items-center gap-1 truncate"
                         >
-                          <span>{asset.domain}</span>
+                          <span><HighlightText text={asset.domain} highlight={dashboardSearch} /></span>
                           <ExternalLink className="w-3 h-3 text-slate-500" />
                         </a>
+                        {exactFields.length > 0 && (
+                          <ExactMatchBadge fields={exactFields} />
+                        )}
                         {asset.status === "live" && (
                           <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold">
                             LIVE
@@ -765,23 +791,40 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                         )}
                         {meta.status_code && (
                           <span className="px-1.5 py-0.2 rounded bg-blue-500/15 border border-blue-500/30 text-blue-400 text-[10px]">
-                            HTTP {meta.status_code}
+                            HTTP <HighlightText text={meta.status_code} highlight={dashboardSearch} />
                           </span>
                         )}
                       </div>
 
                       <div className="text-[11px] text-slate-400 flex items-center gap-3 flex-wrap">
                         {meta.ip_address && (
-                          <span>IP: <strong className="text-slate-300">{meta.ip_address}</strong></span>
+                          <span>IP: <strong className="text-slate-300"><HighlightText text={meta.ip_address} highlight={dashboardSearch} /></strong></span>
                         )}
                         {openPorts.length > 0 && (
-                          <span>Ports: <strong className="text-slate-300">{openPorts.slice(0, 6).join(", ")}{openPorts.length > 6 ? "..." : ""}</strong></span>
+                          <span>Ports: <strong className="text-slate-300">
+                            {openPorts.slice(0, 6).map((p: any, pIdx: number) => (
+                              <React.Fragment key={pIdx}>
+                                {pIdx > 0 && ", "}
+                                <HighlightText text={p} highlight={dashboardSearch} />
+                              </React.Fragment>
+                            ))}
+                            {openPorts.length > 6 ? "..." : ""}
+                          </strong></span>
                         )}
                         {tech.length > 0 && (
-                          <span>Tech: <strong className="text-slate-300">{tech.slice(0, 4).join(", ")}</strong></span>
+                          <span>Tech: <strong className="text-slate-300">
+                            {tech.slice(0, 4).map((t: string, tIdx: number) => (
+                              <React.Fragment key={tIdx}>
+                                {tIdx > 0 && ", "}
+                                <HighlightText text={t} highlight={dashboardSearch} />
+                              </React.Fragment>
+                            ))}
+                          </strong></span>
                         )}
                         {reasons.length > 0 && (
-                          <span className="text-amber-400/90">{reasons[0]}</span>
+                          <span className="text-amber-400/90">
+                            <HighlightText text={reasons[0]} highlight={dashboardSearch} />
+                          </span>
                         )}
                       </div>
 
@@ -793,7 +836,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                               key={fIdx}
                               className="px-1.5 py-0.2 bg-red-500/15 border border-red-500/30 text-red-400 rounded text-[10px]"
                             >
-                              [{f.severity || "info"}] {f.name || f.template_id}
+                              [{f.severity || "info"}] <HighlightText text={f.name || f.template_id} highlight={dashboardSearch} />
                             </span>
                           ))}
                           {findings.length > 3 && (
@@ -1075,19 +1118,25 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                 else if (score >= 1) badgeColor = "bg-blue-500/10 text-blue-400 border-blue-500/20";
                 
                 const mainReason = asset.risk?.reasons?.[0] || "No critical findings detected";
-                
+                const exactFields = getExactMatchFields(asset, dashboardSearch);
+
                 return (
                   <div key={asset.id} className="flex items-center justify-between p-2.5 bg-dark-bg border border-dark-border rounded-lg hover:bg-dark-hover/10 transition-all">
                     <div className="flex flex-col min-w-0 pr-2">
-                      <a
-                        href={asset.domain.startsWith("http") ? asset.domain : `https://${asset.domain}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs font-mono text-slate-300 hover:text-cyber-accent hover:underline truncate font-semibold"
-                      >
-                        {asset.domain}
-                      </a>
-                      <span className="text-[10px] text-slate-500 font-mono truncate">{mainReason}</span>
+                      <div className="flex items-center gap-1.5 truncate">
+                        <a
+                          href={asset.domain.startsWith("http") ? asset.domain : `https://${asset.domain}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs font-mono text-slate-300 hover:text-cyber-accent hover:underline truncate font-semibold"
+                        >
+                          <HighlightText text={asset.domain} highlight={dashboardSearch} />
+                        </a>
+                        {exactFields.length > 0 && <ExactMatchBadge fields={exactFields} />}
+                      </div>
+                      <span className="text-[10px] text-slate-500 font-mono truncate">
+                        <HighlightText text={mainReason} highlight={dashboardSearch} />
+                      </span>
                     </div>
                     <div className="flex items-center gap-2">
                       {asset.risk?.exposure_factors?.includes("Internet Exposed") && (
@@ -1128,19 +1177,25 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                 else if (hp >= 20) badgeColor = "bg-blue-500/15 text-blue-300 border-blue-500/40";
 
                 const mainReason = (asset as any).hunt_reasons?.[0] || "Live attack surface";
+                const exactFields = getExactMatchFields(asset, dashboardSearch);
 
                 return (
                   <div key={asset.id} className="flex items-center justify-between p-2.5 bg-dark-bg border border-dark-border rounded-lg hover:bg-dark-hover/10 transition-all">
                     <div className="flex flex-col min-w-0 pr-2">
-                      <a
-                        href={asset.domain.startsWith("http") ? asset.domain : `https://${asset.domain}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs font-mono text-slate-200 hover:text-cyber-accent hover:underline truncate font-semibold"
-                      >
-                        {asset.domain}
-                      </a>
-                      <span className="text-[10px] text-slate-500 font-mono truncate">{mainReason}</span>
+                      <div className="flex items-center gap-1.5 truncate">
+                        <a
+                          href={asset.domain.startsWith("http") ? asset.domain : `https://${asset.domain}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs font-mono text-slate-200 hover:text-cyber-accent hover:underline truncate font-semibold"
+                        >
+                          <HighlightText text={asset.domain} highlight={dashboardSearch} />
+                        </a>
+                        {exactFields.length > 0 && <ExactMatchBadge fields={exactFields} />}
+                      </div>
+                      <span className="text-[10px] text-slate-500 font-mono truncate">
+                        <HighlightText text={mainReason} highlight={dashboardSearch} />
+                      </span>
                     </div>
                     <div className="flex items-center gap-2">
                       <span className={`text-xs font-mono px-2 py-0.5 rounded border ${badgeColor}`}>

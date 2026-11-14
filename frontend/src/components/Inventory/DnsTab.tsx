@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { Search, Download } from "lucide-react";
+import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
 
 export interface DnsRecord {
   subdomain: string;
@@ -197,60 +198,92 @@ export const DnsTab: React.FC<DnsTabProps> = ({
                 </td>
               </tr>
             ) : (
-              sorted.map((r, idx) => (
-                <tr
-                  key={`${r.subdomain}-${idx}`}
-                  className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors"
-                >
-                  <td className="p-4 font-bold text-slate-200 font-mono">
-                    <a
-                      href={`https://${r.subdomain}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="hover:text-cyber-accent hover:underline"
-                    >
-                      {r.subdomain}
-                    </a>
-                  </td>
-                  <td className="p-4">
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${statusClass(r.status)}`}>
-                      {r.status || "unknown"}
-                    </span>
-                  </td>
-                  <td className="p-4 font-mono text-slate-300">
-                    {r.ipv4.length > 0 ? r.ipv4.join(", ") : <span className="text-slate-600">—</span>}
-                  </td>
-                  <td className="p-4 font-mono text-slate-400">
-                    {r.ipv6.length > 0 ? r.ipv6.join(", ") : <span className="text-slate-600">—</span>}
-                  </td>
-                  <td className="p-4 font-mono text-slate-400">
-                    {r.cname.length > 0 ? (
-                      <span className="text-cyber-accent">
-                        {r.cname.map((cn, cnIdx) => (
-                          <span key={cnIdx}>
-                            {cnIdx > 0 && ", "}
-                            <a
-                              href={`https://${cn}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="hover:underline"
-                            >
-                              {cn}
-                            </a>
-                          </span>
-                        ))}
+              sorted.map((r, idx) => {
+                const exactMatch = Boolean(
+                  search.trim() &&
+                  (r.subdomain.toLowerCase() === search.trim().toLowerCase() ||
+                   (r.status && r.status.toLowerCase() === search.trim().toLowerCase()) ||
+                   r.ipv4.some((ip) => ip.toLowerCase() === search.trim().toLowerCase()) ||
+                   r.ipv6.some((ip) => ip.toLowerCase() === search.trim().toLowerCase()) ||
+                   r.cname.some((cn) => cn.toLowerCase() === search.trim().toLowerCase()))
+                );
+
+                return (
+                  <tr
+                    key={`${r.subdomain}-${idx}`}
+                    className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors"
+                  >
+                    <td className="p-4 font-bold text-slate-200 font-mono">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <a
+                          href={`https://${r.subdomain}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="hover:text-cyber-accent hover:underline"
+                        >
+                          <HighlightText text={r.subdomain} highlight={search} />
+                        </a>
+                        {exactMatch && <ExactMatchBadge />}
+                      </div>
+                    </td>
+                    <td className="p-4">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${statusClass(r.status)}`}>
+                        <HighlightText text={r.status || "unknown"} highlight={search} />
                       </span>
-                    ) : (
-                      <span className="text-slate-600">—</span>
-                    )}
-                  </td>
-                  <td className="p-4 text-slate-500 font-mono">
-                    {r.resolved_at
-                      ? new Date(r.resolved_at * 1000).toLocaleString()
-                      : <span className="text-slate-600">—</span>}
-                  </td>
-                </tr>
-              ))
+                    </td>
+                    <td className="p-4 font-mono text-slate-300">
+                      {r.ipv4.length > 0 ? (
+                        r.ipv4.map((ip, i) => (
+                          <React.Fragment key={i}>
+                            {i > 0 && ", "}
+                            <HighlightText text={ip} highlight={search} />
+                          </React.Fragment>
+                        ))
+                      ) : (
+                        <span className="text-slate-600">—</span>
+                      )}
+                    </td>
+                    <td className="p-4 font-mono text-slate-400">
+                      {r.ipv6.length > 0 ? (
+                        r.ipv6.map((ip, i) => (
+                          <React.Fragment key={i}>
+                            {i > 0 && ", "}
+                            <HighlightText text={ip} highlight={search} />
+                          </React.Fragment>
+                        ))
+                      ) : (
+                        <span className="text-slate-600">—</span>
+                      )}
+                    </td>
+                    <td className="p-4 font-mono text-slate-400">
+                      {r.cname.length > 0 ? (
+                        <span className="text-cyber-accent">
+                          {r.cname.map((cn, cnIdx) => (
+                            <span key={cnIdx}>
+                              {cnIdx > 0 && ", "}
+                              <a
+                                href={`https://${cn}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="hover:underline"
+                              >
+                                <HighlightText text={cn} highlight={search} />
+                              </a>
+                            </span>
+                          ))}
+                        </span>
+                      ) : (
+                        <span className="text-slate-600">—</span>
+                      )}
+                    </td>
+                    <td className="p-4 text-slate-500 font-mono">
+                      {r.resolved_at
+                        ? new Date(r.resolved_at * 1000).toLocaleString()
+                        : <span className="text-slate-600">—</span>}
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>

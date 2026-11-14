@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { Search, Copy, ChevronUp, ChevronDown, Download } from "lucide-react";
+import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
 
 interface SubdomainAsset {
   id: string;
@@ -23,14 +24,14 @@ const SOURCE_COLORS: Record<string, string> = {
   chaos: "bg-amber-500/15 border-amber-500/40 text-amber-400",
 };
 
-const sourceChip = (src: string) => {
+const sourceChip = (src: string, highlight?: string) => {
   const cls = SOURCE_COLORS[src.toLowerCase()] ?? "bg-slate-500/15 border-slate-500/40 text-slate-400";
   return (
     <span
       key={src}
       className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-mono font-bold uppercase ${cls}`}
     >
-      {src}
+      <HighlightText text={src} highlight={highlight} />
     </span>
   );
 };
@@ -90,6 +91,17 @@ export const SubdomainsTab: React.FC<SubdomainsTabProps> = ({ subdomains }) => {
   const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
   const paginated = sorted.slice((page - 1) * pageSize, page * pageSize);
 
+  const exactCount = useMemo(() => {
+    if (!search.trim()) return 0;
+    const q = search.trim().toLowerCase();
+    return filtered.filter(
+      (s) =>
+        s.domain.toLowerCase() === q ||
+        (s.sources && s.sources.some((src) => src.toLowerCase() === q)) ||
+        (s.discovered_by && s.discovered_by.toLowerCase() === q)
+    ).length;
+  }, [filtered, search]);
+
   const handleCopy = (text: string) => navigator.clipboard.writeText(text);
 
   const handleExportCSV = () => {
@@ -133,7 +145,18 @@ export const SubdomainsTab: React.FC<SubdomainsTabProps> = ({ subdomains }) => {
           />
         </div>
         <div className="flex items-center gap-3 text-xs text-slate-400 font-mono">
-          <span>{filtered.length} subdomains</span>
+          <div className="flex items-center gap-1.5">
+            {search.trim() && (
+              exactCount > 0 ? (
+                <span className="text-amber-300 font-bold bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 rounded text-[11px]">
+                  🎯 {exactCount} exact match{exactCount === 1 ? "" : "es"}
+                </span>
+              ) : (
+                <span className="text-slate-500 text-[11px]">Partial matches</span>
+              )
+            )}
+            <span>{filtered.length} subdomains</span>
+          </div>
           <button
             onClick={handleExportCSV}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-dark-bg border border-dark-border hover:border-cyber-accent/50 text-slate-300 hover:text-white rounded transition-all cursor-pointer"
@@ -179,49 +202,61 @@ export const SubdomainsTab: React.FC<SubdomainsTabProps> = ({ subdomains }) => {
                 </td>
               </tr>
             ) : (
-              paginated.map((asset) => (
-                <tr
-                  key={asset.id}
-                  className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors duration-150"
-                >
-                  <td className="p-4 font-bold text-slate-200 font-mono">
-                    <a
-                      href={`https://${asset.domain}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="hover:text-cyber-accent hover:underline transition-colors"
-                    >
-                      {asset.domain}
-                    </a>
-                  </td>
-                  <td className="p-4">
-                    <div className="flex flex-wrap gap-1">
-                      {asset.sources && asset.sources.length > 0
-                        ? asset.sources.map((src) => sourceChip(src))
-                        : sourceChip(asset.discovered_by)}
-                    </div>
-                  </td>
-                  <td className="p-4 text-slate-400 font-mono whitespace-nowrap">
-                    {asset.first_seen
-                      ? new Date(asset.first_seen).toLocaleString()
-                      : "—"}
-                  </td>
-                  <td className="p-4 text-slate-400 font-mono whitespace-nowrap">
-                    {asset.last_seen
-                      ? new Date(asset.last_seen).toLocaleString()
-                      : "—"}
-                  </td>
-                  <td className="p-4">
-                    <button
-                      onClick={() => handleCopy(asset.domain)}
-                      className="text-slate-500 hover:text-cyber-accent transition-colors cursor-pointer"
-                      title="Copy subdomain"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                    </button>
-                  </td>
-                </tr>
-              ))
+              paginated.map((asset) => {
+                const exactMatch = Boolean(
+                  search.trim() &&
+                  (asset.domain.toLowerCase() === search.trim().toLowerCase() ||
+                   (asset.sources && asset.sources.some((src) => src.toLowerCase() === search.trim().toLowerCase())) ||
+                   (asset.discovered_by && asset.discovered_by.toLowerCase() === search.trim().toLowerCase()))
+                );
+
+                return (
+                  <tr
+                    key={asset.id}
+                    className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors duration-150"
+                  >
+                    <td className="p-4 font-bold text-slate-200 font-mono">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <a
+                          href={`https://${asset.domain}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="hover:text-cyber-accent hover:underline transition-colors"
+                        >
+                          <HighlightText text={asset.domain} highlight={search} />
+                        </a>
+                        {exactMatch && <ExactMatchBadge />}
+                      </div>
+                    </td>
+                    <td className="p-4">
+                      <div className="flex flex-wrap gap-1">
+                        {asset.sources && asset.sources.length > 0
+                          ? asset.sources.map((src) => sourceChip(src, search))
+                          : sourceChip(asset.discovered_by, search)}
+                      </div>
+                    </td>
+                    <td className="p-4 text-slate-400 font-mono whitespace-nowrap">
+                      {asset.first_seen
+                        ? new Date(asset.first_seen).toLocaleString()
+                        : "—"}
+                    </td>
+                    <td className="p-4 text-slate-400 font-mono whitespace-nowrap">
+                      {asset.last_seen
+                        ? new Date(asset.last_seen).toLocaleString()
+                        : "—"}
+                    </td>
+                    <td className="p-4">
+                      <button
+                        onClick={() => handleCopy(asset.domain)}
+                        className="text-slate-500 hover:text-cyber-accent transition-colors cursor-pointer"
+                        title="Copy subdomain"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>

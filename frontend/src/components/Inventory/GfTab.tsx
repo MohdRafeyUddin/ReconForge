@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { Search, Download, ChevronDown, ChevronRight } from "lucide-react";
+import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
 
 export interface GfUrlRecord {
   url: string;
@@ -168,7 +169,7 @@ export const GfTab: React.FC<GfTabProps> = ({ records, projectName = "project" }
                         <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
                       )}
                       <span className={`px-2 py-0.5 rounded border text-[10px] font-bold uppercase font-mono ${categoryColor(cat)}`}>
-                        {cat}
+                        <HighlightText text={cat} highlight={search} />
                       </span>
                     </div>
                     <span className="text-[10px] font-mono text-slate-500 border border-dark-border px-1.5 py-0.5 rounded">
@@ -177,13 +178,22 @@ export const GfTab: React.FC<GfTabProps> = ({ records, projectName = "project" }
                   </button>
                   {!isCollapsed && (
                     <div className="border-t border-dark-border max-h-60 overflow-y-auto">
-                      {urls.map((url, idx) => (
-                        <div key={idx} className="px-4 py-2 font-mono text-[11px] text-slate-300 break-all hover:bg-dark-hover/20 transition-colors border-b border-dark-border/40 last:border-0 select-all">
-                          <a href={url} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
-                            {url}
-                          </a>
-                        </div>
-                      ))}
+                      {urls.map((url, idx) => {
+                        const exactMatch = Boolean(
+                          search.trim() &&
+                          (url.toLowerCase() === search.trim().toLowerCase() ||
+                           cat.toLowerCase() === search.trim().toLowerCase())
+                        );
+
+                        return (
+                          <div key={idx} className="px-4 py-2 font-mono text-[11px] text-slate-300 break-all hover:bg-dark-hover/20 transition-colors border-b border-dark-border/40 last:border-0 select-all flex items-center justify-between gap-2">
+                            <a href={url} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                              <HighlightText text={url} highlight={search} />
+                            </a>
+                            {exactMatch && <ExactMatchBadge />}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>

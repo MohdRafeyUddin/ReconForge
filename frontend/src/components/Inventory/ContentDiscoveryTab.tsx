@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { Search, Download, Copy, Check, ArrowUpDown } from "lucide-react";
+import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
 
 export interface ContentPathRecord {
   value: string;
@@ -290,6 +291,14 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
               filtered.map((r, idx) => {
                 const sc = r.status_code || 200;
                 const isNew = isNewInLatestScan(r.first_seen);
+                const exactMatch = Boolean(
+                  search.trim() &&
+                  (r.value.toLowerCase() === search.trim().toLowerCase() ||
+                   r.host.toLowerCase() === search.trim().toLowerCase() ||
+                   String(r.status_code || "") === search.trim() ||
+                   (r.redirect_location && r.redirect_location.toLowerCase() === search.trim().toLowerCase()))
+                );
+
                 return (
                   <tr
                     key={idx}
@@ -315,8 +324,9 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
                           rel="noopener noreferrer"
                           className="select-all break-all text-slate-200 hover:text-cyber-accent hover:underline transition-colors"
                         >
-                          {r.value}
+                          <HighlightText text={r.value} highlight={search} />
                         </a>
+                        {exactMatch && <ExactMatchBadge />}
                         {isNew && (
                           <span className="shrink-0 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 rounded text-[9px] font-bold uppercase tracking-wider">
                             New
@@ -333,7 +343,7 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
                         rel="noopener noreferrer"
                         className="hover:text-cyber-accent hover:underline transition-colors"
                       >
-                        {r.host}
+                        <HighlightText text={r.host} highlight={search} />
                       </a>
                     </td>
 
@@ -352,7 +362,7 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
                             : "bg-red-500/20 text-red-400 border border-red-500/40"
                         }`}
                       >
-                        {sc}
+                        <HighlightText text={sc} highlight={search} />
                       </span>
                     </td>
 
@@ -373,7 +383,7 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
                           rel="noopener noreferrer"
                           className="text-cyber-accent hover:underline"
                         >
-                          {r.redirect_location}
+                          <HighlightText text={r.redirect_location} highlight={search} />
                         </a>
                       ) : "—"}
                     </td>

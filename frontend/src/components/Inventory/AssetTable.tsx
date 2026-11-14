@@ -12,6 +12,7 @@ import { ContentDiscoveryTab } from "./ContentDiscoveryTab";
 import type { ContentPathRecord } from "./ContentDiscoveryTab";
 import { NucleiTab } from "./NucleiTab";
 import { apiCall, SCREENSHOT_BASE_URL } from "../../services/api";
+import { HighlightText, ExactMatchBadge, getExactMatchFields } from "../Common/HighlightText";
 
 const getRootDomain = (domain: string): string => {
   const parts = domain.split(".");
@@ -302,6 +303,11 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     });
   }, [baseFilteredAssets, sortField, sortAsc]);
 
+  const exactMainAssetMatches = React.useMemo(() => {
+    if (!search.trim()) return 0;
+    return filteredAssets.filter((a) => getExactMatchFields(a, search).length > 0).length;
+  }, [filteredAssets, search]);
+
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -582,44 +588,56 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredHistoricalUrls.map((urlObj, idx) => (
-                    <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-hover/30 transition-colors font-mono text-[11px]">
-                      <td className="p-3 break-all select-all text-slate-300">
-                        <a href={urlObj.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline">
-                          {urlObj.url}
-                        </a>
-                      </td>
-                      <td className="p-3">
-                        {urlObj.has_params ? (
-                          <span className="px-1.5 py-0.5 bg-yellow-500/20 border border-yellow-500/40 text-yellow-400 rounded text-[9px] font-bold">
-                            YES
-                          </span>
-                        ) : (
-                          <span className="px-1.5 py-0.5 bg-slate-500/10 border border-slate-500/25 text-slate-500 rounded text-[9px]">
-                            NO
-                          </span>
-                        )}
-                      </td>
-                      <td className="p-3">
-                        {urlObj.extension ? (
-                          <span className="px-1.5 py-0.5 bg-cyber-accent/20 border border-cyber-accent/40 text-cyber-accent rounded text-[9px] font-bold uppercase">
-                            {urlObj.extension}
-                          </span>
-                        ) : (
-                          <span className="text-slate-600">-</span>
-                        )}
-                      </td>
-                      <td className="p-3">
-                        <div className="flex flex-wrap gap-1">
-                          {urlObj.sources.map((src: string) => (
-                            <span key={src} className="px-1.5 py-0.5 bg-blue-500/15 border border-blue-500/35 text-blue-400 rounded text-[9px] uppercase font-semibold">
-                              {src}
+                  filteredHistoricalUrls.map((urlObj, idx) => {
+                    const exactMatch = Boolean(
+                      historicalSearch.trim() &&
+                      (urlObj.url.toLowerCase() === historicalSearch.trim().toLowerCase() ||
+                       (urlObj.extension && urlObj.extension.toLowerCase() === historicalSearch.trim().toLowerCase()) ||
+                       urlObj.sources.some((s: string) => s.toLowerCase() === historicalSearch.trim().toLowerCase()))
+                    );
+
+                    return (
+                      <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-hover/30 transition-colors font-mono text-[11px]">
+                        <td className="p-3 break-all select-all text-slate-300">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <a href={urlObj.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline">
+                              <HighlightText text={urlObj.url} highlight={historicalSearch} />
+                            </a>
+                            {exactMatch && <ExactMatchBadge />}
+                          </div>
+                        </td>
+                        <td className="p-3">
+                          {urlObj.has_params ? (
+                            <span className="px-1.5 py-0.5 bg-yellow-500/20 border border-yellow-500/40 text-yellow-400 rounded text-[9px] font-bold">
+                              YES
                             </span>
-                          ))}
-                        </div>
-                      </td>
-                    </tr>
-                  ))
+                          ) : (
+                            <span className="px-1.5 py-0.5 bg-slate-500/10 border border-slate-500/25 text-slate-500 rounded text-[9px]">
+                              NO
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          {urlObj.extension ? (
+                            <span className="px-1.5 py-0.5 bg-cyber-accent/20 border border-cyber-accent/40 text-cyber-accent rounded text-[9px] font-bold uppercase">
+                              <HighlightText text={urlObj.extension} highlight={historicalSearch} />
+                            </span>
+                          ) : (
+                            <span className="text-slate-600">-</span>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          <div className="flex flex-wrap gap-1">
+                            {urlObj.sources.map((src: string) => (
+                              <span key={src} className="px-1.5 py-0.5 bg-blue-500/15 border border-blue-500/35 text-blue-400 rounded text-[9px] uppercase font-semibold">
+                                <HighlightText text={src} highlight={historicalSearch} />
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -665,21 +683,35 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredJavascriptFiles.map((jsObj, idx) => (
-                    <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-hover/30 transition-colors font-mono text-[11px]">
-                      <td className="p-3 break-all select-all text-slate-300">
-                        <a href={jsObj.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline">
-                          {jsObj.url}
-                        </a>
-                      </td>
-                      <td className="p-3 text-slate-400">{jsObj.host}</td>
-                      <td className="p-3">
-                        <span className="px-1.5 py-0.5 bg-blue-500/15 border border-blue-500/35 text-blue-400 rounded text-[9px] uppercase font-semibold">
-                          {jsObj.source}
-                        </span>
-                      </td>
-                    </tr>
-                  ))
+                  filteredJavascriptFiles.map((jsObj, idx) => {
+                    const exactMatch = Boolean(
+                      jsSearch.trim() &&
+                      (jsObj.url.toLowerCase() === jsSearch.trim().toLowerCase() ||
+                       (jsObj.host && jsObj.host.toLowerCase() === jsSearch.trim().toLowerCase()) ||
+                       (jsObj.source && jsObj.source.toLowerCase() === jsSearch.trim().toLowerCase()))
+                    );
+
+                    return (
+                      <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-hover/30 transition-colors font-mono text-[11px]">
+                        <td className="p-3 break-all select-all text-slate-300">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <a href={jsObj.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline">
+                              <HighlightText text={jsObj.url} highlight={jsSearch} />
+                            </a>
+                            {exactMatch && <ExactMatchBadge />}
+                          </div>
+                        </td>
+                        <td className="p-3 text-slate-400">
+                          <HighlightText text={jsObj.host} highlight={jsSearch} />
+                        </td>
+                        <td className="p-3">
+                          <span className="px-1.5 py-0.5 bg-blue-500/15 border border-blue-500/35 text-blue-400 rounded text-[9px] uppercase font-semibold">
+                            <HighlightText text={jsObj.source} highlight={jsSearch} />
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -718,6 +750,12 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                 const imgUrl = screen.screenshot_path.startsWith("http") 
                   ? screen.screenshot_path 
                   : `${SCREENSHOT_BASE_URL}${screen.screenshot_path}`;
+                const exactMatch = Boolean(
+                  screenshotsSearch.trim() &&
+                  (screen.url.toLowerCase() === screenshotsSearch.trim().toLowerCase() ||
+                   (screen.title && screen.title.toLowerCase() === screenshotsSearch.trim().toLowerCase()) ||
+                   (screen.source && screen.source.toLowerCase() === screenshotsSearch.trim().toLowerCase()))
+                );
                   
                 return (
                   <div key={idx} className="bg-dark-bg border border-dark-border rounded-lg overflow-hidden flex flex-col group hover:border-cyber-accent/60 transition-all">
@@ -733,15 +771,20 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                     </div>
                     <div className="p-3 flex flex-col justify-between flex-grow font-mono text-[10px]">
                       <div className="mb-2">
-                        <a href={screen.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline break-all font-bold block mb-1">
-                          {screen.url}
-                        </a>
-                        <span className="text-slate-400 block text-[9px]">{screen.title}</span>
+                        <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                          <a href={screen.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline break-all font-bold block">
+                            <HighlightText text={screen.url} highlight={screenshotsSearch} />
+                          </a>
+                          {exactMatch && <ExactMatchBadge />}
+                        </div>
+                        <span className="text-slate-400 block text-[9px]">
+                          <HighlightText text={screen.title} highlight={screenshotsSearch} />
+                        </span>
                       </div>
                       <div className="flex justify-between items-center text-[9px] text-slate-500 border-t border-dark-border/40 pt-2">
                         <span>{screen.timestamp ? new Date(screen.timestamp).toLocaleDateString() : "-"}</span>
                         <span className="px-1 py-0.2 bg-blue-500/10 border border-blue-500/30 text-blue-400 rounded uppercase font-semibold">
-                          {screen.source}
+                          <HighlightText text={screen.source} highlight={screenshotsSearch} />
                         </span>
                       </div>
                     </div>
@@ -769,6 +812,16 @@ export const AssetTable: React.FC<AssetTableProps> = ({
             onChange={(e) => setSearch(e.target.value)}
             className="w-full bg-dark-input border border-dark-border rounded pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyber-accent"
           />
+          {search.trim() && (
+            <div className="text-[10px] font-mono mt-1 flex items-center gap-1.5">
+              {exactMainAssetMatches > 0 ? (
+                <span className="text-amber-300 font-bold">🎯 {exactMainAssetMatches} exact match{exactMainAssetMatches === 1 ? "" : "es"}</span>
+              ) : (
+                <span className="text-slate-400">Partial matches</span>
+              )}
+              <span className="text-slate-500">• {filteredAssets.length} total</span>
+            </div>
+          )}
         </div>
 
         <div className="flex flex-wrap space-x-3 w-full md:w-auto justify-end">
@@ -868,6 +921,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                 const isExpanded = expandedId === asset.id;
                 const ip = asset.metadata?.ip_address || "N/A";
                 const hasExposedPorts = (asset.open_ports || []).some(p => [22, 21, 23, 3389].includes(p));
+                const exactFields = getExactMatchFields(asset, search);
 
                 return (
                   <React.Fragment key={asset.id}>
@@ -882,15 +936,16 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                       </td>
                       <td className="p-4 font-bold text-slate-200">
                         <div className="flex flex-col gap-1.5">
-                          <div className="flex items-center space-x-2">
+                          <div className="flex items-center space-x-2 flex-wrap">
                             <a
                               href={asset.domain.startsWith("http://") || asset.domain.startsWith("https://") ? asset.domain : `https://${asset.domain}`}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="hover:text-cyber-accent hover:underline transition-colors break-all"
                             >
-                              {asset.domain}
+                              <HighlightText text={asset.domain} highlight={search} />
                             </a>
+                            {exactFields.length > 0 && <ExactMatchBadge fields={exactFields} />}
                             <button
                               onClick={() => handleCopy(asset.domain)}
                               className="text-slate-500 hover:text-cyber-accent transition-colors cursor-pointer"
@@ -972,7 +1027,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                                 </span>
                                 {statusCode !== undefined && (
                                   <span className="px-1.5 py-0.5 rounded bg-dark-bg border border-dark-border text-slate-200 font-mono text-[10px]">
-                                    {statusCode}
+                                    <HighlightText text={statusCode} highlight={search} />
                                   </span>
                                 )}
                               </div>
@@ -986,7 +1041,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                               )}
                               {statusClass && (
                                 <span className="text-[9px] text-slate-500 font-mono">
-                                  {statusClass}
+                                  <HighlightText text={statusClass} highlight={search} />
                                 </span>
                               )}
                             </div>
@@ -1078,7 +1133,9 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                                   </div>
                                   <ul className="list-disc pl-3 space-y-0.5">
                                     {reasons.map((r, idx) => (
-                                      <li key={idx} className="leading-tight">{r}</li>
+                                      <li key={idx} className="leading-tight">
+                                        <HighlightText text={r} highlight={search} />
+                                      </li>
                                     ))}
                                   </ul>
                                 </div>
@@ -1087,7 +1144,9 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                           );
                         })()}
                       </td>
-                      <td className="p-4 font-mono text-slate-300">{ip}</td>
+                      <td className="p-4 font-mono text-slate-300">
+                        <HighlightText text={ip} highlight={search} />
+                      </td>
                       <td className="p-4 font-mono">
                         <div className="flex flex-wrap gap-1">
                           {asset.open_ports.length === 0 ? (
@@ -1102,13 +1161,15 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                                     : "bg-cyber-primary/10 border border-cyber-primary/30 text-cyber-primary"
                                 }`}
                               >
-                                {port}
+                                <HighlightText text={port} highlight={search} />
                               </span>
                             ))
                           )}
                         </div>
                       </td>
-                      <td className="p-4 text-slate-400 font-mono">{asset.discovered_by}</td>
+                      <td className="p-4 text-slate-400 font-mono">
+                        <HighlightText text={asset.discovered_by} highlight={search} />
+                      </td>
                     </tr>
 
                     {/* Expandable Details Row */}

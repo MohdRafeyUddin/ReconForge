@@ -15,6 +15,7 @@ import {
   Filter,
 } from "lucide-react";
 import { apiCall } from "../../services/api";
+import { HighlightText } from "../Common/HighlightText";
 
 export interface ScanDiffSummary {
   new_subdomains_count: number;
@@ -547,7 +548,7 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                       className="truncate hover:text-cyber-accent hover:underline"
                       title={sub}
                     >
-                      {sub}
+                      <HighlightText text={sub} highlight={searchFilter} />
                     </a>
                     <span className="text-[10px] px-1.5 py-0.5 bg-emerald-500/20 text-emerald-300 rounded font-bold ml-2">
                       +NEW
@@ -591,7 +592,7 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                       className="truncate line-through opacity-80 hover:text-cyber-accent hover:underline"
                       title={sub}
                     >
-                      {sub}
+                      <HighlightText text={sub} highlight={searchFilter} />
                     </a>
                     <span className="text-[10px] px-1.5 py-0.5 bg-rose-500/20 text-rose-300 rounded font-bold ml-2">
                       STALE
@@ -635,7 +636,7 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                       className="truncate hover:text-cyber-accent hover:underline"
                       title={host}
                     >
-                      {host}
+                      <HighlightText text={host} highlight={searchFilter} />
                     </a>
                     <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/20 text-blue-300 rounded font-bold ml-2">
                       LIVE
@@ -763,10 +764,10 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                           rel="noopener noreferrer"
                           className="truncate hover:text-cyber-accent hover:underline"
                         >
-                          {p.domain}
+                          <HighlightText text={p.domain} highlight={searchFilter} />
                         </a>
                         <span className="font-bold bg-emerald-500/30 px-2 py-0.5 rounded text-[10px]">
-                          :{p.port}
+                          :<HighlightText text={p.port} highlight={searchFilter} />
                         </span>
                       </div>
                     ))}
@@ -793,10 +794,10 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                           rel="noopener noreferrer"
                           className="truncate hover:text-cyber-accent hover:underline"
                         >
-                          {p.domain}
+                          <HighlightText text={p.domain} highlight={searchFilter} />
                         </a>
                         <span className="font-bold bg-rose-500/30 px-2 py-0.5 rounded text-[10px] line-through">
-                          :{p.port}
+                          :<HighlightText text={p.port} highlight={searchFilter} />
                         </span>
                       </div>
                     ))}

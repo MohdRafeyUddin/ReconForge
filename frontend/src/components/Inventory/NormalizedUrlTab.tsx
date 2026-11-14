@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { Search, Download } from "lucide-react";
+import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
 
 export interface NormalizedUrlRecord {
   original_url: string;
@@ -96,28 +97,42 @@ export const NormalizedUrlTab: React.FC<NormalizedUrlTabProps> = ({ records, pro
               <tr><td colSpan={4} className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono">
                 {records.length === 0 ? "No normalized URLs yet — run a scan with Uro enabled" : "No results match search"}
               </td></tr>
-            ) : filtered.map((r, idx) => (
-              <tr key={idx} className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors">
-                <td className="p-4 font-mono text-slate-400 break-all max-w-xs">
-                  <a href={r.original_url} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline transition-colors">
-                    {r.original_url}
-                  </a>
-                </td>
-                <td className="p-4 font-mono text-cyber-accent break-all max-w-xs">
-                  <a href={r.normalized_url} target="_blank" rel="noopener noreferrer" className="hover:underline transition-colors">
-                    {r.normalized_url}
-                  </a>
-                </td>
-                <td className="p-4">
-                  {r.duplicate_removed ? (
-                    <span className="px-2 py-0.5 rounded-full text-[10px] bg-slate-500/10 border border-slate-500/30 text-slate-400 uppercase">Removed</span>
-                  ) : (
-                    <span className="px-2 py-0.5 rounded-full text-[10px] bg-cyber-success/10 border border-cyber-success/30 text-cyber-success uppercase">Kept</span>
-                  )}
-                </td>
-                <td className="p-4 text-slate-500 font-mono">{r.source || "uro"}</td>
-              </tr>
-            ))}
+            ) : filtered.map((r, idx) => {
+              const exactMatch = Boolean(
+                search.trim() &&
+                (r.normalized_url.toLowerCase() === search.trim().toLowerCase() ||
+                 r.original_url.toLowerCase() === search.trim().toLowerCase() ||
+                 (r.source && r.source.toLowerCase() === search.trim().toLowerCase()))
+              );
+
+              return (
+                <tr key={idx} className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors">
+                  <td className="p-4 font-mono text-slate-400 break-all max-w-xs">
+                    <a href={r.original_url} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline transition-colors">
+                      <HighlightText text={r.original_url} highlight={search} />
+                    </a>
+                  </td>
+                  <td className="p-4 font-mono text-cyber-accent break-all max-w-xs">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <a href={r.normalized_url} target="_blank" rel="noopener noreferrer" className="hover:underline transition-colors">
+                        <HighlightText text={r.normalized_url} highlight={search} />
+                      </a>
+                      {exactMatch && <ExactMatchBadge />}
+                    </div>
+                  </td>
+                  <td className="p-4">
+                    {r.duplicate_removed ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] bg-slate-500/10 border border-slate-500/30 text-slate-400 uppercase">Removed</span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] bg-cyber-success/10 border border-cyber-success/30 text-cyber-success uppercase">Kept</span>
+                    )}
+                  </td>
+                  <td className="p-4 text-slate-500 font-mono">
+                    <HighlightText text={r.source || "uro"} highlight={search} />
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

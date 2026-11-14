@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { Search, Download, ShieldAlert } from "lucide-react";
+import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
 
 export interface TakeoverRecord {
   subdomain: string;
@@ -122,24 +123,45 @@ export const TakeoverTab: React.FC<TakeoverTabProps> = ({ records, projectName =
               <tr><td colSpan={5} className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono">
                 {records.length === 0 ? "No takeover data — run a scan with Subzy enabled" : "No records match filter"}
               </td></tr>
-            ) : filtered.map((r, idx) => (
-              <tr key={`${r.subdomain}-${idx}`} className={`border-b border-dark-border hover:bg-dark-hover/30 transition-colors ${r.status === "Vulnerable" ? "bg-cyber-danger/[0.03]" : ""}`}>
-                <td className="p-4 font-bold text-slate-200 font-mono">
-                  <a
-                    href={`https://${r.subdomain}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="hover:text-cyber-accent hover:underline"
-                  >
-                    {r.subdomain}
-                  </a>
-                </td>
-                <td className="p-4 text-slate-400 font-mono">{r.provider || "—"}</td>
-                <td className="p-4"><span className={`px-2 py-0.5 rounded-full text-[10px] uppercase ${statusClass(r.status)}`}>{r.status}</span></td>
-                <td className="p-4 text-slate-500 font-mono">{r.confidence || "—"}</td>
-                <td className="p-4 text-slate-500 font-mono">{r.last_checked ? new Date(r.last_checked * 1000).toLocaleString() : "—"}</td>
-              </tr>
-            ))}
+            ) : filtered.map((r, idx) => {
+              const exactMatch = Boolean(
+                search.trim() &&
+                (r.subdomain.toLowerCase() === search.trim().toLowerCase() ||
+                 (r.provider && r.provider.toLowerCase() === search.trim().toLowerCase()) ||
+                 r.status.toLowerCase() === search.trim().toLowerCase() ||
+                 (r.confidence && r.confidence.toLowerCase() === search.trim().toLowerCase()))
+              );
+
+              return (
+                <tr key={`${r.subdomain}-${idx}`} className={`border-b border-dark-border hover:bg-dark-hover/30 transition-colors ${r.status === "Vulnerable" ? "bg-cyber-danger/[0.03]" : ""}`}>
+                  <td className="p-4 font-bold text-slate-200 font-mono">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <a
+                        href={`https://${r.subdomain}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="hover:text-cyber-accent hover:underline"
+                      >
+                        <HighlightText text={r.subdomain} highlight={search} />
+                      </a>
+                      {exactMatch && <ExactMatchBadge />}
+                    </div>
+                  </td>
+                  <td className="p-4 text-slate-400 font-mono">
+                    <HighlightText text={r.provider || "—"} highlight={search} />
+                  </td>
+                  <td className="p-4">
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] uppercase ${statusClass(r.status)}`}>
+                      <HighlightText text={r.status} highlight={search} />
+                    </span>
+                  </td>
+                  <td className="p-4 text-slate-500 font-mono">
+                    <HighlightText text={r.confidence || "—"} highlight={search} />
+                  </td>
+                  <td className="p-4 text-slate-500 font-mono">{r.last_checked ? new Date(r.last_checked * 1000).toLocaleString() : "—"}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

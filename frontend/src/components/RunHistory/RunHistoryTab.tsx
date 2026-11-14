@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { History, GitCompare, Eye, FileText, ChevronLeft, ChevronRight, AlertCircle, CheckCircle, Search } from "lucide-react";
 import { apiCall } from "../../services/api";
+import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
 
 interface ScanRun {
   job_id: string;
@@ -125,6 +126,18 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
     });
   }, [runs, runsSearch]);
 
+  const exactRunsCount = useMemo(() => {
+    if (!runsSearch.trim()) return 0;
+    const q = runsSearch.trim().toLowerCase();
+    return filteredRuns.filter(
+      (r) =>
+        r.job_id.toLowerCase().includes(q) ||
+        r.status.toLowerCase() === q ||
+        (r.scan_mode && r.scan_mode.toLowerCase() === q) ||
+        (r.scan_profile && r.scan_profile.toLowerCase() === q)
+    ).length;
+  }, [filteredRuns, runsSearch]);
+
   const filteredCompareAdded = useMemo(() => {
     if (!compareResult) return [];
     const q = compareSearch.toLowerCase().trim();
@@ -171,6 +184,18 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
       );
     });
   }, [runAssets, runAssetSearch]);
+
+  const exactRunAssetsCount = useMemo(() => {
+    if (!runAssetSearch.trim()) return 0;
+    const q = runAssetSearch.trim().toLowerCase();
+    return filteredRunAssets.filter(
+      (a) =>
+        (a.value && a.value.toLowerCase() === q) ||
+        (a.type && a.type.toLowerCase() === q) ||
+        (a.discovered_by && a.discovered_by.toLowerCase() === q) ||
+        (a.domain && a.domain.toLowerCase() === q)
+    ).length;
+  }, [filteredRunAssets, runAssetSearch]);
 
   const fetchRuns = async () => {
     if (!projectId) return;
@@ -346,22 +371,31 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                 <span className="text-[10px] font-mono text-slate-500">{filteredCompareAdded.length} items</span>
               </div>
               <div className="max-h-48 overflow-y-auto space-y-1 font-mono text-[11px] text-slate-300">
-                {filteredCompareAdded.map(({ type, item }, idx) => (
-                  <div key={`${type}-${idx}`} className="truncate">
-                    <span className="text-slate-500 mr-2">[{type}]</span>
-                    {item.startsWith("http://") || item.startsWith("https://") ? (
-                      <a href={item} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
-                        {item}
-                      </a>
-                    ) : type === "subdomain" || type === "live_host" ? (
-                      <a href={`https://${item}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
-                        {item}
-                      </a>
-                    ) : (
-                      <span>{item}</span>
-                    )}
-                  </div>
-                ))}
+                {filteredCompareAdded.map(({ type, item }, idx) => {
+                  const exactMatch = Boolean(
+                    compareSearch.trim() &&
+                    (item.toLowerCase() === compareSearch.trim().toLowerCase() ||
+                     type.toLowerCase() === compareSearch.trim().toLowerCase())
+                  );
+
+                  return (
+                    <div key={`${type}-${idx}`} className="truncate flex items-center gap-1.5">
+                      <span className="text-slate-500">[{type}]</span>
+                      {item.startsWith("http://") || item.startsWith("https://") ? (
+                        <a href={item} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                          <HighlightText text={item} highlight={compareSearch} />
+                        </a>
+                      ) : type === "subdomain" || type === "live_host" ? (
+                        <a href={`https://${item}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                          <HighlightText text={item} highlight={compareSearch} />
+                        </a>
+                      ) : (
+                        <span><HighlightText text={item} highlight={compareSearch} /></span>
+                      )}
+                      {exactMatch && <ExactMatchBadge />}
+                    </div>
+                  );
+                })}
                 {filteredCompareAdded.length === 0 && (
                   <div className="text-slate-500 text-xs">
                     {compareSearch ? "No matching added assets." : "No new assets added."}
@@ -379,22 +413,31 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                 <span className="text-[10px] font-mono text-slate-500">{filteredCompareRemoved.length} items</span>
               </div>
               <div className="max-h-48 overflow-y-auto space-y-1 font-mono text-[11px] text-slate-300">
-                {filteredCompareRemoved.map(({ type, item }, idx) => (
-                  <div key={`${type}-${idx}`} className="truncate">
-                    <span className="text-slate-500 mr-2">[{type}]</span>
-                    {item.startsWith("http://") || item.startsWith("https://") ? (
-                      <a href={item} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
-                        {item}
-                      </a>
-                    ) : type === "subdomain" || type === "live_host" ? (
-                      <a href={`https://${item}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
-                        {item}
-                      </a>
-                    ) : (
-                      <span>{item}</span>
-                    )}
-                  </div>
-                ))}
+                {filteredCompareRemoved.map(({ type, item }, idx) => {
+                  const exactMatch = Boolean(
+                    compareSearch.trim() &&
+                    (item.toLowerCase() === compareSearch.trim().toLowerCase() ||
+                     type.toLowerCase() === compareSearch.trim().toLowerCase())
+                  );
+
+                  return (
+                    <div key={`${type}-${idx}`} className="truncate flex items-center gap-1.5">
+                      <span className="text-slate-500">[{type}]</span>
+                      {item.startsWith("http://") || item.startsWith("https://") ? (
+                        <a href={item} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                          <HighlightText text={item} highlight={compareSearch} />
+                        </a>
+                      ) : type === "subdomain" || type === "live_host" ? (
+                        <a href={`https://${item}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                          <HighlightText text={item} highlight={compareSearch} />
+                        </a>
+                      ) : (
+                        <span><HighlightText text={item} highlight={compareSearch} /></span>
+                      )}
+                      {exactMatch && <ExactMatchBadge />}
+                    </div>
+                  );
+                })}
                 {filteredCompareRemoved.length === 0 && (
                   <div className="text-slate-500 text-xs">
                     {compareSearch ? "No matching removed assets." : "No assets removed."}
@@ -413,6 +456,13 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-200">Execution History</h4>
             <span className="text-[10px] text-slate-500 font-mono">
               {filteredRuns.length} of {runs.length} runs on this page ({total} total recorded)
+              {runsSearch.trim() && (
+                exactRunsCount > 0 ? (
+                  <span className="text-amber-300 font-bold ml-2">🎯 {exactRunsCount} exact match{exactRunsCount === 1 ? "" : "es"}</span>
+                ) : (
+                  <span className="text-slate-500 ml-2">Partial matches</span>
+                )
+              )}
             </span>
           </div>
           <div className="relative w-full sm:w-72">
@@ -466,18 +516,29 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                     else if (r.status === "interrupted") statusBadge = "bg-amber-500/10 text-amber-400 border-amber-500/30";
                     else if (r.status === "running") statusBadge = "bg-cyber-accent/10 text-cyber-accent border-cyber-accent/30 animate-pulse";
 
+                    const exactMatch = Boolean(
+                      runsSearch.trim() &&
+                      (r.job_id.toLowerCase().includes(runsSearch.trim().toLowerCase()) ||
+                       r.status.toLowerCase() === runsSearch.trim().toLowerCase() ||
+                       (r.scan_mode && r.scan_mode.toLowerCase() === runsSearch.trim().toLowerCase()) ||
+                       (r.scan_profile && r.scan_profile.toLowerCase() === runsSearch.trim().toLowerCase()))
+                    );
+
                     return (
                       <tr key={r.job_id} className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors">
                         <td className="p-3 font-bold text-slate-200">
-                          {r.job_id.slice(-8)}
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <HighlightText text={r.job_id.slice(-8)} highlight={runsSearch} />
+                            {exactMatch && <ExactMatchBadge />}
+                          </div>
                         </td>
                         <td className="p-3">
                           <span className={`px-2 py-0.5 rounded border text-[10px] uppercase ${statusBadge}`}>
-                            {r.status}
+                            <HighlightText text={r.status} highlight={runsSearch} />
                           </span>
                         </td>
                         <td className="p-3 text-slate-300">
-                          {r.scan_mode || "fast"} / <span className="text-slate-400">{r.scan_profile || "recon"}</span>
+                          <HighlightText text={r.scan_mode || "fast"} highlight={runsSearch} /> / <span className="text-slate-400"><HighlightText text={r.scan_profile || "recon"} highlight={runsSearch} /></span>
                         </td>
                         <td className="p-3 text-slate-400">
                           {new Date(r.started_at).toLocaleString()}
@@ -637,8 +698,14 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
               {/* Run Assets Explorer */}
               <div className="border border-dark-border rounded-lg overflow-hidden">
                 <div className="p-3 bg-dark-bg border-b border-dark-border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-                  <div className="font-bold text-slate-200">
-                    Assets Discovered in this Run ({filteredRunAssets.length} / {runAssetsTotal})
+                  <div className="font-bold text-slate-200 flex items-center gap-2">
+                    <span>Assets Discovered in this Run ({filteredRunAssets.length} / {runAssetsTotal})</span>
+                    {runAssetSearch.trim() && exactRunAssetsCount > 0 && (
+                      <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full font-mono flex items-center gap-1">
+                        <span>🎯</span>
+                        <span>{exactRunAssetsCount} exact</span>
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 w-full sm:w-auto">
                     <div className="relative flex-1 sm:w-56">
@@ -681,25 +748,39 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                   ) : (
                     <table className="w-full text-left text-[11px] font-mono">
                       <tbody>
-                        {filteredRunAssets.map((a, idx) => (
-                          <tr key={idx} className="border-b border-dark-border/40 hover:bg-dark-hover/20">
-                            <td className="p-2 text-slate-500 w-28 uppercase">[{a.type}]</td>
-                            <td className="p-2 text-slate-200 font-semibold truncate">
-                              {a.value.startsWith("http://") || a.value.startsWith("https://") ? (
-                                <a href={a.value} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
-                                  {a.value}
-                                </a>
-                              ) : a.type === "subdomain" || a.type === "live_host" ? (
-                                <a href={`https://${a.value}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
-                                  {a.value}
-                                </a>
-                              ) : (
-                                <span>{a.value}</span>
-                              )}
-                            </td>
-                            <td className="p-2 text-slate-400 text-right">{a.discovered_by || "-"}</td>
-                          </tr>
-                        ))}
+                        {filteredRunAssets.map((a, idx) => {
+                          const isExact =
+                            runAssetSearch.trim() &&
+                            ((a.value && a.value.toLowerCase() === runAssetSearch.trim().toLowerCase()) ||
+                             (a.type && a.type.toLowerCase() === runAssetSearch.trim().toLowerCase()) ||
+                             (a.discovered_by && a.discovered_by.toLowerCase() === runAssetSearch.trim().toLowerCase()));
+                          return (
+                            <tr key={idx} className="border-b border-dark-border/40 hover:bg-dark-hover/20">
+                              <td className="p-2 text-slate-500 w-28 uppercase">
+                                [<HighlightText text={a.type || ""} highlight={runAssetSearch} />]
+                              </td>
+                              <td className="p-2 text-slate-200 font-semibold truncate">
+                                <div className="flex items-center gap-2">
+                                  {a.value.startsWith("http://") || a.value.startsWith("https://") ? (
+                                    <a href={a.value} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                                      <HighlightText text={a.value} highlight={runAssetSearch} />
+                                    </a>
+                                  ) : a.type === "subdomain" || a.type === "live_host" ? (
+                                    <a href={`https://${a.value}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                                      <HighlightText text={a.value} highlight={runAssetSearch} />
+                                    </a>
+                                  ) : (
+                                    <span><HighlightText text={a.value} highlight={runAssetSearch} /></span>
+                                  )}
+                                  {isExact && <ExactMatchBadge label="Exact Match" />}
+                                </div>
+                              </td>
+                              <td className="p-2 text-slate-400 text-right">
+                                <HighlightText text={a.discovered_by || "-"} highlight={runAssetSearch} />
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   )}

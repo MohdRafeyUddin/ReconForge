@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { Search, Download, ChevronDown, ChevronRight, Copy, AlertCircle } from "lucide-react";
+import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
 
 export interface NucleiFindingRecord {
   template_id?: string;
@@ -337,6 +338,18 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
                 const uniqueId = `${f.template_id || f.template || "unknown"}-${f.matched_url || f.endpoint || ""}-${idx}`;
                 const isExpanded = expandedId === uniqueId;
 
+                const exactMatch = Boolean(
+                  search.trim() &&
+                  ((f.host && f.host.toLowerCase() === search.trim().toLowerCase()) ||
+                   (f.template_id && f.template_id.toLowerCase() === search.trim().toLowerCase()) ||
+                   (f.template && f.template.toLowerCase() === search.trim().toLowerCase()) ||
+                   (f.matched_url && f.matched_url.toLowerCase() === search.trim().toLowerCase()) ||
+                   (f.endpoint && f.endpoint.toLowerCase() === search.trim().toLowerCase()) ||
+                   (f.cve && f.cve.toLowerCase() === search.trim().toLowerCase()) ||
+                   (f.severity && f.severity.toLowerCase() === search.trim().toLowerCase()) ||
+                   (f.tags && f.tags.some((t: string) => t.toLowerCase() === search.trim().toLowerCase())))
+                );
+
                 return (
                   <React.Fragment key={uniqueId}>
                     <tr
@@ -358,11 +371,17 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
                       </td>
                       <td className="p-4">
                         <span className={`px-2 py-0.5 border rounded text-[9px] uppercase tracking-wide font-bold ${getSeverityClass(f.severity)}`}>
-                          {f.severity}
+                          <HighlightText text={f.severity} highlight={search} />
                         </span>
                       </td>
                       <td className="p-4 font-bold text-slate-200">
-                        {f.template_id || f.template || (f.source || f.metadata?.source || "unknown").toUpperCase()}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <HighlightText
+                            text={f.template_id || f.template || (f.source || f.metadata?.source || "unknown").toUpperCase()}
+                            highlight={search}
+                          />
+                          {exactMatch && <ExactMatchBadge />}
+                        </div>
                       </td>
                       <td className="p-4 max-w-xs truncate text-slate-300" title={f.matched_url || f.endpoint || ""}>
                         {f.matched_url || f.endpoint ? (
@@ -372,7 +391,7 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
                             rel="noopener noreferrer"
                             className="text-cyber-accent hover:underline"
                           >
-                            {f.matched_url || f.endpoint}
+                            <HighlightText text={f.matched_url || f.endpoint} highlight={search} />
                           </a>
                         ) : ""}
                       </td>
@@ -384,17 +403,22 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
                             rel="noopener noreferrer"
                             className="hover:text-cyber-accent hover:underline"
                           >
-                            {f.host}
+                            <HighlightText text={f.host} highlight={search} />
                           </a>
                         ) : "-"}
                       </td>
                       <td className="p-4 max-w-xs truncate text-slate-400">
-                        {(f.tags || []).join(", ")}
+                        {(f.tags || []).map((t: string, tIdx: number) => (
+                          <React.Fragment key={tIdx}>
+                            {tIdx > 0 && ", "}
+                            <HighlightText text={t} highlight={search} />
+                          </React.Fragment>
+                        ))}
                       </td>
                       <td className="p-4">
                         {f.cve ? (
                           <span className="px-1.5 py-0.25 bg-red-950/40 border border-red-900/50 text-red-300 rounded text-[9px]">
-                            {f.cve}
+                            <HighlightText text={f.cve} highlight={search} />
                           </span>
                         ) : (
                           <span className="text-slate-600">-</span>
