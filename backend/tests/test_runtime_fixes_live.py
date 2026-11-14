@@ -489,9 +489,15 @@ async def test_item5_scan_profiles_recon_skips_nuclei_dalfox_openredirex_on_real
                 return True
             return False
 
+        async def fake_empty_passive(*args, **kwargs):
+            if False:
+                yield {}
+
         with patch("app.core.tools.is_tool_available", side_effect=mock_tool_available), \
              patch("app.providers.unified_discovery_provider.is_tool_available", side_effect=mock_tool_available), \
              patch("app.providers.subfinder_provider.SubfinderProvider.discover", side_effect=fake_subfinder), \
+             patch("app.providers.crtsh_provider.CrtshProvider.discover", side_effect=fake_empty_passive), \
+             patch("app.providers.certspotter_provider.CertspotterProvider.discover", side_effect=fake_empty_passive), \
              patch("app.providers.dnsx_provider.DnsxProvider.discover", side_effect=fake_dnsx), \
              patch("app.providers.httpx_provider.HttpxProvider.discover", side_effect=fake_httpx), \
              patch("app.providers.katana_provider.KatanaProvider.discover", side_effect=fake_katana), \

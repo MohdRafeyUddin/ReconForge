@@ -92,6 +92,8 @@ class ProjectBase(BaseModel):
     per_host_url_cap: Optional[int] = None
     scan_profile: Optional[str] = "recon"
     assume_tools_installed: Optional[bool] = True
+    enable_root_expansion: Optional[bool] = False
+    max_permutations: Optional[int] = 50000
 
 class ProjectCreate(ProjectBase):
     pass
@@ -113,6 +115,8 @@ class ProjectUpdate(BaseModel):
     per_host_url_cap: Optional[int] = None
     scan_profile: Optional[str] = None
     assume_tools_installed: Optional[bool] = None
+    enable_root_expansion: Optional[bool] = None
+    max_permutations: Optional[int] = None
 
 class ProjectResponse(ProjectBase):
     id: str

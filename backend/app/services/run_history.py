@@ -251,6 +251,8 @@ async def record_run_history(
             "api_specs": run_asset_counts.get("api_spec", 0),
             "graphql_endpoints": run_asset_counts.get("graphql_endpoint", 0),
             "js_files": run_asset_counts.get("js_file", 0),
+            "suggested_roots": run_asset_counts.get("suggested_root", 0),
+            "takeovers": run_asset_counts.get("takeover", 0),
             "rejected_urls": job.get("rejected_urls_count", 0),
             "urls_by_source": {
                 "katana": run_asset_counts.get("katana_url", 0),

@@ -1,5 +1,7 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Body
+from typing import Dict, Any
 from app.core.tools import get_all_tools_status_with_metadata
+from app.core.provider_keys import get_masked_keys_status, save_provider_keys
 
 router = APIRouter(prefix="/system", tags=["System"])
 
@@ -15,6 +17,19 @@ async def get_system_tools(
     call with 10s timeout and returns partial/cached data with warning on timeout.
     """
     return get_all_tools_status_with_metadata(force_refresh=refresh, timeout_seconds=10)
+
+
+@router.get("/provider-keys")
+async def get_provider_keys():
+    """Returns safe masked configuration status for passive API keys."""
+    return get_masked_keys_status()
+
+
+@router.post("/provider-keys")
+async def update_provider_keys(keys_data: Dict[str, Any] = Body(...)):
+    """Saves provider keys to local config and synchronizes Subfinder config in WSL."""
+    success = save_provider_keys(keys_data)
+    return {"success": success, "status": get_masked_keys_status()}
 
 
 @router.get("/status")

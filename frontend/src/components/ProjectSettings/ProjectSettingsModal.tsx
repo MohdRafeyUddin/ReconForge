@@ -15,6 +15,8 @@ import {
   Save,
   Terminal,
   Layers,
+  Globe,
+  Key,
 } from "lucide-react";
 import { apiCall } from "../../services/api";
 
@@ -70,6 +72,8 @@ export interface ProjectSettingsModalProps {
     response_body_max_kb?: number;
     scan_profile?: string;
     assume_tools_installed?: boolean;
+    enable_root_expansion?: boolean;
+    max_permutations?: number;
   };
   onProjectUpdated: (updatedProject: any) => void;
 }
@@ -91,7 +95,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   project,
   onProjectUpdated,
 }) => {
-  const [activeTab, setActiveTab] = useState<"scope" | "rate_limits" | "clustering" | "schedule" | "alerts" | "tools">("scope");
+  const [activeTab, setActiveTab] = useState<"scope" | "rate_limits" | "clustering" | "schedule" | "alerts" | "tools" | "suggested_roots" | "api_keys">("scope");
 
   // Scope state
   const [inScopeText, setInScopeText] = useState("");
@@ -139,10 +143,30 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   const [wslWarning, setWslWarning] = useState<string | null>(null);
   const [assumeToolsInstalled, setAssumeToolsInstalled] = useState<boolean>(true);
 
-  // Clustering & Probing state (Phase 3)
+  // Clustering & Probing state (Phase 3 & Phase 7)
   const [scanAllClusterMembers, setScanAllClusterMembers] = useState(false);
   const [portRange, setPortRange] = useState("1-10000");
   const [responseBodyMaxKb, setResponseBodyMaxKb] = useState(500);
+  const [enableRootExpansion, setEnableRootExpansion] = useState(false);
+  const [maxPermutations, setMaxPermutations] = useState<number>(50000);
+
+  // Suggested roots state (Phase 7)
+  const [suggestedRoots, setSuggestedRoots] = useState<any[]>([]);
+  const [loadingSuggestedRoots, setLoadingSuggestedRoots] = useState(false);
+  const [actionInProgress, setActionInProgress] = useState<string | null>(null);
+
+  // Provider API Keys state (Phase 7)
+  const [providerKeysStatus, setProviderKeysStatus] = useState<any>(null);
+  const [keyInputs, setKeyInputs] = useState<Record<string, string>>({
+    securitytrails: "",
+    censys: "",
+    shodan: "",
+    virustotal: "",
+    github: "",
+    chaos: "",
+  });
+  const [savingKeys, setSavingKeys] = useState(false);
+  const [keysSavedSuccess, setKeysSavedSuccess] = useState(false);
 
   // Form saving state
   const [saving, setSaving] = useState(false);
@@ -207,6 +231,8 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
       setResponseBodyMaxKb(project.response_body_max_kb || 500);
       setScanProfile(project.scan_profile === "recon_validation" ? "recon_validation" : "recon");
       setAssumeToolsInstalled(project.assume_tools_installed !== false);
+      setEnableRootExpansion(Boolean(project.enable_root_expansion));
+      setMaxPermutations(project.max_permutations || 50000);
     }
   }, [project, isOpen]);
 
@@ -237,11 +263,103 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
     }
   };
 
+  const fetchSuggestedRoots = async () => {
+    if (!project?.id) return;
+    setLoadingSuggestedRoots(true);
+    try {
+      const res = await apiCall(`/projects/${project.id}/suggested-roots`);
+      setSuggestedRoots(res || []);
+    } catch (e) {
+      console.error("Failed to load suggested roots", e);
+    } finally {
+      setLoadingSuggestedRoots(false);
+    }
+  };
+
+  const fetchProviderKeys = async () => {
+    try {
+      const res = await apiCall(`/system/provider-keys`);
+      setProviderKeysStatus(res);
+    } catch (e) {
+      console.error("Failed to load provider keys", e);
+    }
+  };
+
   useEffect(() => {
     if (isOpen && (tools.length === 0 || activeTab === "tools")) {
       fetchTools(false);
     }
+    if (isOpen && activeTab === "suggested_roots") {
+      fetchSuggestedRoots();
+    }
+    if (isOpen && activeTab === "api_keys") {
+      fetchProviderKeys();
+    }
   }, [isOpen, activeTab]);
+
+  const handleApproveRoot = async (domain: string) => {
+    setActionInProgress(domain);
+    try {
+      await apiCall(`/projects/${project.id}/suggested-roots/${domain}/approve`, {
+        method: "POST",
+      });
+      await fetchSuggestedRoots();
+      setInScopeText((prev) => {
+        const lines = prev.split("\n").map((l) => l.trim()).filter(Boolean);
+        if (!lines.includes(domain)) {
+          return [...lines, domain].join("\n");
+        }
+        return prev;
+      });
+    } catch (err: any) {
+      setErrorMsg(err.message || `Failed to approve ${domain}`);
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
+  const handleRejectRoot = async (domain: string) => {
+    setActionInProgress(domain);
+    try {
+      await apiCall(`/projects/${project.id}/suggested-roots/${domain}/reject`, {
+        method: "POST",
+      });
+      await fetchSuggestedRoots();
+    } catch (err: any) {
+      setErrorMsg(err.message || `Failed to reject ${domain}`);
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
+  const handleSaveKeys = async () => {
+    setSavingKeys(true);
+    try {
+      const payload: Record<string, string> = {};
+      Object.entries(keyInputs).forEach(([k, v]) => {
+        if (v && v.trim()) payload[k] = v.trim();
+      });
+      const res = await apiCall(`/system/provider-keys`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setProviderKeysStatus(res.status || res);
+      setKeysSavedSuccess(true);
+      setTimeout(() => setKeysSavedSuccess(false), 2500);
+      setKeyInputs({
+        securitytrails: "",
+        censys: "",
+        shodan: "",
+        virustotal: "",
+        github: "",
+        chaos: "",
+      });
+    } catch (err: any) {
+      setErrorMsg(err.message || "Failed to save provider keys");
+    } finally {
+      setSavingKeys(false);
+    }
+  };
 
   const handleCopyInstall = (cmd: string, toolName: string) => {
     navigator.clipboard.writeText(cmd);
@@ -315,6 +433,8 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
         response_body_max_kb: Number(responseBodyMaxKb) || 500,
         scan_profile: scanProfile,
         assume_tools_installed: assumeToolsInstalled,
+        enable_root_expansion: enableRootExpansion,
+        max_permutations: Number(maxPermutations) || 50000,
       };
 
       const updated = await apiCall(`/projects/${project.id}`, {
@@ -438,6 +558,35 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
             {alertsEnabled && (
               <span className="w-2 h-2 rounded-full bg-cyber-accent" />
             )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab("suggested_roots")}
+            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-bold font-mono uppercase tracking-wider border-b-2 transition-all cursor-pointer ${
+              activeTab === "suggested_roots"
+                ? "border-cyber-accent text-cyber-accent bg-cyber-accent/5"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <Globe className="w-3.5 h-3.5" />
+            <span>Suggested Roots</span>
+            {suggestedRoots.filter(r => r.status === "pending" || !r.status).length > 0 && (
+              <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-cyber-accent/20 text-cyber-accent border border-cyber-accent/30 font-bold">
+                {suggestedRoots.filter(r => r.status === "pending" || !r.status).length}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab("api_keys")}
+            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-bold font-mono uppercase tracking-wider border-b-2 transition-all cursor-pointer ${
+              activeTab === "api_keys"
+                ? "border-cyber-accent text-cyber-accent bg-cyber-accent/5"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <Key className="w-3.5 h-3.5" />
+            <span>API Keys</span>
           </button>
 
           <button
@@ -778,6 +927,45 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
                       Maximum HTTP response body size stored to disk per host (default: 500 KB, max 2048 KB). Stored per-project with automatic FIFO retention limits.
                     </p>
                   </div>
+
+                  <div className="pt-4 border-t border-dark-border/60">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h4 className="text-xs font-mono text-slate-200 font-bold uppercase tracking-wider">
+                          Enable Root-Domain Expansion (Opt-in)
+                        </h4>
+                        <p className="text-[11px] text-slate-400 font-mono mt-1 max-w-xl">
+                          Discovers related root domains, ASNs, and CIDR blocks using asnmap, dnsx -ptr, and amass intel. Suggestions will appear in the Suggested Roots tab and are NEVER scanned automatically without manual approval.
+                        </p>
+                      </div>
+                      <label className="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={enableRootExpansion}
+                          onChange={(e) => setEnableRootExpansion(e.target.checked)}
+                          className="sr-only peer"
+                        />
+                        <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyber-accent"></div>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-mono text-slate-300 font-bold uppercase tracking-wider mb-1">
+                      Deep Mode DNS Permutations Cap (alterx)
+                    </label>
+                    <input
+                      type="number"
+                      value={maxPermutations}
+                      onChange={(e) => setMaxPermutations(Number(e.target.value) || 50000)}
+                      min={1000}
+                      max={500000}
+                      className="w-full bg-dark-input border border-dark-border rounded p-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-cyber-accent"
+                    />
+                    <p className="text-[10px] text-slate-500 font-mono mt-1">
+                      Maximum permutation candidates generated by alterx from passive subdomains before resolution (default: 50,000).
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1009,6 +1197,198 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
                     </div>
                   </div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: SUGGESTED ROOTS (PHASE 7) */}
+          {activeTab === "suggested_roots" && (
+            <div className="space-y-4">
+              <div className="p-4 bg-dark-bg/60 border border-dark-border rounded-lg flex items-start justify-between gap-4">
+                <div>
+                  <h4 className="text-xs font-mono text-slate-200 font-bold uppercase tracking-wider flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-cyber-accent" />
+                    <span>Opt-In Suggested Root Domains</span>
+                  </h4>
+                  <p className="text-[11px] text-slate-400 font-mono mt-1 max-w-xl">
+                    Discovered via ASNMap, reverse DNS PTR lookups, and Amass Intel. Suggestions are strictly ideas for human review and are <strong className="text-amber-400">NEVER</strong> scanned automatically. Approving a domain adds it to your authorized seeds and in-scope target rules for future scans.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={fetchSuggestedRoots}
+                  disabled={loadingSuggestedRoots}
+                  className="px-3 py-1.5 rounded border border-dark-border text-xs font-mono text-slate-300 hover:text-white bg-dark-input hover:bg-dark-hover flex items-center gap-1.5 cursor-pointer shrink-0"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingSuggestedRoots ? "animate-spin text-cyber-accent" : ""}`} />
+                  <span>Refresh</span>
+                </button>
+              </div>
+
+              <div className="overflow-x-auto border border-dark-border rounded-lg">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-dark-bg/80 border-b border-dark-border text-slate-400 font-mono uppercase tracking-wider">
+                      <th className="p-3">Suggested Domain</th>
+                      <th className="p-3">Source Tool</th>
+                      <th className="p-3">Evidence</th>
+                      <th className="p-3">Status</th>
+                      <th className="p-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {suggestedRoots.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="p-8 text-center text-slate-500 font-mono uppercase tracking-widest">
+                          {loadingSuggestedRoots
+                            ? "Loading suggested roots..."
+                            : "No root domain suggestions found. Enable 'Root-Domain Expansion' in Clustering settings and run a scan."}
+                        </td>
+                      </tr>
+                    ) : (
+                      suggestedRoots.map((s, idx) => {
+                        const domain = s.domain || s.value;
+                        const status = s.status || "pending";
+                        const inAction = actionInProgress === domain;
+
+                        return (
+                          <tr key={`${domain}-${idx}`} className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors">
+                            <td className="p-3 font-mono font-bold text-slate-200">
+                              <a
+                                href={`https://${domain}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="hover:text-cyber-accent hover:underline flex items-center gap-1"
+                              >
+                                {domain}
+                              </a>
+                            </td>
+                            <td className="p-3 font-mono text-slate-400">
+                              <span className="px-2 py-0.5 rounded bg-dark-bg border border-dark-border text-[10px] text-cyber-accent">
+                                {s.source || "intel"}
+                              </span>
+                            </td>
+                            <td className="p-3 text-[11px] text-slate-400 font-mono max-w-xs truncate" title={s.evidence || ""}>
+                              {s.evidence || "—"}
+                            </td>
+                            <td className="p-3 font-mono">
+                              {status === "approved" ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] uppercase font-bold bg-emerald-500/20 border border-emerald-500/40 text-emerald-400">
+                                  Approved (In Scope)
+                                </span>
+                              ) : status === "rejected" ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] uppercase font-mono bg-slate-700/40 border border-slate-600 text-slate-400">
+                                  Rejected
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] uppercase font-mono bg-amber-500/20 border border-amber-500/40 text-amber-300">
+                                  Pending Review
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-3 text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                {status !== "approved" && (
+                                  <button
+                                    type="button"
+                                    disabled={inAction}
+                                    onClick={() => handleApproveRoot(domain)}
+                                    className="px-2.5 py-1 rounded bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 font-mono text-[11px] font-bold cursor-pointer transition-colors"
+                                  >
+                                    {inAction ? "..." : "Approve"}
+                                  </button>
+                                )}
+                                {status !== "rejected" && (
+                                  <button
+                                    type="button"
+                                    disabled={inAction}
+                                    onClick={() => handleRejectRoot(domain)}
+                                    className="px-2.5 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 font-mono text-[11px] cursor-pointer transition-colors"
+                                  >
+                                    {inAction ? "..." : "Reject"}
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: PROVIDER API KEYS (PHASE 7) */}
+          {activeTab === "api_keys" && (
+            <div className="space-y-4">
+              <div className="p-4 bg-dark-bg/60 border border-dark-border rounded-lg">
+                <h4 className="text-xs font-mono text-slate-200 font-bold uppercase tracking-wider flex items-center gap-2">
+                  <Key className="w-4 h-4 text-cyber-accent" />
+                  <span>Subfinder Passive Provider API Keys</span>
+                </h4>
+                <p className="text-[11px] text-slate-400 font-mono mt-1">
+                  API keys are stored securely in <code className="text-slate-300">backend/config/provider_keys.json</code> (gitignored) and automatically synchronized to <code className="text-slate-300">~/.config/subfinder/provider-config.yaml</code> inside WSL. Values are never logged or returned unmasked.
+                </p>
+                {keysSavedSuccess && (
+                  <div className="mt-3 p-2 bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-mono rounded flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Provider API keys saved and synchronized to WSL Subfinder config successfully!</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {[
+                  { id: "securitytrails", name: "SecurityTrails", placeholder: "Enter SecurityTrails API Key" },
+                  { id: "censys", name: "Censys", placeholder: "Enter Censys API Key" },
+                  { id: "shodan", name: "Shodan", placeholder: "Enter Shodan API Key" },
+                  { id: "virustotal", name: "VirusTotal", placeholder: "Enter VirusTotal API Key" },
+                  { id: "github", name: "GitHub PAT", placeholder: "Enter GitHub Personal Access Token" },
+                  { id: "chaos", name: "Chaos (ProjectDiscovery)", placeholder: "Enter ProjectDiscovery Chaos Key" },
+                ].map((p) => {
+                  const currentMasked = providerKeysStatus?.keys?.[p.id];
+                  const hasKey = Boolean(currentMasked && currentMasked !== "");
+
+                  return (
+                    <div key={p.id} className="bg-dark-bg/60 border border-dark-border rounded-lg p-3.5 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-mono text-slate-200 font-bold uppercase">
+                          {p.name}
+                        </label>
+                        {hasKey ? (
+                          <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-emerald-500/20 border border-emerald-500/40 text-emerald-400">
+                            Configured ({currentMasked})
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-slate-800 border border-slate-700 text-slate-500">
+                            Not Set
+                          </span>
+                        )}
+                      </div>
+                      <input
+                        type="password"
+                        placeholder={hasKey ? "Leave blank to keep existing key" : p.placeholder}
+                        value={keyInputs[p.id] || ""}
+                        onChange={(e) => setKeyInputs((prev) => ({ ...prev, [p.id]: e.target.value }))}
+                        className="w-full bg-dark-input border border-dark-border rounded p-2 text-xs font-mono text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyber-accent"
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  disabled={savingKeys}
+                  onClick={handleSaveKeys}
+                  className="flex items-center space-x-1.5 px-4 py-2 bg-cyber-primary hover:bg-cyber-accent text-white rounded text-xs font-mono font-bold uppercase tracking-wider cursor-pointer transition-colors"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{savingKeys ? "Saving & Syncing..." : "Save & Sync Provider Keys"}</span>
+                </button>
               </div>
             </div>
           )}

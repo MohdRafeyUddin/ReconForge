@@ -105,6 +105,8 @@ async def create_project(project_in: ProjectCreate):
         "port_range": project_in.port_range or "1-10000",
         "response_body_max_kb": project_in.response_body_max_kb or 500,
         "scan_profile": project_in.scan_profile or "recon",
+        "enable_root_expansion": bool(project_in.enable_root_expansion),
+        "max_permutations": project_in.max_permutations or 50000,
         "owner_id": "local",
         "created_at": datetime.utcnow()
     }
@@ -277,3 +279,78 @@ async def force_recalculate_risk_scores(project_id: str):
     from app.services.risk_scoring import recalculate_all_scores
     scores = await recalculate_all_scores(project_id)
     return serialize_doc(scores)
+
+
+@router.get("/{project_id}/suggested-roots")
+async def get_suggested_roots(project_id: str):
+    """Returns all root domain suggestions discovered by ASNMap/DNSx/Amass."""
+    db = get_database()
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID format")
+
+    cursor = db.assets.find({"project_id": project_id, "type": "suggested_root"}).sort([("created_at", -1)])
+    items = await cursor.to_list(length=500)
+    return serialize_doc(items)
+
+
+@router.post("/{project_id}/suggested-roots/{domain}/approve")
+async def approve_suggested_root(project_id: str, domain: str):
+    """
+    Approves a suggested root domain.
+    Explicitly adds the domain to project seeds and in_scope list.
+    Marks suggestion as approved. Never scans automatically.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID format")
+
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    clean_dom = domain.strip().lower()
+    seeds = list(project.get("seed_domains") or [])
+    if clean_dom not in seeds:
+        seeds.append(clean_dom)
+
+    scope = dict(project.get("scope") or {"in_scope": [], "out_of_scope": []})
+    in_scope = list(scope.get("in_scope") or [])
+    if clean_dom not in in_scope:
+        in_scope.append(clean_dom)
+    scope["in_scope"] = in_scope
+
+    await db.projects.update_one(
+        {"_id": ObjectId(project_id)},
+        {"$set": {"seed_domains": seeds, "scope": scope, "updated_at": datetime.utcnow()}}
+    )
+
+    await db.assets.update_many(
+        {"project_id": project_id, "type": "suggested_root", "domain": clean_dom},
+        {"$set": {"status": "approved", "updated_at": datetime.utcnow()}}
+    )
+
+    return {
+        "status": "approved",
+        "domain": clean_dom,
+        "message": f"Domain {clean_dom} approved and added to scope and seeds.",
+    }
+
+
+@router.post("/{project_id}/suggested-roots/{domain}/reject")
+async def reject_suggested_root(project_id: str, domain: str):
+    """Rejects a suggested root domain."""
+    db = get_database()
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID format")
+
+    clean_dom = domain.strip().lower()
+    await db.assets.update_many(
+        {"project_id": project_id, "type": "suggested_root", "domain": clean_dom},
+        {"$set": {"status": "rejected", "updated_at": datetime.utcnow()}}
+    )
+
+    return {
+        "status": "rejected",
+        "domain": clean_dom,
+    }
+

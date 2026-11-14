@@ -13,11 +13,15 @@ logger = logging.getLogger("reconforge.core.tools")
 DEFAULT_TOOL_OVERRIDES: Dict[str, str] = {
     "amass": "/snap/bin/amass",
     "linkfinder": "/home/kali/tools/LinkFinder/linkfinder.py",
+    "dnsreaper": "/home/kali/tools/dnsReaper/main.py",
+    "massdns": "/usr/local/bin/massdns",
 }
 
 SPECIAL_SCRIPT_CANDIDATES: Dict[str, List[str]] = {
     "linkfinder": ["~/tools/LinkFinder/linkfinder.py", "~/LinkFinder/linkfinder.py"],
     "openredirex": ["~/tools/OpenRedireX/openredirex.py", "~/OpenRedireX/openredirex.py"],
+    "dnsreaper": ["~/tools/dnsReaper/main.py", "~/dnsReaper/main.py", "~/tools/dnsReaper/dnsReaper.py"],
+    "massdns": ["/usr/local/bin/massdns", "/usr/bin/massdns", "~/tools/massdns/bin/massdns"],
 }
 
 # Central Tool Registry
@@ -222,6 +226,54 @@ RECON_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Finds URLs from Wayback Machine, Common Crawl, AlienVault, URLScan, etc.",
         "install_hint": "pipx install waymore  # or pip install git+https://github.com/xnl-h4ck3r/waymore.git",
     },
+    "puredns": {
+        "name": "PureDNS",
+        "binary": "puredns",
+        "category": "DNS Brute Force",
+        "required": False,
+        "description": "Fast domain resolver and active subdomain bruteforcer with wildcard detection powered by massdns.",
+        "install_hint": "go install github.com/d3mondev/puredns/v2@latest",
+    },
+    "massdns": {
+        "name": "MassDNS",
+        "binary": "massdns",
+        "category": "DNS Resolution",
+        "required": False,
+        "description": "High-performance stub DNS resolver required by PureDNS.",
+        "install_hint": "sudo apt update && sudo apt install -y massdns || (git clone https://github.com/blechschmidt/massdns.git /tmp/massdns && cd /tmp/massdns && make && sudo cp bin/massdns /usr/local/bin/)",
+    },
+    "shuffledns": {
+        "name": "ShuffleDNS",
+        "binary": "shuffledns",
+        "category": "DNS Brute Force",
+        "required": False,
+        "description": "MassDNS wrapper written in Go to enumerate and resolve subdomains.",
+        "install_hint": "go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest",
+    },
+    "alterx": {
+        "name": "AlterX",
+        "binary": "alterx",
+        "category": "DNS Permutations",
+        "required": False,
+        "description": "Fast and customizable subdomain wordlist generator using DSL rules.",
+        "install_hint": "go install github.com/projectdiscovery/alterx/cmd/alterx@latest",
+    },
+    "asnmap": {
+        "name": "ASNMap",
+        "binary": "asnmap",
+        "category": "Root Expansion",
+        "required": False,
+        "description": "Quickly gather ASN and network CIDR ranges for mapping organizational perimeter.",
+        "install_hint": "go install github.com/projectdiscovery/asnmap/cmd/asnmap@latest",
+    },
+    "dnsreaper": {
+        "name": "dnsReaper",
+        "binary": "dnsreaper",
+        "category": "Subdomain Takeover",
+        "required": False,
+        "description": "Subdomain takeover tool with accurate DNS scanning signatures.",
+        "install_hint": "git clone https://github.com/punk-security/dnsReaper.git ~/tools/dnsReaper && pip install -r ~/tools/dnsReaper/requirements.txt",
+    },
 }
 
 # Allowlist definitions: tool names come strictly from registry allowlist
@@ -251,7 +303,9 @@ full_path = ':'.join(extra + [os.environ.get('PATH', '')])
 
 special = {
     'linkfinder': [f'{home}/tools/LinkFinder/linkfinder.py', f'{home}/LinkFinder/linkfinder.py'],
-    'openredirex': [f'{home}/tools/OpenRedireX/openredirex.py', f'{home}/OpenRedireX/openredirex.py']
+    'openredirex': [f'{home}/tools/OpenRedireX/openredirex.py', f'{home}/OpenRedireX/openredirex.py'],
+    'dnsreaper': [f'{home}/tools/dnsReaper/main.py', f'{home}/dnsReaper/main.py', f'{home}/tools/dnsReaper/dnsReaper.py'],
+    'massdns': ['/usr/local/bin/massdns', '/usr/bin/massdns', f'{home}/tools/massdns/bin/massdns']
 }
 
 res = {}
@@ -844,4 +898,8 @@ def is_tool_available(tool_key: str, assume_installed: bool = False) -> bool:
         return bool(res.get("installed"))
     except ValueError:
         return False
+
+
+# Alias for backward and provider compatibility
+get_tool_path = resolve_tool_absolute_path
 

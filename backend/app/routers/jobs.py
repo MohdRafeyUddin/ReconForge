@@ -243,6 +243,12 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                     executed_phases.add("api_surface")
                 if ("arjun" in msg_l or "x8" in msg_l or "parameter discovery" in msg_l) and "tool_missing: arjun" not in msg_l and "skipping parameter discovery" not in msg_l:
                     executed_phases.add("param_discovery")
+                if ("puredns" in msg_l or "shuffledns" in msg_l or "dns brute force" in msg_l or "alterx" in msg_l) and "tool_missing: puredns" not in msg_l and "stage_skipped" not in msg_l and "deep mode only" not in msg_l:
+                    executed_phases.add("dns_bruteforce")
+                if "root expansion" in msg_l or "asnmap" in msg_l:
+                    executed_phases.add("root_expansion")
+                if "takeover" in msg_l or "subzy" in msg_l:
+                    executed_phases.add("takeover_crosscheck")
 
                 await db.jobs.update_one(
                     {"_id": ObjectId(job_id)},
@@ -307,6 +313,10 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                     executed_phases.add("api_surface")
                 elif asset_type == "param":
                     executed_phases.add("param_discovery")
+                elif asset_type == "suggested_root":
+                    executed_phases.add("root_expansion")
+                elif asset_type == "takeover":
+                    executed_phases.add("takeover_crosscheck")
                 asset_data["value"] = asset_val
                 asset_data["scan_id"] = job_id
                 now_dt = datetime.utcnow()
@@ -839,6 +849,12 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                         executed_phases.discard("vulnerability_scan")
                     elif any(p in tool for p in ("subfinder", "assetfinder", "chaos", "amass", "subdomain")):
                         executed_phases.discard("subdomain_discovery")
+                    elif any(p in tool for p in ("puredns", "shuffledns", "alterx", "dns_bruteforce")):
+                        executed_phases.discard("dns_bruteforce")
+                    elif any(p in tool for p in ("asnmap", "root_expansion")):
+                        executed_phases.discard("root_expansion")
+                    elif any(p in tool for p in ("subzy", "dnsreaper", "takeover", "takeover_crosscheck")):
+                        executed_phases.discard("takeover_crosscheck")
                 await manager.broadcast(job_id, event)
                 if event_type == "stage_error":
                     err_msg = event.get("message") or f"[-] Stage error in {event.get('tool') or event.get('stage')}: {event.get('reason') or event.get('error')}"

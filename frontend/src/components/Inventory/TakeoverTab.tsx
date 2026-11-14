@@ -5,8 +5,11 @@ import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
 export interface TakeoverRecord {
   subdomain: string;
   provider: string;
-  status: "Vulnerable" | "Not Vulnerable" | "Unknown";
+  status: "Vulnerable" | "Not Vulnerable" | "Unknown" | "Unconfirmed";
   confidence?: string;
+  tools_agreed?: string[];
+  evidence?: string;
+  cname?: string;
   last_checked?: number;
 }
 
@@ -58,6 +61,7 @@ export const TakeoverTab: React.FC<TakeoverTabProps> = ({ records, projectName =
 
   const statusClass = (status: string) => {
     if (status === "Vulnerable") return "bg-cyber-danger/20 border border-cyber-danger/50 text-cyber-danger font-bold animate-pulse";
+    if (status === "Unconfirmed") return "bg-amber-500/20 border border-amber-500/50 text-amber-300 font-semibold";
     if (status === "Not Vulnerable") return "bg-cyber-success/10 border border-cyber-success/30 text-cyber-success";
     return "bg-cyber-warning/10 border border-cyber-warning/30 text-cyber-warning";
   };
@@ -114,7 +118,7 @@ export const TakeoverTab: React.FC<TakeoverTabProps> = ({ records, projectName =
               <th className="p-4">Subdomain</th>
               <th className="p-4">Provider / Service</th>
               <th className="p-4">Status</th>
-              <th className="p-4">Confidence</th>
+              <th className="p-4">Confidence & Cross-Check</th>
               <th className="p-4">Last Checked</th>
             </tr>
           </thead>
@@ -148,15 +152,46 @@ export const TakeoverTab: React.FC<TakeoverTabProps> = ({ records, projectName =
                     </div>
                   </td>
                   <td className="p-4 text-slate-400 font-mono">
-                    <HighlightText text={r.provider || "—"} highlight={search} />
+                    <div>
+                      <HighlightText text={r.provider || "—"} highlight={search} />
+                      {r.cname && (
+                        <div className="text-[10px] text-slate-500 font-mono mt-0.5 truncate max-w-xs" title={r.cname}>
+                          CNAME: {r.cname}
+                        </div>
+                      )}
+                    </div>
                   </td>
                   <td className="p-4">
                     <span className={`px-2 py-0.5 rounded-full text-[10px] uppercase ${statusClass(r.status)}`}>
                       <HighlightText text={r.status} highlight={search} />
                     </span>
                   </td>
-                  <td className="p-4 text-slate-500 font-mono">
-                    <HighlightText text={r.confidence || "—"} highlight={search} />
+                  <td className="p-4 font-mono">
+                    <div className="flex flex-col gap-1">
+                      {r.confidence?.toLowerCase() === "confirmed" ? (
+                        <span className="inline-flex items-center w-fit px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-emerald-500/20 border border-emerald-500/40 text-emerald-400">
+                          CONFIRMED (multi-tool)
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center w-fit px-2 py-0.5 rounded text-[10px] uppercase font-medium bg-amber-500/20 border border-amber-500/30 text-amber-300">
+                          UNCONFIRMED (single-tool)
+                        </span>
+                      )}
+                      {r.tools_agreed && r.tools_agreed.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-0.5">
+                          {r.tools_agreed.map((tool) => (
+                            <span key={tool} className="px-1.5 py-0.2 rounded text-[9px] bg-dark-bg border border-dark-border text-slate-300 font-mono">
+                              {tool}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {r.evidence && (
+                        <span className="text-[9px] text-slate-500 truncate max-w-xs" title={r.evidence}>
+                          {r.evidence}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="p-4 text-slate-500 font-mono">{r.last_checked ? new Date(r.last_checked * 1000).toLocaleString() : "—"}</td>
                 </tr>

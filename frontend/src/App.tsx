@@ -691,15 +691,25 @@ const MainDashboard: React.FC = () => {
             });
           }
         }
-        if (asset.metadata?.subzy) {
-          const subzy = asset.metadata.subzy;
-          if (!takeovers.some((r) => r.subdomain === asset.domain)) {
-            takeovers.push({
-              subdomain: asset.domain,
-              provider: subzy.service || "",
-              status: subzy.takeover_status || "Unknown",
-              last_checked: subzy.checked_at,
-            });
+        if (asset.type === "takeover" || asset.metadata?.takeover || asset.metadata?.subzy) {
+          const meta = asset.metadata || {};
+          const subzy = meta.subzy || {};
+          const host = asset.domain || asset.value;
+          const existingIdx = takeovers.findIndex((r) => r.subdomain === host);
+          const tItem: TakeoverRecord = {
+            subdomain: host,
+            provider: asset.service || meta.service || subzy.service || "unknown",
+            status: (asset.status || meta.status || subzy.takeover_status || "Unknown") as any,
+            confidence: asset.confidence || meta.confidence || (subzy.service ? "unconfirmed" : "unconfirmed"),
+            tools_agreed: asset.tools_agreed || meta.tools_agreed || (subzy.service ? ["subzy"] : []),
+            evidence: asset.evidence || meta.evidence || "",
+            cname: asset.cname || meta.cname || "",
+            last_checked: meta.last_checked || subzy.checked_at || Math.floor(Date.now() / 1000),
+          };
+          if (existingIdx >= 0) {
+            takeovers[existingIdx] = { ...takeovers[existingIdx], ...tItem };
+          } else {
+            takeovers.push(tItem);
           }
         }
         if (asset.metadata?.url) {
@@ -742,13 +752,19 @@ const MainDashboard: React.FC = () => {
             resolved_at: dnsx.resolved_at,
           });
         }
-        if (s.metadata?.subzy && !takeovers.some((r) => r.subdomain === s.domain)) {
-          const subzy = s.metadata.subzy;
+        if ((s.type === "takeover" || s.metadata?.takeover || s.metadata?.subzy) && !takeovers.some((r) => r.subdomain === (s.domain || s.value))) {
+          const subzy = s.metadata?.subzy || {};
+          const meta = s.metadata || {};
+          const host = s.domain || s.value;
           takeovers.push({
-            subdomain: s.domain,
-            provider: subzy.service || "",
-            status: subzy.takeover_status || "Unknown",
-            last_checked: subzy.checked_at,
+            subdomain: host,
+            provider: s.service || meta.service || subzy.service || "",
+            status: (s.status || meta.status || subzy.takeover_status || "Unknown") as any,
+            confidence: s.confidence || meta.confidence || "unconfirmed",
+            tools_agreed: s.tools_agreed || meta.tools_agreed || (subzy.service ? ["subzy"] : []),
+            evidence: s.evidence || meta.evidence || "",
+            cname: s.cname || meta.cname || "",
+            last_checked: meta.last_checked || subzy.checked_at,
           });
         }
       });
@@ -1354,15 +1370,27 @@ const MainDashboard: React.FC = () => {
                   }
 
                   let nextTakeoverRecords = prev.takeoverRecords;
-                  if (incomingAsset.metadata?.subzy) {
-                    const subzy = incomingAsset.metadata.subzy;
-                    if (!nextTakeoverRecords.some((r) => r.subdomain === incomingAsset.domain)) {
-                      nextTakeoverRecords = [...nextTakeoverRecords, {
-                        subdomain: incomingAsset.domain,
-                        provider: subzy.service || "",
-                        status: (subzy.takeover_status || "Unknown") as any,
-                        last_checked: subzy.checked_at,
-                      }];
+                  if (incomingAsset.type === "takeover" || incomingAsset.metadata?.takeover || incomingAsset.metadata?.subzy) {
+                    const meta = incomingAsset.metadata || {};
+                    const subzy = meta.subzy || {};
+                    const host = incomingAsset.domain || incomingAsset.value;
+                    const existingIdx = nextTakeoverRecords.findIndex((r) => r.subdomain === host);
+                    const tItem: TakeoverRecord = {
+                      subdomain: host,
+                      provider: incomingAsset.service || meta.service || subzy.service || "unknown",
+                      status: (incomingAsset.status || meta.status || subzy.takeover_status || "Unknown") as any,
+                      confidence: incomingAsset.confidence || meta.confidence || "unconfirmed",
+                      tools_agreed: incomingAsset.tools_agreed || meta.tools_agreed || (subzy.service ? ["subzy"] : []),
+                      evidence: incomingAsset.evidence || meta.evidence || "",
+                      cname: incomingAsset.cname || meta.cname || "",
+                      last_checked: meta.last_checked || subzy.checked_at || Math.floor(Date.now() / 1000),
+                    };
+                    if (existingIdx >= 0) {
+                      const updated = [...nextTakeoverRecords];
+                      updated[existingIdx] = { ...updated[existingIdx], ...tItem };
+                      nextTakeoverRecords = updated;
+                    } else {
+                      nextTakeoverRecords = [...nextTakeoverRecords, tItem];
                     }
                   }
 

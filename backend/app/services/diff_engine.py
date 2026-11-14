@@ -168,6 +168,17 @@ def get_executed_phases(job: Optional[Dict[str, Any]]) -> Set[str]:
     elif "arjun" in logs or "x8" in logs or "parameter discovery" in logs:
         phases.add("param_discovery")
 
+    if "tool_missing: puredns" in logs or "skipping dns brute force" in logs or "dns brute force skipped" in logs:
+        phases.discard("dns_bruteforce")
+    elif "puredns" in logs or "dns brute force" in logs or "alterx" in logs or "dns_bruteforce" in phases:
+        phases.add("dns_bruteforce")
+
+    if "root expansion" in logs or "asnmap" in logs or "root_expansion" in phases:
+        phases.add("root_expansion")
+
+    if "takeover" in logs or "subzy" in logs or "takeover_crosscheck" in phases:
+        phases.add("takeover_crosscheck")
+
     # If no logs provided and no explicit phases, assume standard pipeline executed subdomain_discovery and port_scanning
     if not logs_list and not phases:
         phases.add("subdomain_discovery")

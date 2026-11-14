@@ -79,6 +79,12 @@ from app.providers.ffuf_provider import FfufProvider
 from app.providers.api_surface_provider import ApiSurfaceProvider
 from app.providers.param_discovery_provider import ParamDiscoveryProvider
 from app.providers.waymore_provider import WaymoreProvider
+from app.providers.crtsh_provider import CrtshProvider
+from app.providers.certspotter_provider import CertspotterProvider
+from app.providers.dns_bruteforce_provider import DnsBruteforceProvider
+from app.providers.root_expansion_provider import RootExpansionProvider
+from app.providers.takeover_crosscheck_provider import TakeoverCrossCheckProvider
+from app.core.provider_keys import sync_subfinder_config_to_wsl
 from app.providers.url_merge import merge_urls
 from app.core.scope import filter_scope, is_in_scope, is_ip_in_scope, validate_hostname, is_disallowed_ip, get_root_domain
 from app.core.tools import is_tool_available, get_tool_status
@@ -160,6 +166,8 @@ class UnifiedDiscoveryProvider(BaseProvider):
         (AssetfinderProvider(), "assetfinder"),
         (ChaosProvider(),       "chaos"),
         (AmassProvider(),       "amass"),
+        (CrtshProvider(),       "crtsh"),
+        (CertspotterProvider(), "certspotter"),
     ]
 
     @property
@@ -250,8 +258,13 @@ class UnifiedDiscoveryProvider(BaseProvider):
         else:
             assume_tools_installed = bool(assume_tools_cfg)
 
+        # Synchronize Subfinder API keys to WSL if configured
+        sync_subfinder_config_to_wsl()
+
         def is_available(tool_name: str) -> bool:
             """When assume_tools_installed is true, skips pre-scan availability gate."""
+            if tool_name in ("crtsh", "certspotter"):
+                return True
             if assume_tools_installed:
                 return True
             return is_tool_available(tool_name)
@@ -546,6 +559,8 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 f"    Assetfinder : {provider_counts.get('assetfinder', 0)}\n"
                 f"    Chaos       : {provider_counts.get('chaos', 0)}\n"
                 f"    Amass       : {provider_counts.get('amass', 0)}\n"
+                f"    crt.sh      : {provider_counts.get('crtsh', 0)}\n"
+                f"    CertSpotter : {provider_counts.get('certspotter', 0)}\n"
                 f"    ─────────────────────────\n"
                 f"    Total Unique : {total_unique}"
             )
@@ -562,7 +577,7 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 }
                 return
 
-            # Apply scope filter after Phase 1 merge (before DNSx)
+            # Apply scope filter after Phase 1 merge (before DNS Brute Force / DNSx)
             unique_subdomains, scope_events = check_and_filter_scope(unique_subdomains, "Phase 1: Passive Discovery Merge")
             for ev in scope_events:
                 yield ev
@@ -575,6 +590,38 @@ class UnifiedDiscoveryProvider(BaseProvider):
                     "live_hosts": 0,
                 }
                 return
+
+            # ================================================================
+            # PHASE 1.5: DNS Brute Force + Permutations (Deep mode only)
+            # ================================================================
+            if scan_mode == "fast":
+                yield {
+                    "type": "stage_skipped",
+                    "stage": "DNS Brute Force & Permutations",
+                    "tool": "puredns",
+                    "reason": "deep mode only",
+                }
+                yield {"type": "log", "message": "[!] DNS Brute Force & Permutations skipped (deep mode only)."}
+            else:
+                yield {"type": "log", "message": "========== DNS Brute Force & Permutations (Deep Mode) =========="}
+                dns_bf_provider = DnsBruteforceProvider(
+                    wordlist_path=((project_config or {}).get("wordlists") or {}).get("dns_bruteforce"),
+                    resolvers_path=((project_config or {}).get("wordlists") or {}).get("resolvers"),
+                    max_permutations=int((project_config or {}).get("max_permutations") or 50000),
+                    rate_limit=get_tool_rl("dns_bruteforce"),
+                    scope_config=scope_config,
+                )
+                async for event in dns_bf_provider.run_bruteforce(seed_domains, unique_subdomains):
+                    if event.get("type") == "asset":
+                        cand_d = event.get("data", {}).get("domain")
+                        if cand_d and cand_d not in unique_subdomains:
+                            unique_subdomains.append(cand_d)
+                    yield event
+
+                # Re-apply scope filter after brute force additions
+                unique_subdomains, bf_scope_events = check_and_filter_scope(unique_subdomains, "Phase 1.5: DNS Brute Force Merge")
+                for ev in bf_scope_events:
+                    yield ev
 
             # ================================================================
             # PHASE 2: DNS Resolution (DNSx)
@@ -683,38 +730,40 @@ class UnifiedDiscoveryProvider(BaseProvider):
             }
 
             # ================================================================
-            # PHASE 3: Subdomain Takeover (Subzy)
+            # OPT-IN: Root Domain Expansion (Suggestions only)
             # ================================================================
-
-            if not is_available("subzy"):
-                yield {"type": "log", "message": "[!] Tool 'subzy' is not installed in WSL. Skipping takeover check."}
+            enable_root_exp = bool((project_config or {}).get("enable_root_expansion", False))
+            if enable_root_exp:
+                yield {"type": "log", "message": "========== Root Domain Expansion (Opt-in) =========="}
+                root_exp = RootExpansionProvider(
+                    project_id=str((project_config or {}).get("project_id") or ""),
+                    known_seeds=seed_domains,
+                )
+                async for event in root_exp.expand_roots(seed_domains, []):
+                    yield event
+            else:
                 yield {
                     "type": "stage_skipped",
-                    "stage": "Subdomain Takeover (subzy)",
-                    "tool": "subzy",
-                    "reason": "tool_missing: subzy",
+                    "stage": "Root Expansion",
+                    "reason": "opt_in_disabled",
                 }
-                yield {
-                    "type": "scan_summary",
-                    "provider": "subzy",
-                    "status": "SKIPPED",
-                    "count": 0,
-                }
-                yield {"type": "log", "message": "[!] Provider subzy skipped"}
-            else:
-                subzy_provider = SubzyProvider()
-                async for event in self._run_phase(subzy_provider, unique_resolved, "Subzy Takeover Check"):
-                    if event.get("type") == "scan_summary" and event.get("provider") == "Subzy":
-                        subzy_vulnerable = event.get("vulnerable", 0)
-                    yield event
 
-                yield {
-                    "type": "scan_summary",
-                    "provider": "subzy",
-                    "status": "completed",
-                    "count": subzy_vulnerable
-                }
-                yield {"type": "log", "message": "[√] Provider subzy completed"}
+            # ================================================================
+            # PHASE 3: Subdomain Takeover Cross-Check (Subzy + Nuclei + dnsReaper)
+            # ================================================================
+            takeover_checker = TakeoverCrossCheckProvider(cnames_map=dns_cnames)
+            async for event in takeover_checker.check_takeovers(unique_resolved):
+                if event.get("type") == "scan_summary" and event.get("provider") == "takeover_crosscheck":
+                    subzy_vulnerable = event.get("vulnerable", 0)
+                yield event
+
+            yield {
+                "type": "scan_summary",
+                "provider": "subzy",
+                "status": "completed",
+                "count": subzy_vulnerable,
+            }
+            yield {"type": "log", "message": "[√] Provider subzy completed"}
 
         # ================================================================
         # PHASE 4: Port Scanning (Naabu)

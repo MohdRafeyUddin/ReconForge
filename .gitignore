@@ -31,6 +31,9 @@ storage/
 nuclei-custom-templates/*.yaml
 config/private/*
 api_keys.txt
+backend/config/provider_keys.json
+backend/app/config/provider_keys.json
+provider_keys.json
 
 # Database
 *.db
