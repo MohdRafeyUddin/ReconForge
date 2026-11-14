@@ -1,11 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import { StatCard } from "./StatCard";
 import { DnsxCard } from "./DnsxCard";
 import { SubzyCard } from "./SubzyCard";
 import { UroCard } from "./UroCard";
 import { GfCard } from "./GfCard";
 import type { GfCategoryStats } from "./GfCard";
-import { Globe, Server, Radio, ShieldAlert, Play, Pause, Square, RotateCcw, RefreshCw, FileText, Link, AlertCircle, CheckCircle } from "lucide-react";
+import { Globe, Server, Radio, ShieldAlert, Play, Pause, Square, RotateCcw, RefreshCw, FileText, Link, AlertCircle, CheckCircle, Search, X, ExternalLink } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from "recharts";
 import { apiCall } from "../../services/api";
 
@@ -157,6 +157,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   const [providers, setProviders] = useState<string[]>(FALLBACK_PROVIDERS);
   const [generatingReport, setGeneratingReport] = useState(false);
   const [activeDuration, setActiveDuration] = useState<string | null>(null);
+  const [dashboardSearch, setDashboardSearch] = useState<string>("");
 
   useEffect(() => {
     if (!activeJob || !["running", "pending", "paused"].includes(activeJob.status) || !activeJob.started_at) {
@@ -481,6 +482,78 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     .sort((a, b) => (((b as any).hunt_priority ?? 0) - ((a as any).hunt_priority ?? 0)))
     .slice(0, 5);
 
+  const matchingAssets = useMemo(() => {
+    const q = dashboardSearch.toLowerCase().trim();
+    if (!q) return [];
+    return assets.filter((a) => {
+      const meta = a.metadata || {};
+      const openPorts = a.open_ports || meta.open_ports || [];
+      const tech = meta.technologies || [];
+      const reasons = a.hunt_reasons || (a as any).risk?.reasons || [];
+      const findings = meta.nuclei?.findings || [];
+      const endpoints = meta.katana?.endpoints || [];
+      const jsFiles = meta.katana?.js_files || [];
+
+      return (
+        a.domain.toLowerCase().includes(q) ||
+        (meta.url && meta.url.toLowerCase().includes(q)) ||
+        (meta.ip_address && meta.ip_address.toLowerCase().includes(q)) ||
+        (meta.ip && meta.ip.toLowerCase().includes(q)) ||
+        openPorts.some((p: any) => String(p).includes(q)) ||
+        tech.some((t: string) => t.toLowerCase().includes(q)) ||
+        (meta.title && meta.title.toLowerCase().includes(q)) ||
+        (meta.server && meta.server.toLowerCase().includes(q)) ||
+        (meta.web_server && meta.web_server.toLowerCase().includes(q)) ||
+        (meta.status_code !== undefined && String(meta.status_code).includes(q)) ||
+        (a.status && a.status.toLowerCase().includes(q)) ||
+        (a.discovered_by && a.discovered_by.toLowerCase().includes(q)) ||
+        (a.type && a.type.toLowerCase().includes(q)) ||
+        reasons.some((r: string) => r.toLowerCase().includes(q)) ||
+        ((a as any).risk?.level && (a as any).risk.level.toLowerCase().includes(q)) ||
+        findings.some((f: any) =>
+          (f.name && f.name.toLowerCase().includes(q)) ||
+          (f.template_id && f.template_id.toLowerCase().includes(q)) ||
+          (f.severity && f.severity.toLowerCase().includes(q)) ||
+          (f.matched_url && f.matched_url.toLowerCase().includes(q))
+        ) ||
+        endpoints.some((ep: string) => ep.toLowerCase().includes(q)) ||
+        jsFiles.some((js: string) => js.toLowerCase().includes(q))
+      );
+    });
+  }, [assets, dashboardSearch]);
+
+  const filteredTopRiskAssets = useMemo(() => {
+    if (!dashboardSearch.trim()) return topRiskAssets;
+    const q = dashboardSearch.toLowerCase().trim();
+    return topRiskAssets.filter((a) => {
+      const meta = a.metadata || {};
+      const reasons = a.risk?.reasons || [];
+      return (
+        a.domain.toLowerCase().includes(q) ||
+        (meta.url && meta.url.toLowerCase().includes(q)) ||
+        (meta.ip_address && meta.ip_address.toLowerCase().includes(q)) ||
+        reasons.some((r: string) => r.toLowerCase().includes(q)) ||
+        String(a.risk?.score ?? "").includes(q)
+      );
+    });
+  }, [topRiskAssets, dashboardSearch]);
+
+  const filteredTopHuntTargets = useMemo(() => {
+    if (!dashboardSearch.trim()) return topHuntTargets;
+    const q = dashboardSearch.toLowerCase().trim();
+    return topHuntTargets.filter((a) => {
+      const meta = a.metadata || {};
+      const reasons = (a as any).hunt_reasons || [];
+      return (
+        a.domain.toLowerCase().includes(q) ||
+        (meta.url && meta.url.toLowerCase().includes(q)) ||
+        (meta.ip_address && meta.ip_address.toLowerCase().includes(q)) ||
+        reasons.some((r: string) => r.toLowerCase().includes(q)) ||
+        String((a as any).hunt_priority ?? "").includes(q)
+      );
+    });
+  }, [topHuntTargets, dashboardSearch]);
+
 
   // Recompute ports distribution dynamically from assets
   const portCounts: Record<number, number> = {};
@@ -603,6 +676,150 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           <div className="text-xs font-mono font-bold leading-relaxed">
             No live hosts found — scan stopped early. Nothing to crawl or scan. Check Naabu/HTTPX raw output in the logs panel if this seems unexpected.
           </div>
+        </div>
+      )}
+
+      {/* Dashboard Universal Search Bar */}
+      <div className="bg-dark-card border border-dark-border rounded-xl p-3 glass flex flex-col sm:flex-row items-center gap-3">
+        <div className="relative flex-1 w-full">
+          <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+          <input
+            type="text"
+            placeholder="Search across all assets, hosts, IPs, ports, tech, vulnerabilities, endpoints..."
+            value={dashboardSearch}
+            onChange={(e) => setDashboardSearch(e.target.value)}
+            className="w-full bg-dark-bg border border-dark-border rounded-lg pl-9 pr-8 py-2 text-xs text-slate-200 placeholder-slate-500 focus:border-cyber-accent outline-none font-mono"
+          />
+          {dashboardSearch && (
+            <button
+              onClick={() => setDashboardSearch("")}
+              className="absolute right-2.5 top-2.5 text-slate-400 hover:text-white cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+        {dashboardSearch && (
+          <div className="text-xs font-mono text-cyber-accent shrink-0">
+            {matchingAssets.length} matching asset{matchingAssets.length === 1 ? "" : "s"}
+          </div>
+        )}
+      </div>
+
+      {/* Universal Search Results Panel */}
+      {dashboardSearch.trim() && (
+        <div className="bg-dark-card border border-cyber-accent/40 rounded-xl p-5 glass animate-fadeIn space-y-3">
+          <div className="flex items-center justify-between border-b border-dark-border pb-2.5">
+            <div className="flex items-center gap-2">
+              <Search className="w-4 h-4 text-cyber-accent" />
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                Search Results for <span className="text-cyber-accent font-mono">"{dashboardSearch}"</span> ({matchingAssets.length})
+              </h4>
+            </div>
+            <button
+              onClick={() => setDashboardSearch("")}
+              className="text-xs text-slate-400 hover:text-white flex items-center gap-1 font-mono cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Clear Filter</span>
+            </button>
+          </div>
+
+          {matchingAssets.length === 0 ? (
+            <div className="text-center py-8 text-slate-500 font-mono text-xs">
+              No assets or security findings match "{dashboardSearch}".
+            </div>
+          ) : (
+            <div className="max-h-80 overflow-y-auto space-y-2 font-mono text-xs">
+              {matchingAssets.map((asset) => {
+                const meta = asset.metadata || {};
+                const openPorts = asset.open_ports || meta.open_ports || [];
+                const tech = meta.technologies || [];
+                const reasons = asset.hunt_reasons || (asset as any).risk?.reasons || [];
+                const findings = meta.nuclei?.findings || [];
+                const liveUrl = meta.url || (asset.domain.startsWith("http") ? asset.domain : `https://${asset.domain}`);
+
+                return (
+                  <div
+                    key={asset.id}
+                    className="p-3 bg-dark-bg/80 border border-dark-border hover:border-cyber-accent/50 rounded-lg flex flex-col md:flex-row md:items-center justify-between gap-2 transition-all"
+                  >
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-400 uppercase">
+                          {asset.type || "asset"}
+                        </span>
+                        <a
+                          href={liveUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-bold text-slate-200 hover:text-cyber-accent hover:underline flex items-center gap-1 truncate"
+                        >
+                          <span>{asset.domain}</span>
+                          <ExternalLink className="w-3 h-3 text-slate-500" />
+                        </a>
+                        {asset.status === "live" && (
+                          <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold">
+                            LIVE
+                          </span>
+                        )}
+                        {meta.status_code && (
+                          <span className="px-1.5 py-0.2 rounded bg-blue-500/15 border border-blue-500/30 text-blue-400 text-[10px]">
+                            HTTP {meta.status_code}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="text-[11px] text-slate-400 flex items-center gap-3 flex-wrap">
+                        {meta.ip_address && (
+                          <span>IP: <strong className="text-slate-300">{meta.ip_address}</strong></span>
+                        )}
+                        {openPorts.length > 0 && (
+                          <span>Ports: <strong className="text-slate-300">{openPorts.slice(0, 6).join(", ")}{openPorts.length > 6 ? "..." : ""}</strong></span>
+                        )}
+                        {tech.length > 0 && (
+                          <span>Tech: <strong className="text-slate-300">{tech.slice(0, 4).join(", ")}</strong></span>
+                        )}
+                        {reasons.length > 0 && (
+                          <span className="text-amber-400/90">{reasons[0]}</span>
+                        )}
+                      </div>
+
+                      {findings.length > 0 && (
+                        <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                          <span className="text-[10px] text-slate-500">Findings:</span>
+                          {findings.slice(0, 3).map((f: any, fIdx: number) => (
+                            <span
+                              key={fIdx}
+                              className="px-1.5 py-0.2 bg-red-500/15 border border-red-500/30 text-red-400 rounded text-[10px]"
+                            >
+                              [{f.severity || "info"}] {f.name || f.template_id}
+                            </span>
+                          ))}
+                          {findings.length > 3 && (
+                            <span className="text-[10px] text-slate-500">+{findings.length - 3} more</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2 self-start md:self-center shrink-0">
+                      {(asset as any).hunt_priority !== undefined && (
+                        <span className="px-2 py-0.5 rounded border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 text-xs font-bold">
+                          🎯 {(asset as any).hunt_priority}
+                        </span>
+                      )}
+                      {(asset as any).risk?.score !== undefined && (
+                        <span className="px-2 py-0.5 rounded border border-red-500/30 bg-red-500/10 text-red-400 text-xs font-bold">
+                          Risk: {(asset as any).risk.score}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -844,12 +1061,12 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
             <span className="text-[10px] font-mono text-slate-500 uppercase">Weighted Ranking</span>
           </h4>
           <div className="space-y-2">
-            {topRiskAssets.length === 0 ? (
+            {filteredTopRiskAssets.length === 0 ? (
               <div className="text-center py-6 text-xs text-slate-500 font-mono">
-                No scored assets found. Scans may be running or pending scoring.
+                {dashboardSearch ? "No scored assets match search." : "No scored assets found. Scans may be running or pending scoring."}
               </div>
             ) : (
-              topRiskAssets.map((asset) => {
+              filteredTopRiskAssets.map((asset) => {
                 const score = asset.risk?.score ?? 0;
                 let badgeColor = "bg-slate-500/10 text-slate-400 border-slate-500/20";
                 if (score >= 90) badgeColor = "bg-red-500/10 text-red-500 border-red-500/20";
@@ -898,12 +1115,12 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
             <span className="text-[10px] font-mono text-slate-500 uppercase">Bug Bounty Priority</span>
           </h4>
           <div className="space-y-2">
-            {topHuntTargets.length === 0 ? (
+            {filteredTopHuntTargets.length === 0 ? (
               <div className="text-center py-6 text-xs text-slate-500 font-mono">
-                No live host targets identified yet.
+                {dashboardSearch ? "No hunt targets match search." : "No live host targets identified yet."}
               </div>
             ) : (
-              topHuntTargets.map((asset) => {
+              filteredTopHuntTargets.map((asset) => {
                 const hp = (asset as any).hunt_priority ?? 0;
                 let badgeColor = "bg-slate-500/10 text-slate-400 border-slate-500/20";
                 if (hp >= 80) badgeColor = "bg-cyan-500/15 text-cyan-300 border-cyan-500/40 font-bold";

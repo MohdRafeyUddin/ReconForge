@@ -38,9 +38,14 @@ export const TakeoverTab: React.FC<TakeoverTabProps> = ({ records, projectName =
   const [showExport, setShowExport] = useState(false);
 
   const filtered = useMemo(() => {
-    const q = search.toLowerCase();
+    const q = search.toLowerCase().trim();
     return records.filter((r) => {
-      const matchSearch = r.subdomain.toLowerCase().includes(q) || r.provider.toLowerCase().includes(q);
+      const matchSearch = !q ? true : (
+        r.subdomain.toLowerCase().includes(q) ||
+        (r.provider && r.provider.toLowerCase().includes(q)) ||
+        (r.status && r.status.toLowerCase().includes(q)) ||
+        (r.confidence && r.confidence.toLowerCase().includes(q))
+      );
       const matchStatus = filterStatus === "all" || r.status === filterStatus;
       return matchSearch && matchStatus;
     });

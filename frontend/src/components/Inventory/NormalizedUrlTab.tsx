@@ -36,12 +36,14 @@ export const NormalizedUrlTab: React.FC<NormalizedUrlTabProps> = ({ records, pro
   const [showExport, setShowExport] = useState(false);
 
   const filtered = useMemo(() => {
-    const q = search.toLowerCase();
+    const q = search.toLowerCase().trim();
+    if (!q) return records;
     return records.filter(
       (r) =>
         r.normalized_url.toLowerCase().includes(q) ||
         r.original_url.toLowerCase().includes(q) ||
-        (r.source || "").toLowerCase().includes(q)
+        (r.source || "").toLowerCase().includes(q) ||
+        (r.duplicate_removed ? "removed duplicate" : "kept unique").includes(q)
     );
   }, [records, search]);
 

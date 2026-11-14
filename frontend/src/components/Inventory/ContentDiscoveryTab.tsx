@@ -90,7 +90,11 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
         const matchesUrl = r.value.toLowerCase().includes(q);
         const matchesHost = r.host.toLowerCase().includes(q);
         const matchesRedirect = (r.redirect_location || "").toLowerCase().includes(q);
-        if (!matchesUrl && !matchesHost && !matchesRedirect) return false;
+        const matchesStatus = String(r.status_code || "").includes(q);
+        const matchesLength = String(r.content_length || "").includes(q);
+        const matchesWords = String(r.words || "").includes(q);
+        const matchesLines = String(r.lines || "").includes(q);
+        if (!matchesUrl && !matchesHost && !matchesRedirect && !matchesStatus && !matchesLength && !matchesWords && !matchesLines) return false;
       }
 
       // Host filter

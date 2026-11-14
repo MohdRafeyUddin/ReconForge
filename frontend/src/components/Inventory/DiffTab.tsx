@@ -171,7 +171,7 @@ export const DiffTab: React.FC<DiffTabProps> = ({
     total_changes: 0,
   };
 
-  const filterText = searchFilter.toLowerCase();
+  const filterText = searchFilter.toLowerCase().trim();
 
   const filteredNewSubs = diff.new_subdomains.filter((s) => s.toLowerCase().includes(filterText));
   const filteredStaleSubs = diff.stale_subdomains.filter((s) => s.toLowerCase().includes(filterText));
@@ -183,20 +183,33 @@ export const DiffTab: React.FC<DiffTabProps> = ({
     (p) => p.domain.toLowerCase().includes(filterText) || String(p.port).includes(filterText)
   );
   const filteredChangedHosts = diff.changed_hosts.filter((h) =>
-    h.domain.toLowerCase().includes(filterText)
+    h.domain.toLowerCase().includes(filterText) ||
+    h.changes.some(
+      (c) =>
+        c.field.toLowerCase().includes(filterText) ||
+        (c.priority && c.priority.toLowerCase().includes(filterText)) ||
+        JSON.stringify(c.old || "").toLowerCase().includes(filterText) ||
+        JSON.stringify(c.new || "").toLowerCase().includes(filterText) ||
+        (c.added && c.added.some((a) => a.toLowerCase().includes(filterText))) ||
+        (c.removed && c.removed.some((r) => r.toLowerCase().includes(filterText)))
+    )
   );
   const filteredFindings = diff.new_findings.filter(
     (f) =>
       f.matched_url.toLowerCase().includes(filterText) ||
+      (f.domain && f.domain.toLowerCase().includes(filterText)) ||
       (f.source && f.source.toLowerCase().includes(filterText)) ||
-      (f.severity && f.severity.toLowerCase().includes(filterText))
+      (f.severity && f.severity.toLowerCase().includes(filterText)) ||
+      (f.payload && f.payload.toLowerCase().includes(filterText)) ||
+      (f.parameter && f.parameter.toLowerCase().includes(filterText))
   );
   const filteredJs = diff.new_js_files.filter((u) => u.toLowerCase().includes(filterText));
   const filteredContentPaths = (diff.new_content_paths || []).filter(
     (cp) =>
       (cp.url || cp.value || "").toLowerCase().includes(filterText) ||
       (cp.domain || cp.host || "").toLowerCase().includes(filterText) ||
-      String(cp.status_code || "").includes(filterText)
+      String(cp.status_code || "").includes(filterText) ||
+      String(cp.content_length || "").includes(filterText)
   );
 
   if (loading) {
@@ -491,7 +504,7 @@ export const DiffTab: React.FC<DiffTabProps> = ({
         <div className="relative w-full sm:w-64">
           <input
             type="text"
-            placeholder="Filter changes..."
+            placeholder="Search changes, hosts, ports, findings..."
             value={searchFilter}
             onChange={(e) => setSearchFilter(e.target.value)}
             className="w-full bg-dark-bg border border-dark-border text-xs rounded-lg pl-8 pr-3 py-1.5 text-slate-200 placeholder-slate-500 focus:border-cyber-accent outline-none font-mono"

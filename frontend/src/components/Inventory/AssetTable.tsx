@@ -91,6 +91,9 @@ export const AssetTable: React.FC<AssetTableProps> = ({
 }) => {
   const [activeInventoryTab, setActiveInventoryTab] = useState<InventoryTab>(initialTab || "assets");
   const [search, setSearch] = useState("");
+  const [historicalSearch, setHistoricalSearch] = useState("");
+  const [jsSearch, setJsSearch] = useState("");
+  const [screenshotsSearch, setScreenshotsSearch] = useState("");
   const [filterType, setFilterType] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -253,13 +256,34 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     if (["js_file", "screenshot", "finding", "historical_url"].includes(asset.type)) {
       return false;
     }
-    const matchesSearch = asset.domain.toLowerCase().includes(search.toLowerCase()) ||
-      (asset.metadata && asset.metadata.ip_address && asset.metadata.ip_address.includes(search));
+    const q = search.toLowerCase().trim();
+    const meta = asset.metadata || {};
+    const openPorts = asset.open_ports || meta.open_ports || [];
+    const tech = meta.technologies || [];
+    const reasons = asset.hunt_reasons || (asset as any).risk?.reasons || [];
+    const matchesSearch = !q ? true : (
+      asset.domain.toLowerCase().includes(q) ||
+      (meta.url && meta.url.toLowerCase().includes(q)) ||
+      (meta.ip_address && meta.ip_address.toLowerCase().includes(q)) ||
+      (meta.ip && meta.ip.toLowerCase().includes(q)) ||
+      openPorts.some((p: any) => String(p).includes(q)) ||
+      tech.some((t: string) => t.toLowerCase().includes(q)) ||
+      (meta.title && meta.title.toLowerCase().includes(q)) ||
+      (meta.server && meta.server.toLowerCase().includes(q)) ||
+      (meta.web_server && meta.web_server.toLowerCase().includes(q)) ||
+      (meta.status_code !== undefined && String(meta.status_code).includes(q)) ||
+      (asset.status && asset.status.toLowerCase().includes(q)) ||
+      (asset.discovered_by && asset.discovered_by.toLowerCase().includes(q)) ||
+      (asset.type && asset.type.toLowerCase().includes(q)) ||
+      reasons.some((r: string) => r.toLowerCase().includes(q)) ||
+      ((asset as any).risk?.level && (asset as any).risk.level.toLowerCase().includes(q))
+    );
     const matchesType = filterType === "all" || asset.type === filterType;
     const matchesStatus = filterStatus === "all" || asset.status === filterStatus;
     
     return matchesSearch && matchesType && matchesStatus;
   });
+
   const filteredAssets = React.useMemo(() => {
     if (!sortField) return baseFilteredAssets;
     return [...baseFilteredAssets].sort((a, b) => {
@@ -390,6 +414,42 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     }));
   }, [assets]);
 
+  const filteredHistoricalUrls = React.useMemo(() => {
+    const q = historicalSearch.toLowerCase().trim();
+    if (!q) return historicalUrls;
+    return historicalUrls.filter((u) => {
+      const matchUrl = u.url.toLowerCase().includes(q);
+      const matchParams = (u.has_params ? "yes params parameter" : "no").includes(q);
+      const matchExt = (u.extension || "").toLowerCase().includes(q);
+      const matchSources = (u.sources || [u.source]).some((s: string) => (s || "").toLowerCase().includes(q));
+      return matchUrl || matchParams || matchExt || matchSources;
+    });
+  }, [historicalUrls, historicalSearch]);
+
+  const filteredJavascriptFiles = React.useMemo(() => {
+    const q = jsSearch.toLowerCase().trim();
+    if (!q) return javascriptFiles;
+    return javascriptFiles.filter((j) => {
+      return (
+        j.url.toLowerCase().includes(q) ||
+        (j.host || "").toLowerCase().includes(q) ||
+        (j.source || "").toLowerCase().includes(q)
+      );
+    });
+  }, [javascriptFiles, jsSearch]);
+
+  const filteredScreenshotsList = React.useMemo(() => {
+    const q = screenshotsSearch.toLowerCase().trim();
+    if (!q) return screenshotsList;
+    return screenshotsList.filter((s) => {
+      return (
+        (s.url || "").toLowerCase().includes(q) ||
+        (s.title || "").toLowerCase().includes(q) ||
+        (s.source || "").toLowerCase().includes(q)
+      );
+    });
+  }, [screenshotsList, screenshotsSearch]);
+
   const contentDiscoveryList = React.useMemo(() => {
     if (contentPathRecords && contentPathRecords.length > 0) {
       return contentPathRecords;
@@ -486,9 +546,23 @@ export const AssetTable: React.FC<AssetTableProps> = ({
       {/* Historical URLs Tab */}
       {activeInventoryTab === "historical_urls" && (
         <div className="bg-dark-card border border-dark-border rounded-xl glass p-4">
-          <div className="flex justify-between items-center mb-4">
-            <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">Historical URL Inventory</h3>
-            <span className="text-[10px] font-mono text-slate-500">{historicalUrls.length} total entries</span>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4 border-b border-dark-border pb-3">
+            <div>
+              <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">Historical URL Inventory</h3>
+              <span className="text-[10px] font-mono text-slate-500">{filteredHistoricalUrls.length} / {historicalUrls.length} total entries</span>
+            </div>
+            <div className="relative w-full sm:w-72">
+              <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-500">
+                <Search className="w-3.5 h-3.5" />
+              </span>
+              <input
+                type="text"
+                placeholder="Search URLs, params, ext, source..."
+                value={historicalSearch}
+                onChange={(e) => setHistoricalSearch(e.target.value)}
+                className="w-full bg-dark-input border border-dark-border rounded pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyber-accent font-mono"
+              />
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs border-collapse">
@@ -501,14 +575,14 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                 </tr>
               </thead>
               <tbody>
-                {historicalUrls.length === 0 ? (
+                {filteredHistoricalUrls.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="p-6 text-center text-slate-500 uppercase tracking-widest font-mono text-[10px]">
-                      No historical URLs discovered yet.
+                      {historicalUrls.length === 0 ? "No historical URLs discovered yet." : "No historical URLs match your search."}
                     </td>
                   </tr>
                 ) : (
-                  historicalUrls.map((urlObj, idx) => (
+                  filteredHistoricalUrls.map((urlObj, idx) => (
                     <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-hover/30 transition-colors font-mono text-[11px]">
                       <td className="p-3 break-all select-all text-slate-300">
                         <a href={urlObj.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline">
@@ -556,9 +630,23 @@ export const AssetTable: React.FC<AssetTableProps> = ({
       {/* JavaScript Files Tab */}
       {activeInventoryTab === "js_files" && (
         <div className="bg-dark-card border border-dark-border rounded-xl glass p-4">
-          <div className="flex justify-between items-center mb-4">
-            <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">JavaScript File Inventory</h3>
-            <span className="text-[10px] font-mono text-slate-500">{javascriptFiles.length} total files</span>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4 border-b border-dark-border pb-3">
+            <div>
+              <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">JavaScript File Inventory</h3>
+              <span className="text-[10px] font-mono text-slate-500">{filteredJavascriptFiles.length} / {javascriptFiles.length} total files</span>
+            </div>
+            <div className="relative w-full sm:w-72">
+              <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-500">
+                <Search className="w-3.5 h-3.5" />
+              </span>
+              <input
+                type="text"
+                placeholder="Search JS files, host, source..."
+                value={jsSearch}
+                onChange={(e) => setJsSearch(e.target.value)}
+                className="w-full bg-dark-input border border-dark-border rounded pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyber-accent font-mono"
+              />
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs border-collapse">
@@ -570,14 +658,14 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                 </tr>
               </thead>
               <tbody>
-                {javascriptFiles.length === 0 ? (
+                {filteredJavascriptFiles.length === 0 ? (
                   <tr>
                     <td colSpan={3} className="p-6 text-center text-slate-500 uppercase tracking-widest font-mono text-[10px]">
-                      No JavaScript files discovered yet.
+                      {javascriptFiles.length === 0 ? "No JavaScript files discovered yet." : "No JavaScript files match your search."}
                     </td>
                   </tr>
                 ) : (
-                  javascriptFiles.map((jsObj, idx) => (
+                  filteredJavascriptFiles.map((jsObj, idx) => (
                     <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-hover/30 transition-colors font-mono text-[11px]">
                       <td className="p-3 break-all select-all text-slate-300">
                         <a href={jsObj.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline">
@@ -602,17 +690,31 @@ export const AssetTable: React.FC<AssetTableProps> = ({
       {/* Screenshots Tab */}
       {activeInventoryTab === "screenshots" && (
         <div className="bg-dark-card border border-dark-border rounded-xl glass p-4">
-          <div className="flex justify-between items-center mb-4">
-            <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">Captured Screenshots</h3>
-            <span className="text-[10px] font-mono text-slate-500">{screenshotsList.length} screenshots</span>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4 border-b border-dark-border pb-3">
+            <div>
+              <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">Captured Screenshots</h3>
+              <span className="text-[10px] font-mono text-slate-500">{filteredScreenshotsList.length} / {screenshotsList.length} screenshots</span>
+            </div>
+            <div className="relative w-full sm:w-72">
+              <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-500">
+                <Search className="w-3.5 h-3.5" />
+              </span>
+              <input
+                type="text"
+                placeholder="Search screenshots by title, URL, host..."
+                value={screenshotsSearch}
+                onChange={(e) => setScreenshotsSearch(e.target.value)}
+                className="w-full bg-dark-input border border-dark-border rounded pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyber-accent font-mono"
+              />
+            </div>
           </div>
-          {screenshotsList.length === 0 ? (
+          {filteredScreenshotsList.length === 0 ? (
             <div className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono text-[10px]">
-              No screenshots captured yet. Run scan in deep mode.
+              {screenshotsList.length === 0 ? "No screenshots captured yet. Run scan in deep mode." : "No screenshots match your search."}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-              {screenshotsList.map((screen, idx) => {
+              {filteredScreenshotsList.map((screen, idx) => {
                 const imgUrl = screen.screenshot_path.startsWith("http") 
                   ? screen.screenshot_path 
                   : `${SCREENSHOT_BASE_URL}${screen.screenshot_path}`;
@@ -662,7 +764,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
           </span>
           <input
             type="text"
-            placeholder="Search assets or IPs..."
+            placeholder="Search assets, IPs, ports, tech, status, reasons..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full bg-dark-input border border-dark-border rounded pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyber-accent"

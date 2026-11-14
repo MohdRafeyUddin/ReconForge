@@ -110,6 +110,11 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
         (f.template || f.template_id || "").toLowerCase().includes(q) ||
         (f.template_name || "").toLowerCase().includes(q) ||
         (f.matched_url || f.endpoint || "").toLowerCase().includes(q) ||
+        (f.severity || "").toLowerCase().includes(q) ||
+        (f.description || "").toLowerCase().includes(q) ||
+        (f.source || f.metadata?.source || "").toLowerCase().includes(q) ||
+        (f.curl_command || "").toLowerCase().includes(q) ||
+        (f.ip || "").toLowerCase().includes(q) ||
         (f.tags || []).some((t: string) => t.toLowerCase().includes(q)) ||
         (f.cve || "").toLowerCase().includes(q)
       );

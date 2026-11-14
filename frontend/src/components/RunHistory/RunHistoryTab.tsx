@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from "react";
-import { History, GitCompare, Eye, FileText, ChevronLeft, ChevronRight, AlertCircle, CheckCircle } from "lucide-react";
+import React, { useState, useEffect, useMemo } from "react";
+import { History, GitCompare, Eye, FileText, ChevronLeft, ChevronRight, AlertCircle, CheckCircle, Search } from "lucide-react";
 import { apiCall } from "../../services/api";
 
 interface ScanRun {
@@ -84,6 +84,93 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
   const [compareB, setCompareB] = useState<string>("");
   const [compareResult, setCompareResult] = useState<CompareResult | null>(null);
   const [comparing, setComparing] = useState(false);
+
+  const [runsSearch, setRunsSearch] = useState<string>("");
+  const [compareSearch, setCompareSearch] = useState<string>("");
+  const [runAssetSearch, setRunAssetSearch] = useState<string>("");
+
+  const filteredRuns = useMemo(() => {
+    const q = runsSearch.toLowerCase().trim();
+    if (!q) return runs;
+    return runs.filter((r) => {
+      const jobId = (r.job_id || "").toLowerCase();
+      const status = (r.status || "").toLowerCase();
+      const mode = (r.scan_mode || "").toLowerCase();
+      const profile = (r.scan_profile || "").toLowerCase();
+      const started = new Date(r.started_at).toLocaleString().toLowerCase();
+      const duration = String(r.duration_sec ?? "");
+      const subs = String(r.counts?.subdomains ?? "");
+      const live = String(r.counts?.live ?? "");
+      const findings = String(r.counts?.findings ?? "");
+      const phases = (r.executed_phases || []).join(" ").toLowerCase();
+      const markers = (r.stage_markers || [])
+        .map((sm) => `${sm.stage} ${sm.status} ${sm.reason || ""}`)
+        .join(" ")
+        .toLowerCase();
+      const config = JSON.stringify(r.config_snapshot || {}).toLowerCase();
+      return (
+        jobId.includes(q) ||
+        status.includes(q) ||
+        mode.includes(q) ||
+        profile.includes(q) ||
+        started.includes(q) ||
+        duration.includes(q) ||
+        subs.includes(q) ||
+        live.includes(q) ||
+        findings.includes(q) ||
+        phases.includes(q) ||
+        markers.includes(q) ||
+        config.includes(q)
+      );
+    });
+  }, [runs, runsSearch]);
+
+  const filteredCompareAdded = useMemo(() => {
+    if (!compareResult) return [];
+    const q = compareSearch.toLowerCase().trim();
+    const items = Object.entries(compareResult.added).flatMap(([type, list]) =>
+      list.map((item) => ({ type, item }))
+    );
+    if (!q) return items;
+    return items.filter(
+      ({ type, item }) => type.toLowerCase().includes(q) || item.toLowerCase().includes(q)
+    );
+  }, [compareResult, compareSearch]);
+
+  const filteredCompareRemoved = useMemo(() => {
+    if (!compareResult) return [];
+    const q = compareSearch.toLowerCase().trim();
+    const items = Object.entries(compareResult.removed).flatMap(([type, list]) =>
+      list.map((item) => ({ type, item }))
+    );
+    if (!q) return items;
+    return items.filter(
+      ({ type, item }) => type.toLowerCase().includes(q) || item.toLowerCase().includes(q)
+    );
+  }, [compareResult, compareSearch]);
+
+  const filteredRunAssets = useMemo(() => {
+    const q = runAssetSearch.toLowerCase().trim();
+    if (!q) return runAssets;
+    return runAssets.filter((a) => {
+      const val = (a.value || "").toLowerCase();
+      const type = (a.type || "").toLowerCase();
+      const domain = (a.domain || "").toLowerCase();
+      const status = (a.status || "").toLowerCase();
+      const discovered = (a.discovered_by || "").toLowerCase();
+      const severity = (a.severity || "").toLowerCase();
+      const code = String(a.status_code ?? "");
+      return (
+        val.includes(q) ||
+        type.includes(q) ||
+        domain.includes(q) ||
+        status.includes(q) ||
+        discovered.includes(q) ||
+        severity.includes(q) ||
+        code.includes(q)
+      );
+    });
+  }, [runAssets, runAssetSearch]);
 
   const fetchRuns = async () => {
     if (!projectId) return;
@@ -236,64 +323,82 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
             ))}
           </div>
 
+          {/* Comparison Search */}
+          <div className="relative w-full mb-3">
+            <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2.5" />
+            <input
+              type="text"
+              placeholder="Search comparison diffs by asset, type..."
+              value={compareSearch}
+              onChange={(e) => setCompareSearch(e.target.value)}
+              className="w-full bg-dark-bg border border-dark-border rounded pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-cyber-accent outline-none font-mono"
+            />
+          </div>
+
           {/* Added & Removed Lists */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-dark-bg border border-emerald-500/20 rounded-lg p-3">
-              <div className="text-xs font-bold text-emerald-400 mb-2 flex items-center gap-1">
-                <CheckCircle className="w-3.5 h-3.5" />
-                <span>Newly Added Assets</span>
+              <div className="text-xs font-bold text-emerald-400 mb-2 flex items-center justify-between">
+                <div className="flex items-center gap-1">
+                  <CheckCircle className="w-3.5 h-3.5" />
+                  <span>Newly Added Assets</span>
+                </div>
+                <span className="text-[10px] font-mono text-slate-500">{filteredCompareAdded.length} items</span>
               </div>
               <div className="max-h-48 overflow-y-auto space-y-1 font-mono text-[11px] text-slate-300">
-                {Object.entries(compareResult.added).flatMap(([type, list]) =>
-                  list.map((item, idx) => (
-                    <div key={`${type}-${idx}`} className="truncate">
-                      <span className="text-slate-500 mr-2">[{type}]</span>
-                      {item.startsWith("http://") || item.startsWith("https://") ? (
-                        <a href={item} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
-                          {item}
-                        </a>
-                      ) : type === "subdomain" || type === "live_host" ? (
-                        <a href={`https://${item}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
-                          {item}
-                        </a>
-                      ) : (
-                        <span>{item}</span>
-                      )}
-                    </div>
-                  ))
-                )}
-                {Object.values(compareResult.added).every((l) => l.length === 0) && (
-                  <div className="text-slate-500 text-xs">No new assets added.</div>
+                {filteredCompareAdded.map(({ type, item }, idx) => (
+                  <div key={`${type}-${idx}`} className="truncate">
+                    <span className="text-slate-500 mr-2">[{type}]</span>
+                    {item.startsWith("http://") || item.startsWith("https://") ? (
+                      <a href={item} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                        {item}
+                      </a>
+                    ) : type === "subdomain" || type === "live_host" ? (
+                      <a href={`https://${item}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                        {item}
+                      </a>
+                    ) : (
+                      <span>{item}</span>
+                    )}
+                  </div>
+                ))}
+                {filteredCompareAdded.length === 0 && (
+                  <div className="text-slate-500 text-xs">
+                    {compareSearch ? "No matching added assets." : "No new assets added."}
+                  </div>
                 )}
               </div>
             </div>
 
             <div className="bg-dark-bg border border-red-500/20 rounded-lg p-3">
-              <div className="text-xs font-bold text-red-400 mb-2 flex items-center gap-1">
-                <AlertCircle className="w-3.5 h-3.5" />
-                <span>Removed / Vanished Assets</span>
+              <div className="text-xs font-bold text-red-400 mb-2 flex items-center justify-between">
+                <div className="flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5" />
+                  <span>Removed / Vanished Assets</span>
+                </div>
+                <span className="text-[10px] font-mono text-slate-500">{filteredCompareRemoved.length} items</span>
               </div>
               <div className="max-h-48 overflow-y-auto space-y-1 font-mono text-[11px] text-slate-300">
-                {Object.entries(compareResult.removed).flatMap(([type, list]) =>
-                  list.map((item, idx) => (
-                    <div key={`${type}-${idx}`} className="truncate">
-                      <span className="text-slate-500 mr-2">[{type}]</span>
-                      {item.startsWith("http://") || item.startsWith("https://") ? (
-                        <a href={item} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
-                          {item}
-                        </a>
-                      ) : type === "subdomain" || type === "live_host" ? (
-                        <a href={`https://${item}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
-                          {item}
-                        </a>
-                      ) : (
-                        <span>{item}</span>
-                      )}
-                    </div>
-                  ))
-                )}
-                {Object.values(compareResult.removed).every((l) => l.length === 0) && (
-                  <div className="text-slate-500 text-xs">No assets removed.</div>
+                {filteredCompareRemoved.map(({ type, item }, idx) => (
+                  <div key={`${type}-${idx}`} className="truncate">
+                    <span className="text-slate-500 mr-2">[{type}]</span>
+                    {item.startsWith("http://") || item.startsWith("https://") ? (
+                      <a href={item} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                        {item}
+                      </a>
+                    ) : type === "subdomain" || type === "live_host" ? (
+                      <a href={`https://${item}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                        {item}
+                      </a>
+                    ) : (
+                      <span>{item}</span>
+                    )}
+                  </div>
+                ))}
+                {filteredCompareRemoved.length === 0 && (
+                  <div className="text-slate-500 text-xs">
+                    {compareSearch ? "No matching removed assets." : "No assets removed."}
+                  </div>
                 )}
               </div>
             </div>
@@ -303,6 +408,25 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
 
       {/* Runs Table */}
       <div className="bg-dark-card border border-dark-border rounded-xl overflow-hidden glass">
+        <div className="p-4 border-b border-dark-border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-dark-bg/40">
+          <div>
+            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-200">Execution History</h4>
+            <span className="text-[10px] text-slate-500 font-mono">
+              {filteredRuns.length} of {runs.length} runs on this page ({total} total recorded)
+            </span>
+          </div>
+          <div className="relative w-full sm:w-72">
+            <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2.5" />
+            <input
+              type="text"
+              placeholder="Search runs by ID, status, profile, counts..."
+              value={runsSearch}
+              onChange={(e) => setRunsSearch(e.target.value)}
+              className="w-full bg-dark-bg border border-dark-border rounded pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-cyber-accent outline-none font-mono"
+            />
+          </div>
+        </div>
+
         {loading ? (
           <div className="p-12 text-center text-slate-400 font-mono text-xs">Loading run history...</div>
         ) : error ? (
@@ -328,53 +452,61 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                 </tr>
               </thead>
               <tbody>
-                {runs.map((r) => {
-                  let statusBadge = "bg-slate-500/10 text-slate-400 border-slate-500/30";
-                  if (r.status === "completed") statusBadge = "bg-cyber-success/10 text-cyber-success border-cyber-success/30 font-bold";
-                  else if (r.status === "failed") statusBadge = "bg-cyber-danger/10 text-cyber-danger border-cyber-danger/30 font-bold";
-                  else if (r.status === "interrupted") statusBadge = "bg-amber-500/10 text-amber-400 border-amber-500/30";
-                  else if (r.status === "running") statusBadge = "bg-cyber-accent/10 text-cyber-accent border-cyber-accent/30 animate-pulse";
+                {filteredRuns.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="p-8 text-center text-slate-500 font-mono text-xs">
+                      No runs match your search query "{runsSearch}".
+                    </td>
+                  </tr>
+                ) : (
+                  filteredRuns.map((r) => {
+                    let statusBadge = "bg-slate-500/10 text-slate-400 border-slate-500/30";
+                    if (r.status === "completed") statusBadge = "bg-cyber-success/10 text-cyber-success border-cyber-success/30 font-bold";
+                    else if (r.status === "failed") statusBadge = "bg-cyber-danger/10 text-cyber-danger border-cyber-danger/30 font-bold";
+                    else if (r.status === "interrupted") statusBadge = "bg-amber-500/10 text-amber-400 border-amber-500/30";
+                    else if (r.status === "running") statusBadge = "bg-cyber-accent/10 text-cyber-accent border-cyber-accent/30 animate-pulse";
 
-                  return (
-                    <tr key={r.job_id} className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors">
-                      <td className="p-3 font-bold text-slate-200">
-                        {r.job_id.slice(-8)}
-                      </td>
-                      <td className="p-3">
-                        <span className={`px-2 py-0.5 rounded border text-[10px] uppercase ${statusBadge}`}>
-                          {r.status}
-                        </span>
-                      </td>
-                      <td className="p-3 text-slate-300">
-                        {r.scan_mode || "fast"} / <span className="text-slate-400">{r.scan_profile || "recon"}</span>
-                      </td>
-                      <td className="p-3 text-slate-400">
-                        {new Date(r.started_at).toLocaleString()}
-                      </td>
-                      <td className="p-3 text-slate-300">
-                        {formatSecs(r.duration_sec)}
-                      </td>
-                      <td className="p-3 text-slate-200 font-bold">
-                        {r.counts?.subdomains ?? "-"}
-                      </td>
-                      <td className="p-3 text-slate-200 font-bold">
-                        {r.counts?.live ?? "-"}
-                      </td>
-                      <td className="p-3 text-slate-200 font-bold">
-                        {r.counts?.findings ?? 0}
-                      </td>
-                      <td className="p-3 text-right">
-                        <button
-                          onClick={() => openRunDetails(r)}
-                          className="px-2.5 py-1 bg-dark-bg hover:bg-dark-hover border border-dark-border text-cyber-accent rounded text-[11px] font-bold transition-all flex items-center gap-1 ml-auto cursor-pointer"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>Inspect</span>
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
+                    return (
+                      <tr key={r.job_id} className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors">
+                        <td className="p-3 font-bold text-slate-200">
+                          {r.job_id.slice(-8)}
+                        </td>
+                        <td className="p-3">
+                          <span className={`px-2 py-0.5 rounded border text-[10px] uppercase ${statusBadge}`}>
+                            {r.status}
+                          </span>
+                        </td>
+                        <td className="p-3 text-slate-300">
+                          {r.scan_mode || "fast"} / <span className="text-slate-400">{r.scan_profile || "recon"}</span>
+                        </td>
+                        <td className="p-3 text-slate-400">
+                          {new Date(r.started_at).toLocaleString()}
+                        </td>
+                        <td className="p-3 text-slate-300">
+                          {formatSecs(r.duration_sec)}
+                        </td>
+                        <td className="p-3 text-slate-200 font-bold">
+                          {r.counts?.subdomains ?? "-"}
+                        </td>
+                        <td className="p-3 text-slate-200 font-bold">
+                          {r.counts?.live ?? "-"}
+                        </td>
+                        <td className="p-3 text-slate-200 font-bold">
+                          {r.counts?.findings ?? 0}
+                        </td>
+                        <td className="p-3 text-right">
+                          <button
+                            onClick={() => openRunDetails(r)}
+                            className="px-2.5 py-1 bg-dark-bg hover:bg-dark-hover border border-dark-border text-cyber-accent rounded text-[11px] font-bold transition-all flex items-center gap-1 ml-auto cursor-pointer"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            <span>Inspect</span>
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           </div>
@@ -504,9 +636,21 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
 
               {/* Run Assets Explorer */}
               <div className="border border-dark-border rounded-lg overflow-hidden">
-                <div className="p-3 bg-dark-bg border-b border-dark-border flex items-center justify-between">
-                  <div className="font-bold text-slate-200">Assets Discovered in this Run ({runAssetsTotal})</div>
-                  <div className="flex items-center gap-2">
+                <div className="p-3 bg-dark-bg border-b border-dark-border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                  <div className="font-bold text-slate-200">
+                    Assets Discovered in this Run ({filteredRunAssets.length} / {runAssetsTotal})
+                  </div>
+                  <div className="flex items-center gap-2 w-full sm:w-auto">
+                    <div className="relative flex-1 sm:w-56">
+                      <Search className="w-3 h-3 text-slate-500 absolute left-2 top-2" />
+                      <input
+                        type="text"
+                        placeholder="Search run assets..."
+                        value={runAssetSearch}
+                        onChange={(e) => setRunAssetSearch(e.target.value)}
+                        className="w-full bg-dark-card border border-dark-border rounded pl-6 pr-2 py-1 text-[11px] text-slate-200 placeholder-slate-500 focus:border-cyber-accent outline-none font-mono"
+                      />
+                    </div>
                     <select
                       value={runAssetsType}
                       onChange={(e) => {
@@ -514,7 +658,7 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                         setRunAssetsPage(1);
                         loadRunAssets(selectedRun.job_id, 1, e.target.value);
                       }}
-                      className="bg-dark-card border border-dark-border rounded px-2 py-1 text-[11px] text-slate-300"
+                      className="bg-dark-card border border-dark-border rounded px-2 py-1 text-[11px] text-slate-300 font-mono"
                     >
                       <option value="all">All Types</option>
                       <option value="subdomain">Subdomains</option>
@@ -530,12 +674,14 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                 <div className="max-h-64 overflow-y-auto">
                   {loadingAssets ? (
                     <div className="p-6 text-center text-slate-500">Loading assets...</div>
-                  ) : runAssets.length === 0 ? (
-                    <div className="p-6 text-center text-slate-500">No assets recorded for this filter.</div>
+                  ) : filteredRunAssets.length === 0 ? (
+                    <div className="p-6 text-center text-slate-500">
+                      {runAssetSearch ? "No assets match your search." : "No assets recorded for this filter."}
+                    </div>
                   ) : (
                     <table className="w-full text-left text-[11px] font-mono">
                       <tbody>
-                        {runAssets.map((a, idx) => (
+                        {filteredRunAssets.map((a, idx) => (
                           <tr key={idx} className="border-b border-dark-border/40 hover:bg-dark-hover/20">
                             <td className="p-2 text-slate-500 w-28 uppercase">[{a.type}]</td>
                             <td className="p-2 text-slate-200 font-semibold truncate">

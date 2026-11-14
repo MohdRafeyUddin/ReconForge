@@ -44,10 +44,12 @@ export const DnsTab: React.FC<DnsTabProps> = ({
   };
 
   const filtered = useMemo(() => {
-    const q = search.toLowerCase();
+    const q = search.toLowerCase().trim();
+    if (!q) return records;
     return records.filter(
       (r) =>
         r.subdomain.toLowerCase().includes(q) ||
+        (r.status && r.status.toLowerCase().includes(q)) ||
         r.ipv4.some((ip) => ip.includes(q)) ||
         r.ipv6.some((ip) => ip.includes(q)) ||
         r.cname.some((c) => c.toLowerCase().includes(q))

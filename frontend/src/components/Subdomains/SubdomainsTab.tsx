@@ -55,11 +55,17 @@ export const SubdomainsTab: React.FC<SubdomainsTabProps> = ({ subdomains }) => {
   };
 
   const filtered = useMemo(() => {
-    const q = search.toLowerCase();
+    const q = search.toLowerCase().trim();
+    if (!q) return subdomains;
     return subdomains.filter(
       (s) =>
         s.domain.toLowerCase().includes(q) ||
-        s.sources.some((src) => src.toLowerCase().includes(q))
+        (s.sources && s.sources.some((src) => src.toLowerCase().includes(q))) ||
+        (s.discovered_by && s.discovered_by.toLowerCase().includes(q)) ||
+        (s.status && s.status.toLowerCase().includes(q)) ||
+        (s.type && s.type.toLowerCase().includes(q)) ||
+        (s.first_seen && s.first_seen.toLowerCase().includes(q)) ||
+        (s.last_seen && s.last_seen.toLowerCase().includes(q))
     );
   }, [subdomains, search]);
 

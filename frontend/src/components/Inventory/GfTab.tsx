@@ -63,9 +63,13 @@ export const GfTab: React.FC<GfTabProps> = ({ records, projectName = "project" }
   }, [records]);
 
   const filtered = useMemo(() => {
-    const q = search.toLowerCase();
+    const q = search.toLowerCase().trim();
     return records.filter((r) => {
-      const matchSearch = r.url.toLowerCase().includes(q);
+      const matchSearch = !q || (
+        r.url.toLowerCase().includes(q) ||
+        r.categories.some((c) => c.toLowerCase().includes(q)) ||
+        (r.source && r.source.toLowerCase().includes(q))
+      );
       const matchCat = filterCat === "all" || r.categories.includes(filterCat);
       return matchSearch && matchCat;
     });
@@ -92,7 +96,7 @@ export const GfTab: React.FC<GfTabProps> = ({ records, projectName = "project" }
       <div className="p-4 border-b border-dark-border flex flex-col md:flex-row gap-3 items-center justify-between bg-dark-bg/50">
         <div className="relative w-full md:max-w-xs">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-          <input type="text" placeholder="Search GF URLs..." value={search} onChange={(e) => setSearch(e.target.value)}
+          <input type="text" placeholder="Search GF URLs, patterns, sources..." value={search} onChange={(e) => setSearch(e.target.value)}
             className="w-full bg-dark-input border border-dark-border rounded pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyber-accent" />
         </div>
         <div className="flex gap-3 items-center">
