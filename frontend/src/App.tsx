@@ -9,12 +9,11 @@ import type { GfUrlRecord } from "./components/Inventory/GfTab";
 import type { ContentPathRecord } from "./components/Inventory/ContentDiscoveryTab";
 import { DiffTab } from "./components/Inventory/DiffTab";
 import type { ScanDiffDoc } from "./components/Inventory/DiffTab";
-import { RelationshipGraph } from "./components/AssetGraph/RelationshipGraph";
 import { ConsoleView } from "./components/JobConsole/ConsoleView";
 import { SubdomainsTab } from "./components/Subdomains/SubdomainsTab";
 import { RunHistoryTab } from "./components/RunHistory/RunHistoryTab";
 import { apiCall, getWebSocketUrl } from "./services/api";
-import { LayoutDashboard, Database, Network, RefreshCw, Sparkles, Globe2, Sliders, AlertTriangle, History as HistoryIcon } from "lucide-react";
+import { LayoutDashboard, Database, RefreshCw, Sparkles, Globe2, Sliders, AlertTriangle, History as HistoryIcon } from "lucide-react";
 import { ProjectSettingsModal } from "./components/ProjectSettings/ProjectSettingsModal";
 
 interface Project {
@@ -90,7 +89,7 @@ interface DashboardStats {
 
 let wsCount = 0;
 
-type TabId = "dashboard" | "diffs" | "runs" | "subdomains" | "inventory" | "visualizer";
+type TabId = "dashboard" | "diffs" | "runs" | "subdomains" | "inventory";
 
 interface ScanState {
   jobId: string | null;
@@ -2034,7 +2033,6 @@ const MainDashboard: React.FC = () => {
     { id: "runs", label: "Run History", icon: <HistoryIcon className="w-4 h-4" /> },
     { id: "subdomains", label: "Subdomains", icon: <Globe2 className="w-4 h-4" /> },
     { id: "inventory", label: "Asset Inventory", icon: <Database className="w-4 h-4" /> },
-    { id: "visualizer", label: "Topology Visualizer", icon: <Network className="w-4 h-4" /> },
   ];
 
   return (
@@ -2189,13 +2187,6 @@ const MainDashboard: React.FC = () => {
                 latestScanTime={stats?.last_scan_time || activeJob?.started_at}
                 initialTab={initialInventoryTab}
                 initialSeverityFilter={initialSeverityFilter}
-              />
-            )}
-
-            {activeTab === "visualizer" && (
-              <RelationshipGraph
-                assets={assets}
-                seedDomains={activeProject.seed_domains}
               />
             )}
           </div>
