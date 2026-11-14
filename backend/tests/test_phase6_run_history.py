@@ -380,3 +380,79 @@ def test_auth_harmless_stubs_never_401():
     assert resp_reg.status_code == 200
     data_reg = resp_reg.json()
     assert data_reg["id"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_project_dns_endpoint_and_asset_prioritization():
+    mongo_client, db, old_db, old_client, old_is_mock = await setup_test_db()
+    try:
+        from bson import ObjectId
+        project_oid = ObjectId()
+        project_id = str(project_oid)
+        await db.projects.insert_one({
+            "_id": project_oid,
+            "name": "dns-test-project",
+            "domain": "vulnweb.com",
+            "target_type": "DOMAIN",
+            "seed_domains": ["vulnweb.com"],
+            "owner_id": "local",
+            "created_at": datetime.utcnow(),
+        })
+
+        # Insert 15 historical URLs
+        for i in range(15):
+            await db.assets.insert_one({
+                "project_id": project_id,
+                "type": "historical_url",
+                "domain": f"vulnweb.com/old_{i}",
+                "status": "dead",
+                "open_ports": [],
+                "metadata": {},
+                "discovered_by": "gau",
+                "created_at": datetime.utcnow(),
+            })
+
+        # Insert live subdomain with dnsx
+        await db.assets.insert_one({
+            "project_id": project_id,
+            "type": "subdomain",
+            "domain": "testasp.vulnweb.com",
+            "status": "live",
+            "open_ports": [80],
+            "hunt_priority": 25,
+            "metadata": {
+                "dnsx": {
+                    "a": ["44.238.29.244"],
+                    "aaaa": [],
+                    "cname": [],
+                    "resolved_at": 1700000000,
+                },
+                "status_code": 200,
+            },
+            "discovered_by": "subfinder",
+            "created_at": datetime.utcnow(),
+        })
+
+        import httpx
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            # 1. GET /api/v1/assets/project/{project_id}/dns returns testasp.vulnweb.com DNS record
+            resp_dns = await ac.get(f"/api/v1/assets/project/{project_id}/dns")
+            assert resp_dns.status_code == 200
+            dns_records = resp_dns.json()
+            assert len(dns_records) == 1
+            assert dns_records[0]["subdomain"] == "testasp.vulnweb.com"
+            assert dns_records[0]["ipv4"] == ["44.238.29.244"]
+            assert dns_records[0]["status"] == "live"
+
+            # 2. GET /api/v1/assets/project/{project_id} returns subdomains sorted before historical URLs
+            resp_assets = await ac.get(f"/api/v1/assets/project/{project_id}")
+            assert resp_assets.status_code == 200
+            assets = resp_assets.json()
+            assert len(assets) == 16
+            # Top asset is the subdomain
+            assert assets[0]["type"] == "subdomain"
+            assert assets[0]["domain"] == "testasp.vulnweb.com"
+    finally:
+        await teardown_test_db(mongo_client, old_db, old_client, old_is_mock)
+

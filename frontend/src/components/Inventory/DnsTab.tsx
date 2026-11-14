@@ -49,11 +49,11 @@ export const DnsTab: React.FC<DnsTabProps> = ({
     if (!q) return records;
     return records.filter(
       (r) =>
-        r.subdomain.toLowerCase().includes(q) ||
+        (r.subdomain || "").toLowerCase().includes(q) ||
         (r.status && r.status.toLowerCase().includes(q)) ||
-        r.ipv4.some((ip) => ip.includes(q)) ||
-        r.ipv6.some((ip) => ip.includes(q)) ||
-        r.cname.some((c) => c.toLowerCase().includes(q))
+        (r.ipv4 || []).some((ip) => (ip || "").includes(q)) ||
+        (r.ipv6 || []).some((ip) => (ip || "").includes(q)) ||
+        (r.cname || []).some((c) => (c || "").toLowerCase().includes(q))
     );
   }, [records, search]);
 
@@ -61,10 +61,10 @@ export const DnsTab: React.FC<DnsTabProps> = ({
     if (!sortKey) return filtered;
     return [...filtered].sort((a, b) => {
       const av = Array.isArray(a[sortKey])
-        ? (a[sortKey] as string[]).join(",")
+        ? ((a[sortKey] as string[]) || []).join(",")
         : String(a[sortKey] ?? "");
       const bv = Array.isArray(b[sortKey])
-        ? (b[sortKey] as string[]).join(",")
+        ? ((b[sortKey] as string[]) || []).join(",")
         : String(b[sortKey] ?? "");
       const cmp = av.localeCompare(bv);
       return sortDir === "asc" ? cmp : -cmp;
@@ -74,11 +74,11 @@ export const DnsTab: React.FC<DnsTabProps> = ({
   const exportFullCSV = () => {
     const headers = ["Subdomain", "Status", "IPv4", "IPv6", "CNAME", "Resolved At"];
     const rows = sorted.map((r) => [
-      r.subdomain,
-      r.status,
-      r.ipv4.join("; "),
-      r.ipv6.join("; "),
-      r.cname.join("; "),
+      r.subdomain || "",
+      r.status || "",
+      (r.ipv4 || []).join("; "),
+      (r.ipv6 || []).join("; "),
+      (r.cname || []).join("; "),
       r.resolved_at ? new Date(r.resolved_at * 1000).toLocaleString() : "",
     ]);
     const csv = [headers, ...rows].map((row) => row.map(escapeCSV).join(",")).join("\r\n");

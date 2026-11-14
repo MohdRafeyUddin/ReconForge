@@ -14,7 +14,11 @@ UNIFIED_PROVIDERS = ["subfinder", "assetfinder", "amass", "chaos"]
 
 
 @router.get("/project/{project_id}", response_model=List[AssetResponse])
-async def get_project_assets(project_id: str):
+async def get_project_assets(
+    project_id: str,
+    type: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None),
+):
     db = get_database()
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid project ID format")
@@ -25,13 +29,25 @@ async def get_project_assets(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    cursor = db.assets.find({"project_id": project_id})
-    assets = await cursor.to_list(length=1000)
+    query: Dict[str, Any] = {"project_id": project_id}
+    if type:
+        query["type"] = type
+
+    cursor = db.assets.find(query)
+    if not type:
+        # Prioritize core assets (subdomain, domain, live hosts) over raw historical URLs
+        cursor = cursor.sort([("type", -1), ("status", -1), ("hunt_priority", -1)])
+
+    max_len = limit if (limit and limit > 0) else 10000
+    assets = await cursor.to_list(length=max_len)
     return serialize_doc(assets)
 
 
 @router.get("/project/{project_id}/subdomains")
-async def get_project_subdomains(project_id: str):
+async def get_project_subdomains(
+    project_id: str,
+    limit: Optional[int] = Query(None),
+):
     """Returns all subdomain assets with source attribution and timestamps."""
     db = get_database()
     if not ObjectId.is_valid(project_id):
@@ -43,9 +59,42 @@ async def get_project_subdomains(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    cursor = db.assets.find({"project_id": project_id, "type": "subdomain"})
-    assets = await cursor.to_list(length=2000)
+    cursor = db.assets.find({"project_id": project_id, "type": "subdomain"}).sort(
+        [("status", -1), ("hunt_priority", -1)]
+    )
+    max_len = limit if (limit and limit > 0) else 10000
+    assets = await cursor.to_list(length=max_len)
     return serialize_doc(assets)
+
+
+@router.get("/project/{project_id}/dns")
+async def get_project_dns(project_id: str):
+    """Returns all resolved DNS records for the project's assets."""
+    db = get_database()
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID format")
+
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    cursor = db.assets.find(
+        {"project_id": project_id, "metadata.dnsx": {"$exists": True}},
+        {"domain": 1, "status": 1, "metadata.dnsx": 1}
+    )
+    docs = await cursor.to_list(length=10000)
+    records = []
+    for d in docs:
+        dnsx = (d.get("metadata") or {}).get("dnsx") or {}
+        records.append({
+            "subdomain": d.get("domain", ""),
+            "status": d.get("status", "resolved"),
+            "ipv4": dnsx.get("a", []),
+            "ipv6": dnsx.get("aaaa", []),
+            "cname": dnsx.get("cname", []),
+            "resolved_at": dnsx.get("resolved_at"),
+        })
+    return records
 
 
 @router.get("/project/{project_id}/dashboard-stats")

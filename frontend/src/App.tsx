@@ -544,13 +544,14 @@ const MainDashboard: React.FC = () => {
     if (!activeProject) return;
     const projectId = activeProject.id;
     try {
-      const [assetList, subdomainList, dashboardStats, jobsList, riskScores, contentPathsRes] = await Promise.all([
+      const [assetList, subdomainList, dashboardStats, jobsList, riskScores, contentPathsRes, dnsRes] = await Promise.all([
         apiCall(`/assets/project/${projectId}`),
         apiCall(`/assets/project/${projectId}/subdomains`),
         apiCall(`/assets/project/${projectId}/dashboard-stats`),
         apiCall(`/jobs/project/${projectId}`),
         apiCall(`/projects/${projectId}/risk-scores`).catch(() => []),
         apiCall(`/assets/project/${projectId}/content-paths?limit=500`).catch(() => ({ items: [] })),
+        apiCall(`/assets/project/${projectId}/dns`).catch(() => []),
       ]);
 
       if (activeProjectRef.current?.id !== projectId) {
@@ -646,10 +647,35 @@ const MainDashboard: React.FC = () => {
 
       const originalUrls: { original_url: string; normalized_url: string; duplicate_removed: boolean; source: string }[] = [];
 
-      // 1. Separate real assets from Uro/GF URL assets
-      const realAssets = assetList.filter((a: any) => a.type !== "uro_url" && a.type !== "gf_url");
-      const uroAssets = assetList.filter((a: any) => a.type === "uro_url");
-      const gfAssets = assetList.filter((a: any) => a.type === "gf_url");
+      // 1. Merge subdomains and assets so core target subdomains and hosts are guaranteed present
+      const combinedAssetMap = new Map<string, any>();
+      (subdomainList || []).forEach((sub: any) => {
+        if (sub && sub.domain) {
+          combinedAssetMap.set(sub.domain, sub);
+        }
+      });
+      (assetList || []).forEach((a: any) => {
+        const key = a.domain || a.value || a.id;
+        if (!combinedAssetMap.has(key)) {
+          combinedAssetMap.set(key, a);
+        } else {
+          const existing = combinedAssetMap.get(key);
+          combinedAssetMap.set(key, { ...existing, ...a, metadata: { ...existing.metadata, ...a.metadata } });
+        }
+      });
+      const allUnifiedAssets = Array.from(combinedAssetMap.values());
+
+      // Separate real assets from Uro/GF URL assets
+      const realAssets = allUnifiedAssets.filter((a: any) => a.type !== "uro_url" && a.type !== "gf_url");
+      const uroAssets = allUnifiedAssets.filter((a: any) => a.type === "uro_url");
+      const gfAssets = allUnifiedAssets.filter((a: any) => a.type === "gf_url");
+
+      // Populate DNS records from dedicated API endpoint first if available
+      (dnsRes || []).forEach((rec: DnsRecord) => {
+        if (rec && rec.subdomain && !dns.some((r) => r.subdomain === rec.subdomain)) {
+          dns.push(rec);
+        }
+      });
 
       realAssets.forEach((asset: any) => {
         if (asset.metadata?.dnsx) {
@@ -699,6 +725,30 @@ const MainDashboard: React.FC = () => {
                 source: "katana",
               });
             }
+          });
+        }
+      });
+
+      // Also ensure any subdomain in subdomainList with dnsx/subzy is processed if not already
+      (subdomainList || []).forEach((s: any) => {
+        if (s.metadata?.dnsx && !dns.some((r) => r.subdomain === s.domain)) {
+          const dnsx = s.metadata.dnsx;
+          dns.push({
+            subdomain: s.domain,
+            status: s.status || "resolved",
+            ipv4: dnsx.a || [],
+            ipv6: dnsx.aaaa || [],
+            cname: dnsx.cname || [],
+            resolved_at: dnsx.resolved_at,
+          });
+        }
+        if (s.metadata?.subzy && !takeovers.some((r) => r.subdomain === s.domain)) {
+          const subzy = s.metadata.subzy;
+          takeovers.push({
+            subdomain: s.domain,
+            provider: subzy.service || "",
+            status: subzy.takeover_status || "Unknown",
+            last_checked: subzy.checked_at,
           });
         }
       });

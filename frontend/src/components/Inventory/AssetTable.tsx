@@ -15,6 +15,7 @@ import { apiCall, SCREENSHOT_BASE_URL } from "../../services/api";
 import { HighlightText, ExactMatchBadge, getExactMatchFields } from "../Common/HighlightText";
 
 const getRootDomain = (domain: string): string => {
+  if (!domain || typeof domain !== "string") return "";
   const parts = domain.split(".");
   if (parts.length <= 2) return domain;
   return parts.slice(-2).join(".");
@@ -254,30 +255,32 @@ export const AssetTable: React.FC<AssetTableProps> = ({
   };
 
   const baseFilteredAssets = assets.filter((asset) => {
-    if (["js_file", "screenshot", "finding", "historical_url"].includes(asset.type)) {
+    // Only core target assets belong in the main Assets table; secondary types have their own dedicated sub-tabs
+    if (["js_file", "screenshot", "finding", "historical_url", "historical_dead", "unprobed_url", "uro_url", "gf_url", "content_path", "dns_record"].includes(asset.type)) {
       return false;
     }
     const q = search.toLowerCase().trim();
+    const domainStr = asset.domain || (asset as any).value || "";
     const meta = asset.metadata || {};
     const openPorts = asset.open_ports || meta.open_ports || [];
     const tech = meta.technologies || [];
     const reasons = asset.hunt_reasons || (asset as any).risk?.reasons || [];
     const matchesSearch = !q ? true : (
-      asset.domain.toLowerCase().includes(q) ||
-      (meta.url && meta.url.toLowerCase().includes(q)) ||
-      (meta.ip_address && meta.ip_address.toLowerCase().includes(q)) ||
-      (meta.ip && meta.ip.toLowerCase().includes(q)) ||
+      domainStr.toLowerCase().includes(q) ||
+      (meta.url && String(meta.url).toLowerCase().includes(q)) ||
+      (meta.ip_address && String(meta.ip_address).toLowerCase().includes(q)) ||
+      (meta.ip && String(meta.ip).toLowerCase().includes(q)) ||
       openPorts.some((p: any) => String(p).includes(q)) ||
-      tech.some((t: string) => t.toLowerCase().includes(q)) ||
-      (meta.title && meta.title.toLowerCase().includes(q)) ||
-      (meta.server && meta.server.toLowerCase().includes(q)) ||
-      (meta.web_server && meta.web_server.toLowerCase().includes(q)) ||
+      tech.some((t: string) => (t || "").toLowerCase().includes(q)) ||
+      (meta.title && String(meta.title).toLowerCase().includes(q)) ||
+      (meta.server && String(meta.server).toLowerCase().includes(q)) ||
+      (meta.web_server && String(meta.web_server).toLowerCase().includes(q)) ||
       (meta.status_code !== undefined && String(meta.status_code).includes(q)) ||
-      (asset.status && asset.status.toLowerCase().includes(q)) ||
-      (asset.discovered_by && asset.discovered_by.toLowerCase().includes(q)) ||
-      (asset.type && asset.type.toLowerCase().includes(q)) ||
-      reasons.some((r: string) => r.toLowerCase().includes(q)) ||
-      ((asset as any).risk?.level && (asset as any).risk.level.toLowerCase().includes(q))
+      (asset.status && String(asset.status).toLowerCase().includes(q)) ||
+      (asset.discovered_by && String(asset.discovered_by).toLowerCase().includes(q)) ||
+      (asset.type && String(asset.type).toLowerCase().includes(q)) ||
+      reasons.some((r: string) => (r || "").toLowerCase().includes(q)) ||
+      ((asset as any).risk?.level && String((asset as any).risk.level).toLowerCase().includes(q))
     );
     const matchesType = filterType === "all" || asset.type === filterType;
     const matchesStatus = filterStatus === "all" || asset.status === filterStatus;
@@ -938,16 +941,16 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                         <div className="flex flex-col gap-1.5">
                           <div className="flex items-center space-x-2 flex-wrap">
                             <a
-                              href={asset.domain.startsWith("http://") || asset.domain.startsWith("https://") ? asset.domain : `https://${asset.domain}`}
+                              href={(asset.domain || "").startsWith("http://") || (asset.domain || "").startsWith("https://") ? (asset.domain || "") : `https://${asset.domain || ""}`}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="hover:text-cyber-accent hover:underline transition-colors break-all"
                             >
-                              <HighlightText text={asset.domain} highlight={search} />
+                              <HighlightText text={asset.domain || ""} highlight={search} />
                             </a>
                             {exactFields.length > 0 && <ExactMatchBadge fields={exactFields} />}
                             <button
-                              onClick={() => handleCopy(asset.domain)}
+                              onClick={() => handleCopy(asset.domain || "")}
                               className="text-slate-500 hover:text-cyber-accent transition-colors cursor-pointer"
                               title="Copy Domain"
                             >
