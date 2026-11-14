@@ -5,6 +5,27 @@
     "medium": 10,
     "low": 5
   },
+  "severity_floors": {
+    "critical": 90,
+    "high": 70,
+    "medium": 40,
+    "low": 10
+  },
+  "category_caps": {
+    "nuclei": 50,
+    "xss": 30,
+    "open_redirect": 20,
+    "subdomain_takeover": 40,
+    "exposed_admin_panel": 25,
+    "sensitive_file_leak": 25,
+    "database_port": 20,
+    "technology": 15,
+    "tls": 10
+  },
+  "diminishing_returns": {
+    "repeat_decay": 0.5,
+    "min_repeat_weight": 1
+  },
   "exposed_admin_panel": 20,
   "sensitive_file_leak": 20,
   "open_database_port": 15,

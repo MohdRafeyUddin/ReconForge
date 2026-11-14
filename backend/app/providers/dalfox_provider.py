@@ -22,7 +22,12 @@ class DalfoxProvider(BaseProvider):
     def description(self) -> str:
         return "Confirms Cross-Site Scripting (XSS) vulnerabilities."
 
-    async def discover(self, seed_domains: List[str]) -> AsyncGenerator[Dict[str, Any], None]:
+    async def discover(
+        self,
+        seed_domains: List[str],
+        rate_limit: Optional[int] = None,
+        custom_headers: Optional[Dict[str, str]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         urls = list(dict.fromkeys(u.strip() for u in seed_domains if u and u.strip()))
         
         yield {"type": "log", "message": "\n========== Dalfox XSS Confirmation =========="}
@@ -44,38 +49,8 @@ class DalfoxProvider(BaseProvider):
 
         yield {"type": "log", "message": "Launching Dalfox..."}
         
-        tool_path = self.detect_tool("dalfox")
+        tool_path = self.detect_tool("dalfox") or "dalfox"
         is_windows = platform.system().lower() == "windows"
-        
-        # Verify tool works/exists
-        test_cmd = ["wsl", "test", "-x", tool_path] if is_windows else ["test", "-x", tool_path]
-        try:
-            res = subprocess.run(test_cmd, capture_output=True, timeout=5)
-            if res.returncode != 0 and not tool_path.startswith("dalfox"):
-                # Graceful skip
-                warn_msg = f"[!] Dalfox executable not found or not executable at {tool_path}. Skipping Dalfox."
-                logger.warning(warn_msg)
-                yield {"type": "log", "message": warn_msg}
-                yield {
-                    "type": "scan_summary",
-                    "provider": "dalfox",
-                    "confirmed_xss": 0,
-                    "status": "SKIPPED"
-                }
-                yield {"type": "log", "message": "[!] Provider dalfox skipped"}
-                return
-        except Exception as exc:
-            warn_msg = f"[!] Error detecting Dalfox executable: {exc}. Skipping Dalfox."
-            logger.warning(warn_msg)
-            yield {"type": "log", "message": warn_msg}
-            yield {
-                "type": "scan_summary",
-                "provider": "dalfox",
-                "confirmed_xss": 0,
-                "status": "SKIPPED"
-            }
-            yield {"type": "log", "message": "[!] Provider dalfox skipped"}
-            return
 
         yield {"type": "log", "message": f"[*] Testing {len(urls)} XSS parameter targets..."}
         
@@ -98,13 +73,25 @@ class DalfoxProvider(BaseProvider):
                 
             wsl_temp_path = self.wsl_path_convert(temp_path)
             
-            # Build command with low concurrency as requested
+            # Rate limit and concurrency
+            worker_count = min(rate_limit, 10) if rate_limit else 5
+            delay_ms = int(1000 / rate_limit) if rate_limit and rate_limit > 0 else 0
+
+            dalfox_flags = ["file", wsl_temp_path if is_windows else temp_path, "--silent", "--worker", str(worker_count)]
+            if delay_ms > 0:
+                dalfox_flags.extend(["--delay", str(delay_ms)])
+
+            if custom_headers:
+                for hk, hv in custom_headers.items():
+                    if hk and hv:
+                        dalfox_flags.extend(["-H", f"{hk}: {hv}"])
+
             if is_windows:
-                cmd = ["wsl", tool_path, "file", wsl_temp_path, "--silent", "--concurrency", "5"]
+                cmd = ["wsl", "-e", tool_path, *dalfox_flags]
             else:
-                cmd = [tool_path, "file", temp_path, "--silent", "--concurrency", "5"]
+                cmd = [tool_path, *dalfox_flags]
                 
-            exec_msg = f"[*] Executing command: {' '.join(cmd)}"
+            exec_msg = self.format_cmd_log(cmd)
             logger.info(exec_msg)
             yield {"type": "log", "message": exec_msg}
             
@@ -225,10 +212,28 @@ class DalfoxProvider(BaseProvider):
                         
             exit_code = process.wait()
             if exit_code != 0:
+                if exit_code == 127:
+                    from app.core.tools import invalidate_tool_cache
+                    invalidate_tool_cache("dalfox")
+                    yield {
+                        "type": "stage_error",
+                        "stage": "validation",
+                        "tool": "dalfox",
+                        "message": f"Dalfox executable not found at {tool_path}",
+                    }
                 logger.warning(f"[-] Dalfox exited with code {exit_code}")
                 yield {"type": "log", "message": f"[-] Dalfox exited with code {exit_code}"}
                 
         except Exception as exc:
+            if "not found" in str(exc).lower() or isinstance(exc, FileNotFoundError):
+                from app.core.tools import invalidate_tool_cache
+                invalidate_tool_cache("dalfox")
+                yield {
+                    "type": "stage_error",
+                    "stage": "validation",
+                    "tool": "dalfox",
+                    "message": f"Dalfox execution failed: {exc}",
+                }
             err_msg = f"[-] Dalfox execution failed: {exc}"
             logger.exception(err_msg)
             yield {"type": "log", "message": err_msg}

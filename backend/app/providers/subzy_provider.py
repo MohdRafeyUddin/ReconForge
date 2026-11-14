@@ -147,6 +147,24 @@ class SubzyProvider(BaseProvider):
 
         is_windows = platform.system().lower() == "windows"
         tool_path = self.detect_tool("subzy")
+
+        if not tool_path:
+            err_msg = "Subzy binary not found (tool_missing: subzy)"
+            logger.error(err_msg)
+            yield {
+                "type": "stage_error",
+                "stage": "subzy",
+                "tool": "subzy",
+                "message": err_msg,
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": "subzy",
+                "status": "SKIPPED",
+                "count": 0,
+            }
+            return
+
         executable = "wsl" if is_windows else tool_path
         temp_path = ""
         start_ts = time.time()
@@ -172,7 +190,7 @@ class SubzyProvider(BaseProvider):
                 self._windows_path_to_wsl(temp_path) if is_windows else temp_path
             )
 
-            args = [tool_path] if is_windows else []
+            args = ["-e", tool_path] if is_windows else []
             subzy_flags = [
                 "run",
                 "--targets", list_path,

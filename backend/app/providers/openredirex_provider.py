@@ -21,7 +21,12 @@ class OpenredirexProvider(BaseProvider):
     def description(self) -> str:
         return "Confirms Open Redirect vulnerabilities."
 
-    async def discover(self, seed_domains: List[str]) -> AsyncGenerator[Dict[str, Any], None]:
+    async def discover(
+        self,
+        seed_domains: List[str],
+        rate_limit: Optional[int] = None,
+        custom_headers: Optional[Dict[str, str]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         urls = list(dict.fromkeys(u.strip() for u in seed_domains if u and u.strip()))
         
         yield {"type": "log", "message": "\n========== OpenRedirex Confirmation =========="}
@@ -45,35 +50,24 @@ class OpenredirexProvider(BaseProvider):
         
         tool_path = self.detect_tool("openredirex")
         is_windows = platform.system().lower() == "windows"
-        
-        # Verify tool works/exists
-        test_cmd = ["wsl", "test", "-f", tool_path] if is_windows else ["test", "-f", tool_path]
-        try:
-            res = subprocess.run(test_cmd, capture_output=True, timeout=5)
-            if res.returncode != 0 and not tool_path.endswith("openredirex.py"):
-                # Graceful skip
-                warn_msg = f"[!] OpenRedirex script not found at {tool_path}. Skipping OpenRedirex."
-                logger.warning(warn_msg)
-                yield {"type": "log", "message": warn_msg}
-                yield {
-                    "type": "scan_summary",
-                    "provider": "openredirex",
-                    "confirmed_redirects": 0,
-                    "status": "SKIPPED"
-                }
-                yield {"type": "log", "message": "[!] Provider openredirex skipped"}
-                return
-        except Exception as exc:
-            warn_msg = f"[!] Error detecting OpenRedirex script: {exc}. Skipping OpenRedirex."
-            logger.warning(warn_msg)
-            yield {"type": "log", "message": warn_msg}
+
+        if not tool_path:
+            err_msg = "OpenRedirex script path not found (None)"
+            logger.error(err_msg)
+            yield {
+                "type": "stage_error",
+                "stage": "openredirex",
+                "tool": "openredirex",
+                "message": err_msg,
+            }
             yield {
                 "type": "scan_summary",
                 "provider": "openredirex",
                 "confirmed_redirects": 0,
-                "status": "SKIPPED"
+                "status": "SKIPPED",
+                "reason": "tool_not_found",
             }
-            yield {"type": "log", "message": "[!] Provider openredirex skipped"}
+            yield {"type": "log", "message": "[!] Provider openredirex skipped: tool_not_found"}
             return
 
         yield {"type": "log", "message": f"[*] Testing {len(urls)} redirect parameter targets..."}
@@ -87,7 +81,7 @@ class OpenredirexProvider(BaseProvider):
         common_payloads = [
             "https://google.com",
             "//google.com",
-            "/\/google.com",
+            r"/\/google.com",
             "https:google.com",
             "//https://google.com"
         ]
@@ -120,13 +114,14 @@ class OpenredirexProvider(BaseProvider):
             wsl_urls_path = self.wsl_path_convert(temp_urls_path)
             wsl_payloads_path = self.wsl_path_convert(temp_payloads_path)
             
-            # Build command (low concurrency = 10)
+            # Build command using concurrency from config
+            concurrency = str(rate_limit) if rate_limit else "10"
             if is_windows:
-                cmd = ["wsl", "python3", tool_path, "-l", wsl_urls_path, "-p", wsl_payloads_path, "-c", "10"]
+                cmd = ["wsl", "-e", "python3", tool_path, "-l", wsl_urls_path, "-p", wsl_payloads_path, "-c", concurrency]
             else:
-                cmd = ["python3", tool_path, "-l", temp_urls_path, "-p", temp_payloads_path, "-c", "10"]
+                cmd = ["python3", tool_path, "-l", temp_urls_path, "-p", temp_payloads_path, "-c", concurrency]
                 
-            exec_msg = f"[*] Executing command: {' '.join(cmd)}"
+            exec_msg = self.format_cmd_log(cmd)
             logger.info(exec_msg)
             yield {"type": "log", "message": exec_msg}
             
@@ -252,10 +247,28 @@ class OpenredirexProvider(BaseProvider):
                         
             exit_code = process.wait()
             if exit_code != 0:
+                if exit_code == 127:
+                    from app.core.tools import invalidate_tool_cache
+                    invalidate_tool_cache("openredirex")
+                    yield {
+                        "type": "stage_error",
+                        "stage": "validation",
+                        "tool": "openredirex",
+                        "message": f"OpenRedirex executable not found at {tool_path}",
+                    }
                 logger.warning(f"[-] OpenRedirex exited with code {exit_code}")
                 yield {"type": "log", "message": f"[-] OpenRedirex exited with code {exit_code}"}
                 
         except Exception as exc:
+            if "not found" in str(exc).lower() or isinstance(exc, FileNotFoundError):
+                from app.core.tools import invalidate_tool_cache
+                invalidate_tool_cache("openredirex")
+                yield {
+                    "type": "stage_error",
+                    "stage": "validation",
+                    "tool": "openredirex",
+                    "message": f"OpenRedirex execution failed: {exc}",
+                }
             err_msg = f"[-] OpenRedirex execution failed: {exc}"
             logger.exception(err_msg)
             yield {"type": "log", "message": err_msg}

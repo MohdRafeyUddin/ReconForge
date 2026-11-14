@@ -70,6 +70,7 @@ export const ConsoleView: React.FC<ConsoleViewProps> = ({
     status === "completed" ? "#10B981"
     : status === "running" ? "#06B6D4"
     : status === "failed"  ? "#EF4444"
+    : status === "interrupted" ? "#F59E0B"
     : "#F59E0B";
 
   return (
@@ -96,6 +97,17 @@ export const ConsoleView: React.FC<ConsoleViewProps> = ({
           <XCircle className="w-5 h-5" />
         </button>
       </div>
+
+      {/* Interrupted Warning Banner */}
+      {status === "interrupted" && (
+        <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 py-2.5 flex items-start gap-2.5 text-amber-300 text-xs font-mono">
+          <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-bold">Scan Interrupted:</span> Backend server reloaded or restarted while this scan was active.
+            To avoid aborting live scan processes, run Uvicorn without <code className="bg-dark-bg px-1 py-0.5 rounded text-amber-200">--reload</code> (or with <code className="bg-dark-bg px-1 py-0.5 rounded text-amber-200">--reload-dir app</code>) during live scanning.
+          </div>
+        </div>
+      )}
 
       {/* Body */}
       <div className="p-5 grid grid-cols-1 md:grid-cols-3 gap-5">

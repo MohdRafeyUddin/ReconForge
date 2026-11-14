@@ -288,10 +288,17 @@ For detailed installation instructions see [docs/INSTALL_TOOLS.md](docs/INSTALL_
    ```bash
    pip install -r requirements.txt
    ```
-4. Run the Uvicorn ASGI server:
+4. Run the Uvicorn ASGI server (bound to 127.0.0.1 only for single-user local security):
    ```bash
-   uvicorn app.main:app --reload
+   # Live Scan Mode (Recommended during scans to prevent reloader from terminating active scan processes):
+   uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+   # Development Mode (Strictly restrict reload watch to app directory, excluding storage/tmp/screenshots):
+   uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir app
    ```
+   > **Important Developer Note:**
+   > When performing live scans, run Uvicorn **without** `--reload` (e.g. `uvicorn app.main:app`).
+   > If running with `--reload`, use `--reload-dir app` to prevent file writes in `backend/storage/`, `tmp`, or `screenshots/` from triggering server reloads. If Uvicorn reloads while a scan is in progress, background child processes are killed and the active scan is marked `interrupted`.
 
 ### B. Frontend setup
 1. Navigate to the frontend directory:

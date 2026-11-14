@@ -41,38 +41,8 @@ class GowitnessProvider(BaseProvider):
 
         yield {"type": "log", "message": "Launching GoWitness..."}
         
-        tool_path = self.detect_tool("gowitness")
+        tool_path = self.detect_tool("gowitness") or "gowitness"
         is_windows = platform.system().lower() == "windows"
-        
-        # Verify tool works/exists
-        test_cmd = ["wsl", "test", "-x", tool_path] if is_windows else ["test", "-x", tool_path]
-        try:
-            res = subprocess.run(test_cmd, capture_output=True, timeout=5)
-            if res.returncode != 0 and not tool_path.startswith("gowitness"):
-                # Graceful skip
-                warn_msg = f"[!] GoWitness executable not found or not executable at {tool_path}. Skipping GoWitness."
-                logger.warning(warn_msg)
-                yield {"type": "log", "message": warn_msg}
-                yield {
-                    "type": "scan_summary",
-                    "provider": "gowitness",
-                    "screenshots": 0,
-                    "status": "SKIPPED"
-                }
-                yield {"type": "log", "message": "[!] Provider gowitness skipped"}
-                return
-        except Exception as exc:
-            warn_msg = f"[!] Error detecting GoWitness executable: {exc}. Skipping GoWitness."
-            logger.warning(warn_msg)
-            yield {"type": "log", "message": warn_msg}
-            yield {
-                "type": "scan_summary",
-                "provider": "gowitness",
-                "screenshots": 0,
-                "status": "SKIPPED"
-            }
-            yield {"type": "log", "message": "[!] Provider gowitness skipped"}
-            return
 
         yield {"type": "log", "message": f"[*] Capturing screenshots for {len(urls)} live URLs..."}
         
@@ -95,7 +65,7 @@ class GowitnessProvider(BaseProvider):
             
             # Build command
             if is_windows:
-                cmd = ["wsl", tool_path, "single", "-u", url, "--screenshot-path", wsl_temp_dir, "--write-db=false"]
+                cmd = ["wsl", "-e", tool_path, "single", "-u", url, "--screenshot-path", wsl_temp_dir, "--write-db=false"]
             else:
                 cmd = [tool_path, "single", "-u", url, "--screenshot-path", temp_dir, "--write-db=false"]
                 
@@ -180,6 +150,15 @@ class GowitnessProvider(BaseProvider):
                         process.wait()
                         
             except Exception as e:
+                if "not found" in str(e).lower() or isinstance(e, FileNotFoundError):
+                    from app.core.tools import invalidate_tool_cache
+                    invalidate_tool_cache("gowitness")
+                    yield {
+                        "type": "stage_error",
+                        "stage": "visual_verification",
+                        "tool": "gowitness",
+                        "message": f"GoWitness execution failed: {e}",
+                    }
                 logger.error(f"Failed to capture screenshot for {url}: {e}")
                 
             finally:

@@ -32,7 +32,7 @@ NUCLEI_PASSES = [
     },
     {
         "name": "Exposure",
-        "tags": "exposure,misconfig,config,default-login,panel,tech,dns,ssl",
+        "tags": "exposure,misconfig,config,panel,tech,dns,ssl",
         "severity": "medium,high,critical"
     },
     {
@@ -54,7 +54,7 @@ PASS_TIMEOUT_SECONDS = 1800
 NUCLEI_HOST_PASSES = [
     {
         "name": "HostExposure",
-        "tags": "tech,exposure,misconfig,config,panel,default-login,dns,ssl",
+        "tags": "tech,exposure,misconfig,config,panel,dns,ssl",
         "severity": "medium,high,critical",
     },
 ]
@@ -143,6 +143,22 @@ class NucleiProvider(BaseProvider):
 
         is_windows = platform.system().lower() == "windows"
         tool_path = self.detect_tool("nuclei")
+        if not tool_path:
+            err_msg = "Nuclei binary not found (tool_missing: nuclei)"
+            logger.error(err_msg)
+            yield {
+                "type": "stage_error",
+                "stage": "nuclei",
+                "tool": "nuclei",
+                "message": err_msg,
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": self.name,
+                "status": "SKIPPED",
+                "count": 0,
+            }
+            return
         executable = "wsl" if is_windows else tool_path
         temp_path = ""
         start_ts = time.time()
@@ -341,7 +357,7 @@ class NucleiProvider(BaseProvider):
                 yield {"type": "log", "message": "Templates loaded."}
                 yield {"type": "log", "message": f"Scanning {len(urls)} URLs..."}
 
-                args = [tool_path] if is_windows else []
+                args = ["-e", tool_path] if is_windows else []
                 # Removed -stats flag
                 nuclei_flags = [
                     "-l", wsl_temp_path,
@@ -554,6 +570,8 @@ class NucleiProvider(BaseProvider):
         passes: list,
         urls: List[str],
         scan_label: str,
+        rate_limit: Optional[int] = None,
+        custom_headers: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Run a custom list of Nuclei passes against *urls*.
 
@@ -582,6 +600,22 @@ class NucleiProvider(BaseProvider):
 
         is_windows = platform.system().lower() == "windows"
         tool_path = self.detect_tool("nuclei")
+        if not tool_path:
+            err_msg = "Nuclei binary not found (tool_missing: nuclei)"
+            logger.error(err_msg)
+            yield {
+                "type": "stage_error",
+                "stage": "nuclei",
+                "tool": "nuclei",
+                "message": err_msg,
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": self.name,
+                "status": "SKIPPED",
+                "count": 0,
+            }
+            return
         executable = "wsl" if is_windows else tool_path
         temp_path = ""
         start_ts = time.time()
@@ -746,7 +780,8 @@ class NucleiProvider(BaseProvider):
                 yield {"type": "scan_summary", "event": "NucleiPassStarted", "pass_name": pass_name}
                 yield {"type": "log", "message": f"\n[*] Starting pass: {pass_name} (tags: {pass_tags})"}
 
-                args = [tool_path] if is_windows else []
+                args = ["-e", tool_path] if is_windows else []
+                rl_val = str(rate_limit) if rate_limit else "150"
                 nuclei_flags = [
                     "-l", wsl_temp_path,
                     "-tags", pass_tags,
@@ -754,12 +789,17 @@ class NucleiProvider(BaseProvider):
                     "-jsonl",
                     "-silent",
                     "-duc",
-                    "-rl", "150",
+                    "-rl", rl_val,
                     "-c", "25",
                     "-bs", "25",
                 ]
+                if custom_headers:
+                    for hk, hv in custom_headers.items():
+                        if hk and hv:
+                            nuclei_flags.extend(["-H", f"{hk}: {hv}"])
+
                 cmd = [executable, *args, *nuclei_flags]
-                yield {"type": "log", "message": f"[*] Executing: {' '.join(cmd)}"}
+                yield {"type": "log", "message": self.format_cmd_log(cmd)}
 
                 from app.job_control import register_process, unregister_process, check_job_status
                 await check_job_status()
@@ -932,7 +972,10 @@ class NucleiProvider(BaseProvider):
     # ──────────────────────────────────────────────────────────────────────
 
     async def discover_host_scan(
-        self, live_host_urls: List[str]
+        self,
+        live_host_urls: List[str],
+        rate_limit: Optional[int] = None,
+        custom_headers: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Scan bare live hosts for technology, misconfig, and exposure issues.
 
@@ -962,7 +1005,9 @@ class NucleiProvider(BaseProvider):
             yield {"type": "log", "message": "[√] Provider nuclei_host completed"}
             return
 
-        async for event in self._run_passes(NUCLEI_HOST_PASSES, urls, "Nuclei Host Scan"):
+        async for event in self._run_passes(
+            NUCLEI_HOST_PASSES, urls, "Nuclei Host Scan", rate_limit=rate_limit, custom_headers=custom_headers
+        ):
             # Re-label the provider field so the frontend pipeline card reads correctly.
             if event.get("type") == "scan_summary" and event.get("provider") == "Nuclei Host Scan":
                 event = {**event, "provider": "Nuclei Host Scan"}
@@ -973,7 +1018,10 @@ class NucleiProvider(BaseProvider):
     # ──────────────────────────────────────────────────────────────────────
 
     async def discover_endpoint_scan(
-        self, gf_urls: List[str]
+        self,
+        gf_urls: List[str],
+        rate_limit: Optional[int] = None,
+        custom_headers: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Scan GF-classified interesting endpoints for exploitable bug-classes.
 
@@ -1004,7 +1052,9 @@ class NucleiProvider(BaseProvider):
             yield {"type": "log", "message": "[√] Provider nuclei_endpoint completed"}
             return
 
-        async for event in self._run_passes(NUCLEI_ENDPOINT_PASSES, urls, "Nuclei Endpoint Scan"):
+        async for event in self._run_passes(
+            NUCLEI_ENDPOINT_PASSES, urls, "Nuclei Endpoint Scan", rate_limit=rate_limit, custom_headers=custom_headers
+        ):
             if event.get("type") == "scan_summary" and event.get("provider") == "Nuclei Endpoint Scan":
                 event = {**event, "provider": "Nuclei Endpoint Scan"}
             yield event

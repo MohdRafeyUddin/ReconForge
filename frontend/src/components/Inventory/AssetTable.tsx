@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Search, Filter, Copy, ChevronDown, ChevronUp } from "lucide-react";
+import { Search, Filter, Copy, ChevronDown, ChevronUp, FileText, X, Shield, Layers } from "lucide-react";
 import { DnsTab } from "./DnsTab";
 import type { DnsRecord } from "./DnsTab";
 import { TakeoverTab } from "./TakeoverTab";
@@ -8,8 +8,10 @@ import { NormalizedUrlTab } from "./NormalizedUrlTab";
 import type { NormalizedUrlRecord } from "./NormalizedUrlTab";
 import { GfTab } from "./GfTab";
 import type { GfUrlRecord } from "./GfTab";
+import { ContentDiscoveryTab } from "./ContentDiscoveryTab";
+import type { ContentPathRecord } from "./ContentDiscoveryTab";
 import { NucleiTab } from "./NucleiTab";
-import { SCREENSHOT_BASE_URL } from "../../services/api";
+import { apiCall, SCREENSHOT_BASE_URL } from "../../services/api";
 
 const getRootDomain = (domain: string): string => {
   const parts = domain.split(".");
@@ -26,6 +28,7 @@ const escapeCSV = (val: any) => {
 
 interface Asset {
   id: string;
+  project_id?: string;
   domain: string;
   type: string;
   status: string;
@@ -36,28 +39,53 @@ interface Asset {
   updated_at?: string;
   sources?: string[];
   risk?: any;
+  hunt_priority?: number;
+  hunt_reasons?: string[];
+  status_class?: string;
+  is_interesting?: boolean;
+  cdn_waf?: {
+    is_cdn?: boolean;
+    is_waf?: boolean;
+    cdn_provider?: string;
+    waf_provider?: string;
+    exclusion_reason?: string;
+  };
+  exclusion_reason?: string;
+  is_cluster_representative?: boolean;
+  is_cluster_member?: boolean;
+  cluster_id?: string;
+  cluster_size?: number;
+  cluster_skip_reason?: string;
+  response_body_path?: string;
+  services?: any[];
 }
 
 interface AssetTableProps {
   assets: Asset[];
+  projectId?: string;
   projectName?: string;
   dnsRecords?: DnsRecord[];
   takeoverRecords?: TakeoverRecord[];
   normalizedUrlRecords?: NormalizedUrlRecord[];
   gfRecords?: GfUrlRecord[];
-  initialTab?: "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei" | "historical_urls" | "js_files" | "screenshots";
+  contentPathRecords?: ContentPathRecord[];
+  latestScanTime?: string | null;
+  initialTab?: "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei" | "content_discovery" | "historical_urls" | "js_files" | "screenshots";
   initialSeverityFilter?: string | null;
 }
 
-type InventoryTab = "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei" | "historical_urls" | "js_files" | "screenshots";
+type InventoryTab = "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei" | "content_discovery" | "historical_urls" | "js_files" | "screenshots";
 
 export const AssetTable: React.FC<AssetTableProps> = ({
   assets,
+  projectId,
   projectName = "project",
   dnsRecords = [],
   takeoverRecords = [],
   normalizedUrlRecords = [],
   gfRecords = [],
+  contentPathRecords = [],
+  latestScanTime = null,
   initialTab,
   initialSeverityFilter = null,
 }) => {
@@ -68,6 +96,69 @@ export const AssetTable: React.FC<AssetTableProps> = ({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [activeTabs, setActiveTabs] = useState<Record<string, string>>({});
   const [showExportDropdown, setShowExportDropdown] = useState(false);
+  const [sortField, setSortField] = useState<string | null>("hunt_priority");
+  const [sortAsc, setSortAsc] = useState<boolean>(false);
+
+  const handleSort = (field: string) => {
+    if (sortField === field) {
+      setSortAsc(!sortAsc);
+    } else {
+      setSortField(field);
+      setSortAsc(false);
+    }
+  };
+
+  const handleCopyTopHosts = (count: number = 10) => {
+    const sorted = [...assets]
+      .filter(a => a.domain && (a.hunt_priority !== undefined || a.status === "live"))
+      .sort((a, b) => ((b.hunt_priority ?? 0) - (a.hunt_priority ?? 0)))
+      .slice(0, count);
+    const text = sorted.map(a => a.domain).join("\n");
+    navigator.clipboard.writeText(text);
+    alert(`Copied top ${sorted.length} hunt target hosts to clipboard!`);
+  };
+
+  const [responseBodyModal, setResponseBodyModal] = useState<{
+    asset: Asset;
+    content: string | null;
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
+
+  const handleOpenResponseBody = async (asset: Asset) => {
+    const pId = projectId || asset.project_id || (asset as any).projectId;
+    if (!pId) {
+      setResponseBodyModal({
+        asset,
+        content: null,
+        loading: false,
+        error: "Missing project ID to retrieve response body.",
+      });
+      return;
+    }
+    setResponseBodyModal({
+      asset,
+      content: null,
+      loading: true,
+      error: null,
+    });
+    try {
+      const data = await apiCall(`/assets/project/${pId}/asset/${asset.id}/response-body`);
+      setResponseBodyModal({
+        asset,
+        content: data.content ?? "(Empty response body)",
+        loading: false,
+        error: null,
+      });
+    } catch (err: any) {
+      setResponseBodyModal({
+        asset,
+        content: null,
+        loading: false,
+        error: err.message || "Failed to load response body",
+      });
+    }
+  };
 
   React.useEffect(() => {
     if (initialTab) {
@@ -158,7 +249,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     setExpandedId(expandedId === id ? null : id);
   };
 
-  const filteredAssets = assets.filter((asset) => {
+  const baseFilteredAssets = assets.filter((asset) => {
     if (["js_file", "screenshot", "finding", "historical_url"].includes(asset.type)) {
       return false;
     }
@@ -169,6 +260,24 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     
     return matchesSearch && matchesType && matchesStatus;
   });
+  const filteredAssets = React.useMemo(() => {
+    if (!sortField) return baseFilteredAssets;
+    return [...baseFilteredAssets].sort((a, b) => {
+      let aVal: any = 0;
+      let bVal: any = 0;
+      if (sortField === "hunt_priority") {
+        aVal = a.hunt_priority ?? -1;
+        bVal = b.hunt_priority ?? -1;
+      } else if (sortField === "risk") {
+        aVal = a.risk?.score ?? -1;
+        bVal = b.risk?.score ?? -1;
+      }
+      if (aVal < bVal) return sortAsc ? -1 : 1;
+      if (aVal > bVal) return sortAsc ? 1 : -1;
+      return 0;
+    });
+  }, [baseFilteredAssets, sortField, sortAsc]);
+
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -281,10 +390,29 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     }));
   }, [assets]);
 
+  const contentDiscoveryList = React.useMemo(() => {
+    if (contentPathRecords && contentPathRecords.length > 0) {
+      return contentPathRecords;
+    }
+    return assets.filter(a => a.type === "content_path").map(a => ({
+      value: a.domain || a.metadata?.url || (a as any).value || "",
+      host: a.metadata?.host || a.domain || "",
+      status_code: a.metadata?.status_code || (a as any).status_code,
+      content_length: a.metadata?.content_length || (a as any).content_length || 0,
+      words: a.metadata?.words || (a as any).words || 0,
+      lines: a.metadata?.lines || (a as any).lines || 0,
+      redirect_location: a.metadata?.redirect_location || (a as any).redirect_location || "",
+      calibration_used: a.metadata?.calibration_used ?? true,
+      first_seen: a.created_at || (a as any).first_seen,
+      last_seen: a.updated_at || (a as any).last_seen,
+    }));
+  }, [assets, contentPathRecords]);
+
   const inventoryTabs: { id: InventoryTab; label: string; count?: number }[] = [
     { id: "assets", label: "Assets", count: filteredAssets.length },
     { id: "dns", label: "DNS", count: dnsRecords.length },
     { id: "takeovers", label: "Takeovers", count: takeoverRecords.length },
+    { id: "content_discovery", label: "Content Discovery", count: contentDiscoveryList.length },
     { id: "normalized_urls", label: "Normalized URLs", count: displayedNormalizedUrls.length },
     { id: "gf", label: "Interesting URLs", count: gfTotalCount },
     { id: "nuclei", label: "Security Findings", count: nucleiFindings.length },
@@ -325,6 +453,15 @@ export const AssetTable: React.FC<AssetTableProps> = ({
       {/* Takeovers Tab */}
       {activeInventoryTab === "takeovers" && (
         <TakeoverTab records={takeoverRecords} projectName={projectName} />
+      )}
+
+      {/* Content Discovery Tab */}
+      {activeInventoryTab === "content_discovery" && (
+        <ContentDiscoveryTab
+          records={contentDiscoveryList}
+          projectName={projectName}
+          latestScanTime={latestScanTime}
+        />
       )}
 
       {/* Normalized URLs Tab */}
@@ -553,6 +690,15 @@ export const AssetTable: React.FC<AssetTableProps> = ({
             <option value="inactive">Inactive</option>
           </select>
 
+          
+          <button
+            onClick={() => handleCopyTopHosts(10)}
+            className="bg-dark-input hover:bg-dark-hover border border-dark-border rounded text-xs px-2.5 py-1.5 text-cyber-accent hover:text-white transition-all flex items-center gap-1.5 cursor-pointer font-semibold"
+            title="Copy top 10 highest hunt-priority hostnames to clipboard"
+          >
+            🎯 Copy Top 10 Hosts
+          </button>
+
           <div className="relative">
             <button
               onClick={() => setShowExportDropdown(!showExportDropdown)}
@@ -594,10 +740,11 @@ export const AssetTable: React.FC<AssetTableProps> = ({
               <th className="p-4 w-10"></th>
               <th className="p-4">Asset / Subdomain</th>
               <th className="p-4">Type</th>
-              <th className="p-4">Status</th>
+              <th className="p-4">Status & Code</th>
               <th className="p-4">Risk</th>
               <th className="p-4">Exposure</th>
               <th className="p-4">Priority</th>
+              <th className="p-4 cursor-pointer hover:text-cyber-accent select-none" onClick={() => handleSort("hunt_priority")}>Hunt Priority {sortField === "hunt_priority" ? (sortAsc ? "▲" : "▼") : ""}</th>
               <th className="p-4">IP Address</th>
               <th className="p-4">Open Ports</th>
               <th className="p-4">Discovered By</th>
@@ -613,8 +760,8 @@ export const AssetTable: React.FC<AssetTableProps> = ({
             ) : (
               filteredAssets.map((asset) => {
                 const isExpanded = expandedId === asset.id;
-                const ip = asset.metadata.ip_address || "N/A";
-                const hasExposedPorts = asset.open_ports.some(p => [22, 21, 23, 3389].includes(p));
+                const ip = asset.metadata?.ip_address || "N/A";
+                const hasExposedPorts = (asset.open_ports || []).some(p => [22, 21, 23, 3389].includes(p));
 
                 return (
                   <React.Fragment key={asset.id}>
@@ -628,15 +775,62 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                         </button>
                       </td>
                       <td className="p-4 font-bold text-slate-200">
-                        <div className="flex items-center space-x-2">
-                          <span>{asset.domain}</span>
-                          <button
-                            onClick={() => handleCopy(asset.domain)}
-                            className="text-slate-500 hover:text-cyber-accent transition-colors"
-                            title="Copy Domain"
-                          >
-                            <Copy className="w-3.5 h-3.5" />
-                          </button>
+                        <div className="flex flex-col gap-1.5">
+                          <div className="flex items-center space-x-2">
+                            <span>{asset.domain}</span>
+                            <button
+                              onClick={() => handleCopy(asset.domain)}
+                              className="text-slate-500 hover:text-cyber-accent transition-colors cursor-pointer"
+                              title="Copy Domain"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                            {(asset.metadata?.response_body_path || asset.response_body_path) && (
+                              <button
+                                onClick={() => handleOpenResponseBody(asset)}
+                                className="px-1.5 py-0.5 rounded bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 text-[9px] font-mono flex items-center gap-1 transition-all cursor-pointer shadow-sm"
+                                title="View stored HTTP response body"
+                              >
+                                <FileText className="w-3 h-3" />
+                                Body
+                              </button>
+                            )}
+                          </div>
+                          {/* Badges row: CDN/WAF and Cluster Rep/Member */}
+                          <div className="flex flex-wrap gap-1 items-center">
+                            {(() => {
+                              const cdnWaf = asset.cdn_waf || asset.metadata?.cdn_waf;
+                              const cdnName = cdnWaf?.cdn_provider || cdnWaf?.waf_provider || asset.metadata?.cdn_provider || asset.metadata?.waf_provider;
+                              const reason = cdnWaf?.exclusion_reason || asset.exclusion_reason || asset.metadata?.exclusion_reason;
+                              if (!cdnName) return null;
+                              return (
+                                <span
+                                  className="px-1.5 py-0.25 rounded bg-purple-500/15 border border-purple-500/35 text-purple-300 font-mono text-[9px] flex items-center gap-1 cursor-help"
+                                  title={reason || `Protected by ${cdnName}. Excluded from wide port scans.`}
+                                >
+                                  <Shield className="w-2.5 h-2.5" />
+                                  {cdnName}
+                                </span>
+                              );
+                            })()}
+                            {(asset.is_cluster_representative || asset.metadata?.is_cluster_representative) && (
+                              <span
+                                className="px-1.5 py-0.25 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 font-mono text-[9px] font-bold flex items-center gap-1"
+                                title={`Cluster Representative (${asset.cluster_size || asset.metadata?.cluster_size || 1} similar hosts)`}
+                              >
+                                <Layers className="w-2.5 h-2.5" />
+                                Rep ({asset.cluster_size || asset.metadata?.cluster_size || 1})
+                              </span>
+                            )}
+                            {((asset.is_cluster_member || asset.metadata?.is_cluster_member) && !(asset.is_cluster_representative || asset.metadata?.is_cluster_representative)) && (
+                              <span
+                                className="px-1.5 py-0.25 rounded bg-blue-500/15 border border-blue-500/35 text-blue-300 font-mono text-[9px] flex items-center gap-1 cursor-help"
+                                title={asset.cluster_skip_reason || asset.metadata?.cluster_skip_reason || "Cluster member: duplicate of leader. Expensive crawl & scan skipped."}
+                              >
+                                👥 Member (Skipped)
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </td>
                       <td className="p-4">
@@ -645,15 +839,46 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                         </span>
                       </td>
                       <td className="p-4">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                          asset.status === "live"
-                            ? "bg-cyber-success/10 border border-cyber-success/30 text-cyber-success"
-                            : asset.status === "unknown"
-                            ? "bg-slate-500/10 border border-slate-500/30 text-slate-400"
-                            : "bg-cyber-danger/10 border border-cyber-danger/30 text-cyber-danger"
-                        }`}>
-                          {asset.status}
-                        </span>
+                        {(() => {
+                          const statusCode = asset.metadata?.status_code !== undefined ? asset.metadata.status_code : (asset as any).status_code;
+                          const isInteresting = asset.is_interesting || asset.metadata?.is_interesting || (statusCode === 401 || statusCode === 403);
+                          const statusClass = asset.status_class || asset.metadata?.status_class;
+                          return (
+                            <div className="flex flex-col gap-1 items-start">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                  asset.status === "live"
+                                    ? "bg-cyber-success/10 border border-cyber-success/30 text-cyber-success"
+                                    : asset.status === "stale"
+                                    ? "bg-amber-500/10 border border-amber-500/30 text-amber-400"
+                                    : asset.status === "unknown"
+                                    ? "bg-slate-500/10 border border-slate-500/30 text-slate-400"
+                                    : "bg-cyber-danger/10 border border-cyber-danger/30 text-cyber-danger"
+                                }`}>
+                                  {asset.status}
+                                </span>
+                                {statusCode !== undefined && (
+                                  <span className="px-1.5 py-0.5 rounded bg-dark-bg border border-dark-border text-slate-200 font-mono text-[10px]">
+                                    {statusCode}
+                                  </span>
+                                )}
+                              </div>
+                              {isInteresting && (
+                                <span
+                                  className="px-1.5 py-0.25 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 font-mono text-[9px] font-bold"
+                                  title="Interesting Auth/Forbidden Target (401/403)"
+                                >
+                                  ★ Interesting
+                                </span>
+                              )}
+                              {statusClass && (
+                                <span className="text-[9px] text-slate-500 font-mono">
+                                  {statusClass}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="p-4">
                         {(() => {
@@ -713,6 +938,39 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                             <span className={`text-[10px] font-mono ${color}`}>
                               {prio.replace(" remediation required", "").replace(" remediation", "")}
                             </span>
+                          );
+                        })()}
+                      </td>
+                      <td className="p-4">
+                        {(() => {
+                          const hp = asset.hunt_priority;
+                          const reasons = asset.hunt_reasons || [];
+                          if (hp === undefined || hp === null) {
+                            return <span className="text-slate-600 font-mono text-[10px]">-</span>;
+                          }
+                          let hpColor = "bg-slate-500/10 border-slate-500/30 text-slate-400";
+                          if (hp >= 80) hpColor = "bg-cyan-500/15 border-cyan-500/40 text-cyan-300 font-bold";
+                          else if (hp >= 50) hpColor = "bg-amber-500/15 border-amber-500/40 text-amber-300 font-bold";
+                          else if (hp >= 20) hpColor = "bg-blue-500/15 border-blue-500/40 text-blue-300";
+
+                          return (
+                            <div className="relative group inline-block">
+                              <span className={`px-2 py-0.5 rounded border text-[10px] font-mono cursor-help inline-flex items-center gap-1 ${hpColor}`}>
+                                🎯 {hp}
+                              </span>
+                              {reasons.length > 0 && (
+                                <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-50 bg-dark-card border border-dark-border p-2.5 rounded-lg shadow-2xl text-[10px] font-mono text-slate-200 w-64 whitespace-normal">
+                                  <div className="font-bold text-cyber-accent mb-1 border-b border-dark-border pb-0.5">
+                                    Hunt Priority Factors:
+                                  </div>
+                                  <ul className="list-disc pl-3 space-y-0.5">
+                                    {reasons.map((r, idx) => (
+                                      <li key={idx} className="leading-tight">{r}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
                           );
                         })()}
                       </td>
@@ -858,6 +1116,65 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                                   <div>
                                     <span className="text-slate-500">TLS:</span>{" "}
                                     <span className="text-slate-300">{asset.metadata.tls_info?.issuer || asset.metadata.ssl_info?.issuer || "Available"}</span>
+                                  </div>
+                                )}
+                                {(asset.status_class || asset.metadata?.status_class) && (
+                                  <div>
+                                    <span className="text-slate-500">STATUS CLASS:</span>{" "}
+                                    <span className="text-slate-300">{asset.status_class || asset.metadata?.status_class}</span>
+                                  </div>
+                                )}
+                                {(asset.metadata?.response_body_path || asset.response_body_path) && (
+                                  <div className="pt-2 mt-1 border-t border-dark-border/40 flex items-center justify-between">
+                                    <span className="text-slate-500">RESPONSE BODY:</span>
+                                    <button
+                                      onClick={() => handleOpenResponseBody(asset)}
+                                      className="px-2 py-0.5 rounded bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 text-[10px] font-mono flex items-center gap-1.5 transition-colors cursor-pointer"
+                                    >
+                                      <FileText className="w-3.5 h-3.5" />
+                                      View Stored Body ({asset.metadata?.response_body_size ? `${Math.round(asset.metadata.response_body_size / 1024)} KB` : "Stored"})
+                                    </button>
+                                  </div>
+                                )}
+                                {(asset.cdn_waf || asset.metadata?.cdn_waf) && (
+                                  <div className="pt-2 mt-1 border-t border-dark-border/40 space-y-1">
+                                    <div className="flex items-center gap-1.5 text-purple-300 font-bold">
+                                      <Shield className="w-3.5 h-3.5" />
+                                      <span>CDN / WAF Protection: {(asset.cdn_waf?.cdn_provider || asset.cdn_waf?.waf_provider || asset.metadata?.cdn_provider || asset.metadata?.waf_provider || "Detected")}</span>
+                                    </div>
+                                    {(asset.cdn_waf?.exclusion_reason || asset.exclusion_reason || asset.metadata?.exclusion_reason) && (
+                                      <div className="text-[10px] text-slate-400 pl-5">
+                                        Reason: <span className="text-amber-400/90">{asset.cdn_waf?.exclusion_reason || asset.exclusion_reason || asset.metadata?.exclusion_reason}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                                {(asset.is_cluster_representative || asset.is_cluster_member || asset.metadata?.is_cluster_representative || asset.metadata?.is_cluster_member) && (
+                                  <div className="pt-2 mt-1 border-t border-dark-border/40 space-y-1">
+                                    <div className="flex items-center gap-1.5 text-emerald-300 font-bold">
+                                      <Layers className="w-3.5 h-3.5" />
+                                      <span>
+                                        Clustering: {(asset.is_cluster_representative || asset.metadata?.is_cluster_representative) ? `Representative (${asset.cluster_size || asset.metadata?.cluster_size || 1} hosts)` : "Member (Skipped)"}
+                                      </span>
+                                    </div>
+                                    {(asset.cluster_skip_reason || asset.metadata?.cluster_skip_reason) && (
+                                      <div className="text-[10px] text-slate-400 pl-5">
+                                        Skip Reason: <span className="text-blue-300">{asset.cluster_skip_reason || asset.metadata?.cluster_skip_reason}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                                {(asset.services || asset.metadata?.services) && (asset.services || asset.metadata?.services).length > 0 && (
+                                  <div className="pt-2 mt-1 border-t border-dark-border/40 space-y-1">
+                                    <span className="text-slate-500 font-bold block mb-1">NMAP SERVICE FINGERPRINTS:</span>
+                                    <div className="space-y-1">
+                                      {(asset.services || asset.metadata?.services).map((srv: any, idx: number) => (
+                                        <div key={idx} className="bg-dark-bg/60 border border-dark-border/50 rounded px-2 py-1 text-[10px] flex items-center justify-between">
+                                          <span className="text-cyber-accent font-bold">Port {srv.port}/{srv.protocol || "tcp"}</span>
+                                          <span className="text-slate-300">{srv.service || "unknown"} {srv.product ? `(${srv.product} ${srv.version || ""})` : ""}</span>
+                                        </div>
+                                      ))}
+                                    </div>
                                   </div>
                                 )}
                                 {!asset.metadata.url && asset.metadata.status_code === undefined && !asset.metadata.title && !asset.metadata.technologies?.length && !asset.metadata.server && !asset.metadata.web_server && !(asset.metadata.ip || asset.metadata.ip_address) && asset.metadata.response_time === undefined && asset.metadata.content_length === undefined && !asset.metadata.redirect_location && !(asset.metadata.tls_info || asset.metadata.ssl_info) && (
@@ -1152,6 +1469,84 @@ export const AssetTable: React.FC<AssetTableProps> = ({
         </table>
       </div>
     </div>
+      )}
+
+      {/* Response Body Modal */}
+      {responseBodyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="bg-dark-card border border-dark-border rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden animate-fadeIn">
+            {/* Header */}
+            <div className="p-4 border-b border-dark-border flex justify-between items-center bg-dark-bg/60">
+              <div className="flex items-center gap-3">
+                <FileText className="w-5 h-5 text-cyber-accent" />
+                <div>
+                  <h3 className="text-sm font-bold text-white font-mono flex items-center gap-2">
+                    <span>{responseBodyModal.asset.domain}</span>
+                    {responseBodyModal.asset.metadata?.status_code !== undefined && (
+                      <span className="px-2 py-0.25 bg-cyber-accent/20 border border-cyber-accent/40 text-cyber-accent rounded text-[10px]">
+                        HTTP {responseBodyModal.asset.metadata.status_code}
+                      </span>
+                    )}
+                  </h3>
+                  <span className="text-[10px] text-slate-400 font-mono">
+                    Stored HTTP Response Body (Isolated per-project disk storage)
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {responseBodyModal.content && (
+                  <button
+                    onClick={() => handleCopy(responseBodyModal.content || "")}
+                    className="p-1.5 text-slate-400 hover:text-white hover:bg-dark-hover rounded transition-colors cursor-pointer"
+                    title="Copy Body Content"
+                  >
+                    <Copy className="w-4 h-4" />
+                  </button>
+                )}
+                <button
+                  onClick={() => setResponseBodyModal(null)}
+                  className="p-1.5 text-slate-400 hover:text-white hover:bg-dark-hover rounded transition-colors cursor-pointer"
+                  title="Close Modal"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Content Area */}
+            <div className="p-4 flex-1 overflow-auto bg-dark-bg font-mono text-xs">
+              {responseBodyModal.loading && (
+                <div className="flex items-center justify-center py-16 text-slate-400 gap-2">
+                  <div className="w-4 h-4 border-2 border-cyber-accent border-t-transparent rounded-full animate-spin" />
+                  <span>Loading response body securely from storage...</span>
+                </div>
+              )}
+              {responseBodyModal.error && (
+                <div className="p-4 bg-red-950/30 border border-red-800/50 rounded text-red-300 text-xs">
+                  {responseBodyModal.error}
+                </div>
+              )}
+              {responseBodyModal.content !== null && !responseBodyModal.loading && (
+                <pre className="text-slate-200 select-all whitespace-pre-wrap break-all leading-relaxed max-h-[60vh] overflow-y-auto">
+                  {responseBodyModal.content}
+                </pre>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="p-3 border-t border-dark-border bg-dark-bg/60 flex justify-between items-center text-[10px] font-mono text-slate-500">
+              <span className="truncate max-w-md">
+                Path: {responseBodyModal.asset.metadata?.response_body_path || responseBodyModal.asset.response_body_path || "N/A"}
+              </span>
+              <button
+                onClick={() => setResponseBodyModal(null)}
+                className="px-3 py-1 bg-dark-card hover:bg-dark-hover border border-dark-border rounded text-slate-300 text-xs transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

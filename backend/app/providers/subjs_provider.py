@@ -38,44 +38,14 @@ class SubjsProvider(BaseProvider):
 
         yield {"type": "log", "message": "Launching SubJS..."}
         
-        tool_path = self.detect_tool("subjs")
+        tool_path = self.detect_tool("subjs") or "subjs"
         is_windows = platform.system().lower() == "windows"
-        
-        # Verify tool works/exists
-        test_cmd = ["wsl", "test", "-x", tool_path] if is_windows else ["test", "-x", tool_path]
-        try:
-            res = subprocess.run(test_cmd, capture_output=True, timeout=5)
-            if res.returncode != 0 and not tool_path.startswith("subjs"):
-                # Graceful skip
-                warn_msg = f"[!] SubJS executable not found or not executable at {tool_path}. Skipping SubJS."
-                logger.warning(warn_msg)
-                yield {"type": "log", "message": warn_msg}
-                yield {
-                    "type": "scan_summary",
-                    "provider": "subjs",
-                    "js_files": 0,
-                    "status": "SKIPPED"
-                }
-                yield {"type": "log", "message": "[!] Provider subjs skipped"}
-                return
-        except Exception as exc:
-            warn_msg = f"[!] Error detecting SubJS executable: {exc}. Skipping SubJS."
-            logger.warning(warn_msg)
-            yield {"type": "log", "message": warn_msg}
-            yield {
-                "type": "scan_summary",
-                "provider": "subjs",
-                "js_files": 0,
-                "status": "SKIPPED"
-            }
-            yield {"type": "log", "message": "[!] Provider subjs skipped"}
-            return
 
         yield {"type": "log", "message": f"[*] Scanning {len(urls)} URLs for JS files..."}
         
         # Build command
         if is_windows:
-            cmd = ["wsl", tool_path]
+            cmd = ["wsl", "-e", tool_path]
         else:
             cmd = [tool_path]
             
@@ -186,10 +156,28 @@ class SubjsProvider(BaseProvider):
                         
             exit_code = process.wait()
             if exit_code != 0:
+                if exit_code == 127:
+                    from app.core.tools import invalidate_tool_cache
+                    invalidate_tool_cache("subjs")
+                    yield {
+                        "type": "stage_error",
+                        "stage": "js_analysis",
+                        "tool": "subjs",
+                        "message": f"SubJS binary not found at {tool_path}",
+                    }
                 logger.warning(f"[-] SubJS exited with code {exit_code}")
                 yield {"type": "log", "message": f"[-] SubJS exited with code {exit_code}"}
                 
         except Exception as exc:
+            if "not found" in str(exc).lower() or isinstance(exc, FileNotFoundError):
+                from app.core.tools import invalidate_tool_cache
+                invalidate_tool_cache("subjs")
+                yield {
+                    "type": "stage_error",
+                    "stage": "js_analysis",
+                    "tool": "subjs",
+                    "message": f"SubJS execution failed: {exc}",
+                }
             err_msg = f"[-] SubJS execution failed: {exc}"
             logger.exception(err_msg)
             yield {"type": "log", "message": err_msg}

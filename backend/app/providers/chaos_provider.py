@@ -26,10 +26,27 @@ class ChaosProvider(BaseProvider):
         is_windows = platform.system().lower() == "windows"
         tool_path = self.detect_tool("chaos")
 
+        if not tool_path:
+            err_msg = "Chaos binary not found (tool_missing: chaos)"
+            logger.error(err_msg)
+            yield {
+                "type": "stage_error",
+                "stage": "chaos",
+                "tool": "chaos",
+                "message": err_msg,
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": "chaos",
+                "status": "SKIPPED",
+                "count": 0,
+            }
+            return
+
         for domain in seed_domains:
             if is_windows:
                 executable = "wsl"
-                args = [tool_path, "-d", domain, "-silent"]
+                args = ["-e", tool_path, "-d", domain, "-silent"]
             else:
                 executable = tool_path
                 args = ["-d", domain, "-silent"]

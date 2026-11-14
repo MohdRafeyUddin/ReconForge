@@ -35,11 +35,29 @@ class AssetfinderProvider(BaseProvider):
         is_windows = platform.system().lower() == "windows"
         tool_path = self.detect_tool("assetfinder")
 
+        if not tool_path:
+            err_msg = "Assetfinder binary not found (tool_missing: assetfinder)"
+            logger.error(err_msg)
+            yield {
+                "type": "stage_error",
+                "stage": "assetfinder",
+                "tool": "assetfinder",
+                "message": err_msg,
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": "assetfinder",
+                "status": "SKIPPED",
+                "count": 0,
+            }
+            return
+
         for domain in seed_domains:
 
             if is_windows:
                 executable = "wsl"
                 args = [
+                    "-e",
                     tool_path,
                     "--subs-only",
                     domain

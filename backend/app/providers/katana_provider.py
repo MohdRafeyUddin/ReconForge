@@ -18,6 +18,7 @@ import re
 from urllib.parse import urlparse, urljoin, unquote
 
 from app.providers.base import BaseProvider
+from app.core.scope import build_scope_regex, is_in_scope
 
 logger = logging.getLogger("reconforge.providers.katana")
 
@@ -117,7 +118,13 @@ class KatanaProvider(BaseProvider):
         rest = rest.replace("\\", "/")
         return f"/mnt/{drive_letter}{rest}"
 
-    async def discover(self, seed_domains: List[str]) -> AsyncGenerator[Dict[str, Any], None]:
+    async def discover(
+        self,
+        seed_domains: List[str],
+        rate_limit: Optional[int] = None,
+        custom_headers: Optional[Dict[str, str]] = None,
+        scope: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         # seed_domains here represents target URLs (e.g. http://host or https://host)
         targets = list(dict.fromkeys(t.strip() for t in seed_domains if t and t.strip()))
 
@@ -139,7 +146,63 @@ class KatanaProvider(BaseProvider):
             return
 
         is_windows = platform.system().lower() == "windows"
-        tool_path = self.detect_tool("katana")
+        try:
+            tool_path = self.detect_tool("katana")
+        except Exception:
+            tool_path = None
+
+        if not tool_path:
+            # Fall back to ~/go/bin/katana, then command -v katana via wsl
+            wsl_user = os.getenv("WSL_USER", "kali")
+            cand = f"/home/{wsl_user}/go/bin/katana" if is_windows else os.path.expanduser("~/go/bin/katana")
+            try:
+                chk = subprocess.run(
+                    ["wsl", "-e", "test", "-x", cand] if is_windows else ["test", "-x", cand],
+                    capture_output=True,
+                    timeout=2,
+                )
+                if chk.returncode == 0:
+                    tool_path = cand
+            except Exception:
+                pass
+
+            if not tool_path:
+                try:
+                    chk_cmd = subprocess.run(
+                        ["wsl", "-e", "command", "-v", "katana"] if is_windows else ["command", "-v", "katana"],
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                    )
+                    if chk_cmd.returncode == 0 and chk_cmd.stdout.strip():
+                        tool_path = chk_cmd.stdout.strip()
+                except Exception:
+                    pass
+
+        if not tool_path:
+            err_msg = "Katana binary not found"
+            logger.error(err_msg)
+            yield {
+                "type": "stage_error",
+                "stage": "katana",
+                "tool": "katana",
+                "message": err_msg,
+            }
+            yield {
+                "type": "stage_skipped",
+                "stage": "Crawling (katana)",
+                "tool": "katana",
+                "reason": "tool_missing: katana",
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": self.name,
+                "status": "SKIPPED",
+                "reason": "tool_missing: katana",
+                "urls_found": 0,
+            }
+            return
+
         executable = "wsl" if is_windows else tool_path
         
         # Structure to collect results aggregated by target hostname
@@ -186,7 +249,8 @@ class KatanaProvider(BaseProvider):
                 yield {"type": "log", "message": f"\n[*] Starting Crawl Session: {target}"}
                 hosts_crawled += 1
 
-                args = [tool_path] if is_windows else []
+                args = ["-e", tool_path] if is_windows else []
+                rl_val = str(rate_limit) if rate_limit else "100"
                 katana_flags = [
                     "-u", target,
                     "-jc",            # Enable JavaScript crawling
@@ -196,13 +260,29 @@ class KatanaProvider(BaseProvider):
                     "-duc",           # Disable update check
                     "-d", "2",        # Max depth of 2
                     "-c", "10",       # Concurrency
-                    "-rl", "100",     # Rate limit
+                    "-rl", rl_val,    # Rate limit
                     "-timeout", "10", # Timeout per request
                     "-ef", "png,jpg,jpeg,gif,svg,webp,ico,css,woff,woff2,ttf,eot,otf,mp3,mp4,avi,mov,webm,zip,rar,7z", # Exclude static asset extensions
                 ]
+                if custom_headers:
+                    for hk, hv in custom_headers.items():
+                        if hk and hv:
+                            katana_flags.extend(["-H", f"{hk}: {hv}"])
+
+                if scope:
+                    in_rules = [r for r in (scope.get("in_scope") or []) if r and r.strip()]
+                    out_rules = [r for r in (scope.get("out_of_scope") or []) if r and r.strip()]
+                    cs_regex = build_scope_regex(in_rules)
+                    if cs_regex:
+                        katana_flags.extend(["-cs", cs_regex])
+                    cos_regex = build_scope_regex(out_rules)
+                    if cos_regex:
+                        katana_flags.extend(["-cos", cos_regex])
+                    katana_flags.extend(["-fs", "dn"])
+
                 cmd = [executable, *args, *katana_flags]
 
-                exec_msg = f"[*] Executing command: {' '.join(cmd)}"
+                exec_msg = self.format_cmd_log(cmd)
                 logger.info(exec_msg)
                 yield {"type": "log", "message": exec_msg}
 
@@ -250,6 +330,10 @@ class KatanaProvider(BaseProvider):
                             total_duplicates_skipped += 1
                             continue
                         visited_urls.add(norm_url)
+
+                        if scope and not is_in_scope(norm_url, scope):
+                            total_third_party_ignored += 1
+                            continue
 
                         # Extract host to verify if first-party
                         try:
@@ -332,6 +416,10 @@ class KatanaProvider(BaseProvider):
                                     continue
                                 visited_urls.add(norm_js)
 
+                                if scope and not is_in_scope(norm_js, scope):
+                                    total_third_party_ignored += 1
+                                    continue
+
                                 try:
                                     js_parsed = urlparse(norm_js)
                                     js_host = (js_parsed.hostname or "").lower().strip()
@@ -383,6 +471,10 @@ class KatanaProvider(BaseProvider):
                                     total_duplicates_skipped += 1
                                     continue
                                 visited_urls.add(norm_href)
+
+                                if scope and not is_in_scope(norm_href, scope):
+                                    total_third_party_ignored += 1
+                                    continue
 
                                 try:
                                     href_parsed = urlparse(norm_href)
@@ -440,6 +532,10 @@ class KatanaProvider(BaseProvider):
                                 absolute_action = urljoin(url, action)
                                 norm_action = normalize_url(absolute_action)
                                 if not norm_action:
+                                    continue
+
+                                if scope and not is_in_scope(norm_action, scope):
+                                    total_third_party_ignored += 1
                                     continue
 
                                 # Check ignored resource on action
@@ -515,6 +611,9 @@ class KatanaProvider(BaseProvider):
 
                 exit_code = process.wait()
                 if exit_code != 0:
+                    if exit_code == 127 or "not found" in stderr_out.lower():
+                        from app.core.tools import invalidate_tool_cache
+                        invalidate_tool_cache("katana")
                     msg = f"[-] Katana exited with code: {exit_code} for target {target}"
                     logger.error(msg)
                     yield {"type": "log", "message": msg}

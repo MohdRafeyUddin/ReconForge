@@ -1,22 +1,20 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 from bson import ObjectId
 from app.database import get_database
-from app.auth import get_current_user
 from app.models import serialize_doc
 from datetime import datetime
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
 @router.get("/project/{project_id}/summary")
-async def get_report_summary(project_id: str, current_user: dict = Depends(get_current_user)):
+async def get_report_summary(project_id: str):
     db = get_database()
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid project ID format")
         
     project = await db.projects.find_one({
         "_id": ObjectId(project_id),
-        "owner_id": str(current_user["_id"])
     })
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -62,14 +60,13 @@ async def get_report_summary(project_id: str, current_user: dict = Depends(get_c
     return summary
 
 @router.get("/project/{project_id}/export/html", response_class=HTMLResponse)
-async def export_html_report(project_id: str, current_user: dict = Depends(get_current_user)):
+async def export_html_report(project_id: str):
     db = get_database()
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid project ID format")
         
     project = await db.projects.find_one({
         "_id": ObjectId(project_id),
-        "owner_id": str(current_user["_id"])
     })
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

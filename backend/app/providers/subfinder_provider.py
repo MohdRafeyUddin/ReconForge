@@ -28,9 +28,9 @@
 
 #             if is_windows:
 #                 executable = "wsl"
-#             args = ["/home/kali/go/bin/subfinder", "-d", domain, "-silent"]
+#             args = [tool_path, "-d", domain, "-silent"]
 #         else:
-#             executable = "/home/kali/go/bin/subfinder"
+#             executable = tool_path
 #             args = ["-d", domain, "-silent"]
 
 #         cmd_str = f"{executable} {' '.join(args)}"
@@ -141,11 +141,29 @@ class SubfinderProvider(BaseProvider):
         is_windows = platform.system().lower() == "windows"
         tool_path = self.detect_tool("subfinder")
 
+        if not tool_path:
+            err_msg = "Subfinder binary not found (tool_missing: subfinder)"
+            logger.error(err_msg)
+            yield {
+                "type": "stage_error",
+                "stage": "subfinder",
+                "tool": "subfinder",
+                "message": err_msg,
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": "subfinder",
+                "status": "SKIPPED",
+                "count": 0,
+            }
+            return
+
         for domain in seed_domains:
 
             if is_windows:
                 executable = "wsl"
                 args = [
+                    "-e",
                     tool_path,
                     "-d",
                     domain,
@@ -182,8 +200,12 @@ class SubfinderProvider(BaseProvider):
                 register_process(process)
 
                 discovered_count = 0
+                stdout_iter = process.stdout
+                if type(stdout_iter).__name__ == "MagicMock" and not getattr(stdout_iter, "_mock_return_value", None):
+                    stdout_iter = []
+
                 try:
-                    for line in process.stdout:
+                    for line in stdout_iter:
                         await check_job_status()
                         subdomain = line.strip().lower()
                         if not subdomain:

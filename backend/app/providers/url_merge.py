@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Dict, List, Set, Any
+from typing import Dict, List, Set, Any, Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger("reconforge.providers.url_merge")
@@ -58,18 +58,25 @@ def get_url_priority(url: str) -> int:
         return 3
 
 def merge_urls(
-    katana_urls: List[str], 
-    gau_urls: List[str], 
-    linkfinder_urls: List[str], 
-    scan_mode: str = "fast"
+    katana_urls: Optional[List[str]] = None, 
+    gau_urls: Optional[List[str]] = None, 
+    linkfinder_urls: Optional[List[str]] = None, 
+    scan_mode: str = "fast",
+    per_host_cap: Optional[int] = None,
+    global_cap: Optional[int] = None,
+    **extra_source_urls: Any
 ) -> List[Dict[str, Any]]:
     """
     Merges, normalizes, deduplicates, prioritizes, and limits URL list.
+    Applies per-host URL cap (default 1,000/host fast, 5,000/host deep)
+    IN ADDITION to the global cap (5,000 fast, 30,000 deep).
     Returns: List of dicts, e.g. [{"url": "...", "sources": ["gau", "katana"]}]
     """
     url_sources: Dict[str, Set[str]] = {}
     
-    def add_urls(urls: List[str], source: str):
+    def add_urls(urls: Optional[List[str]], source: str):
+        if not urls:
+            return
         for u in urls:
             norm = normalize_url(u)
             if not norm:
@@ -78,15 +85,27 @@ def merge_urls(
                 url_sources[norm] = set()
             url_sources[norm].add(source)
             
-    add_urls(katana_urls, "katana")
-    add_urls(gau_urls, "gau")
-    add_urls(linkfinder_urls, "linkfinder")
+    add_urls(katana_urls or [], "katana")
+    add_urls(gau_urls or [], "gau")
+    add_urls(linkfinder_urls or [], "linkfinder")
+    for src, urls in extra_source_urls.items():
+        clean_src = src.replace("_urls", "")
+        if isinstance(urls, list):
+            add_urls(urls, clean_src)
     
     if not url_sources:
         return []
         
-    # Determine limit
-    limit = 30000 if scan_mode == "deep" else 5000
+    # Determine limits
+    if global_cap is not None:
+        limit = global_cap
+    else:
+        limit = 30000 if scan_mode == "deep" else 5000
+
+    if per_host_cap is not None:
+        host_limit = per_host_cap
+    else:
+        host_limit = 5000 if scan_mode == "deep" else 1000
     
     # Sort by priority score, then by URL length/alpha for stability
     sorted_urls = sorted(
@@ -94,7 +113,22 @@ def merge_urls(
         key=lambda u: (get_url_priority(u), len(u), u)
     )
     
-    limited_urls = sorted_urls[:limit]
+    limited_urls = []
+    host_counts: Dict[str, int] = {}
+    for u in sorted_urls:
+        if len(limited_urls) >= limit:
+            break
+        try:
+            parsed = urlparse(u)
+            host = parsed.netloc.lower() or parsed.path.split("/")[0].lower() or "unknown"
+        except Exception:
+            host = "unknown"
+
+        if host_counts.get(host, 0) >= host_limit:
+            continue
+
+        host_counts[host] = host_counts.get(host, 0) + 1
+        limited_urls.append(u)
     
     result = []
     for u in limited_urls:
@@ -103,5 +137,8 @@ def merge_urls(
             "sources": sorted(list(url_sources[u]))
         })
         
-    logger.info(f"Merged {len(url_sources)} unique URLs down to {len(result)} (limit: {limit}) using scan_mode: {scan_mode}")
+    logger.info(
+        f"Merged {len(url_sources)} unique URLs down to {len(result)} "
+        f"(global limit: {limit}, per-host cap: {host_limit}) using scan_mode: {scan_mode}"
+    )
     return result

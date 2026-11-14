@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 *.py[cod]
 venv/
+.venv/
+backend/.venv/
+backend/venv/
 .env
 
 # Node
@@ -20,6 +23,9 @@ screenshots/
 reports/
 logs/
 *.log
+resume.cfg
+backend/storage/
+storage/
 
 # Security/private
 nuclei-custom-templates/*.yaml

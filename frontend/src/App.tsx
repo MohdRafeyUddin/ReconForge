@@ -1,6 +1,4 @@
 import React, { useState, useEffect, useRef } from "react";
-import { AuthProvider, useAuth } from "./context/AuthContext";
-import { AuthPage } from "./components/Auth/AuthPage";
 import { Navbar } from "./components/Common/Navbar";
 import { OverviewDashboard } from "./components/Dashboard/OverviewDashboard";
 import { AssetTable } from "./components/Inventory/AssetTable";
@@ -8,11 +6,16 @@ import type { DnsRecord } from "./components/Inventory/DnsTab";
 import type { TakeoverRecord } from "./components/Inventory/TakeoverTab";
 import type { NormalizedUrlRecord } from "./components/Inventory/NormalizedUrlTab";
 import type { GfUrlRecord } from "./components/Inventory/GfTab";
+import type { ContentPathRecord } from "./components/Inventory/ContentDiscoveryTab";
+import { DiffTab } from "./components/Inventory/DiffTab";
+import type { ScanDiffDoc } from "./components/Inventory/DiffTab";
 import { RelationshipGraph } from "./components/AssetGraph/RelationshipGraph";
 import { ConsoleView } from "./components/JobConsole/ConsoleView";
 import { SubdomainsTab } from "./components/Subdomains/SubdomainsTab";
+import { RunHistoryTab } from "./components/RunHistory/RunHistoryTab";
 import { apiCall, getWebSocketUrl } from "./services/api";
-import { LayoutDashboard, Database, Network, RefreshCw, Sparkles, Globe2 } from "lucide-react";
+import { LayoutDashboard, Database, Network, RefreshCw, Sparkles, Globe2, Sliders, AlertTriangle, History as HistoryIcon } from "lucide-react";
+import { ProjectSettingsModal } from "./components/ProjectSettings/ProjectSettingsModal";
 
 interface Project {
   id: string;
@@ -20,6 +23,31 @@ interface Project {
   description?: string;
   seed_domains: string[];
   target_type?: string;
+  scope?: {
+    in_scope?: string[];
+    out_of_scope?: string[];
+  };
+  rate_limits?: {
+    global_rps?: number;
+    per_tool?: Record<string, number>;
+    tool_overrides?: Record<string, number>;
+  };
+  custom_headers?: Record<string, string>;
+  schedule?: {
+    enabled?: boolean;
+    interval_hours?: number;
+    scan_mode?: string;
+    last_run?: string | null;
+    next_run?: string | null;
+  };
+  alerts?: {
+    enabled?: boolean;
+    discord_webhook_url?: string;
+    telegram_bot_token?: string;
+    telegram_chat_id?: string;
+    min_priority?: string;
+    events?: Record<string, boolean>;
+  };
 }
 
 interface DashboardStats {
@@ -62,7 +90,7 @@ interface DashboardStats {
 
 let wsCount = 0;
 
-type TabId = "dashboard" | "subdomains" | "inventory" | "visualizer";
+type TabId = "dashboard" | "diffs" | "runs" | "subdomains" | "inventory" | "visualizer";
 
 interface ScanState {
   jobId: string | null;
@@ -88,6 +116,7 @@ interface ScanState {
   takeoverRecords: TakeoverRecord[];
   normalizedUrlRecords: NormalizedUrlRecord[];
   gfRecords: GfUrlRecord[];
+  contentPathRecords: ContentPathRecord[];
   riskScores: any[];
   pipelineHalted: { reason: string; message: string } | null;
   providerSkippedReasons: Record<string, string>;
@@ -136,6 +165,7 @@ const initialScanState: ScanState = {
   takeoverRecords: [],
   normalizedUrlRecords: [],
   gfRecords: [],
+  contentPathRecords: [],
   riskScores: [],
   pipelineHalted: null,
   providerSkippedReasons: {},
@@ -296,7 +326,6 @@ const mergeFindingIntoAssets = (currentAssets: any[], finding: any) => {
 };
 
 const MainDashboard: React.FC = () => {
-  const { token } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("dashboard");
@@ -305,8 +334,31 @@ const MainDashboard: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [isReconnect, setIsReconnect] = useState(false);
   const [scanMode, setScanMode] = useState<"fast" | "deep">("fast");
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [latestDiff, setLatestDiff] = useState<ScanDiffDoc | null>(null);
+
+  const handleProjectUpdated = (updatedProj: Project) => {
+    setActiveProject(updatedProj);
+    setProjects((prev) => prev.map((p) => (p.id === updatedProj.id ? updatedProj : p)));
+  };
 
   const [scanState, setScanState] = useState<ScanState>(initialScanState);
+
+  const [isInMemoryDb, setIsInMemoryDb] = useState(false);
+
+  useEffect(() => {
+    const checkDbStatus = async () => {
+      try {
+        const res = await apiCall("/system/status");
+        if (res && res.in_memory_db) {
+          setIsInMemoryDb(true);
+        }
+      } catch (e) {
+        // Non-fatal if system/status fails
+      }
+    };
+    checkDbStatus();
+  }, []);
 
   const activeProjectRef = useRef<Project | null>(null);
   const jobIdRef = useRef<string | null>(null);
@@ -330,6 +382,7 @@ const MainDashboard: React.FC = () => {
     takeoverRecords,
     normalizedUrlRecords,
     gfRecords,
+    contentPathRecords,
     providerStatus,
     stages,
     currentStage: currentPhase,
@@ -485,19 +538,20 @@ const MainDashboard: React.FC = () => {
   };
 
   useEffect(() => {
-    if (token) fetchProjects();
-  }, [token]);
+    fetchProjects();
+  }, []);
 
   const fetchProjectData = async () => {
     if (!activeProject) return;
     const projectId = activeProject.id;
     try {
-      const [assetList, subdomainList, dashboardStats, jobsList, riskScores] = await Promise.all([
+      const [assetList, subdomainList, dashboardStats, jobsList, riskScores, contentPathsRes] = await Promise.all([
         apiCall(`/assets/project/${projectId}`),
         apiCall(`/assets/project/${projectId}/subdomains`),
         apiCall(`/assets/project/${projectId}/dashboard-stats`),
         apiCall(`/jobs/project/${projectId}`),
         apiCall(`/projects/${projectId}/risk-scores`).catch(() => []),
+        apiCall(`/assets/project/${projectId}/content-paths?limit=500`).catch(() => ({ items: [] })),
       ]);
 
       if (activeProjectRef.current?.id !== projectId) {
@@ -924,6 +978,20 @@ const MainDashboard: React.FC = () => {
           takeoverRecords: takeovers,
           normalizedUrlRecords: normalizedUrls,
           gfRecords: gf,
+          contentPathRecords: (contentPathsRes?.items || []).length > 0
+            ? contentPathsRes.items
+            : realAssets.filter((a: any) => a.type === "content_path").map((a: any) => ({
+                value: a.domain || a.metadata?.url || a.value || "",
+                host: a.metadata?.host || a.domain || "",
+                status_code: a.metadata?.status_code || a.status_code,
+                content_length: a.metadata?.content_length || a.content_length || 0,
+                words: a.metadata?.words || a.words || 0,
+                lines: a.metadata?.lines || a.lines || 0,
+                redirect_location: a.metadata?.redirect_location || a.redirect_location || "",
+                calibration_used: a.metadata?.calibration_used ?? true,
+                first_seen: a.created_at || a.first_seen,
+                last_seen: a.updated_at || a.last_seen,
+              })),
           stages: nextStages,
           currentStage: nextCurrentStage,
           providerStatus: nextProviderStatus,
@@ -1280,6 +1348,25 @@ const MainDashboard: React.FC = () => {
                     }
                   }
 
+                  let nextContentPathRecords = prev.contentPathRecords;
+                  if (incomingAsset.type === "content_path") {
+                    const cpUrl = incomingAsset.value || incomingAsset.metadata?.url || incomingAsset.domain;
+                    if (!nextContentPathRecords.some((r) => r.value === cpUrl)) {
+                      nextContentPathRecords = [{
+                        value: cpUrl,
+                        host: incomingAsset.metadata?.host || incomingAsset.domain || "",
+                        status_code: incomingAsset.metadata?.status_code || incomingAsset.status_code,
+                        content_length: incomingAsset.metadata?.content_length || incomingAsset.content_length || 0,
+                        words: incomingAsset.metadata?.words || incomingAsset.words || 0,
+                        lines: incomingAsset.metadata?.lines || incomingAsset.lines || 0,
+                        redirect_location: incomingAsset.metadata?.redirect_location || incomingAsset.redirect_location || "",
+                        calibration_used: incomingAsset.metadata?.calibration_used ?? true,
+                        first_seen: incomingAsset.created_at || incomingAsset.first_seen || new Date().toISOString(),
+                        last_seen: incomingAsset.updated_at || incomingAsset.last_seen || new Date().toISOString(),
+                      }, ...nextContentPathRecords];
+                    }
+                  }
+
                   const uniqueIps = new Set<string>();
                   nextDnsRecords.forEach((r) => {
                     (r.ipv4 || []).forEach((ip) => uniqueIps.add(ip));
@@ -1297,6 +1384,7 @@ const MainDashboard: React.FC = () => {
                     dnsRecords: nextDnsRecords,
                     takeoverRecords: nextTakeoverRecords,
                     normalizedUrlRecords: nextNormalizedUrlRecords,
+                    contentPathRecords: nextContentPathRecords,
                     dnsx_resolved: nextDnsRecords.length,
                     dnsx_unique_ips: uniqueIps.size,
                     subzy_vulnerable: nextTakeoverRecords.length > 0 ? vuln : prev.subzy_vulnerable,
@@ -1361,6 +1449,40 @@ const MainDashboard: React.FC = () => {
                   lastWsEventTime: Date.now()
                 };
               });
+            } else if (data.type === "scan_diff") {
+              if (data.diff) {
+                setLatestDiff(data.diff);
+              }
+            } else if (data.type === "content_path_event") {
+              const item = data.data || data;
+              if (item && (item.url || item.value)) {
+                const urlVal = item.url || item.value;
+                const rec: ContentPathRecord = {
+                  value: urlVal,
+                  host: item.host || item.domain || "",
+                  status_code: item.status_code,
+                  content_length: item.content_length ?? item.length ?? 0,
+                  words: item.words ?? 0,
+                  lines: item.lines ?? 0,
+                  redirect_location: item.redirect_location || "",
+                  calibration_used: item.calibration_used ?? true,
+                  first_seen: item.first_seen || new Date().toISOString(),
+                  last_seen: item.last_seen || new Date().toISOString(),
+                };
+                setScanState((prev) => {
+                  if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                    return prev;
+                  }
+                  if (prev.contentPathRecords.some((p) => p.value === rec.value)) {
+                    return prev;
+                  }
+                  return {
+                    ...prev,
+                    contentPathRecords: [rec, ...prev.contentPathRecords],
+                    lastWsEventTime: Date.now(),
+                  };
+                });
+              }
             } else if (data.type === "provider_stat") {
               const { provider, count } = data;
               setScanState((prev) => {
@@ -1378,6 +1500,29 @@ const MainDashboard: React.FC = () => {
                   lastWsEventTime: Date.now(),
                 };
               });
+            } else if (data.type === "stage_skipped") {
+              const tool = (data.tool || "").toLowerCase();
+              if (tool) {
+                setScanState((prev) => {
+                  if (!activeProjectRef.current || activeProjectRef.current.id !== currentProjectId || jobIdRef.current !== currentJobId) {
+                    return prev;
+                  }
+                  return {
+                    ...prev,
+                    providerStatus: { ...prev.providerStatus, [tool]: "SKIPPED" },
+                    stages: { ...prev.stages, [tool]: "SKIPPED" },
+                    providerSkippedReasons: {
+                      ...prev.providerSkippedReasons,
+                      [tool]: data.reason || "tool_missing",
+                    },
+                    lastWsEventTime: Date.now(),
+                  };
+                });
+              }
+            } else if (data.type === "scope_filtered") {
+              console.log("[ReconForge Scope Filter]", data);
+            } else if (data.type === "scope_warning") {
+              console.warn("[ReconForge Scope Warning]", data.message);
             } else if (data.type === "scan_summary") {
               if (data.event === "PipelineHalted") {
                 setScanState((prev) => {
@@ -1885,6 +2030,8 @@ const MainDashboard: React.FC = () => {
 
   const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
     { id: "dashboard", label: "Dashboard Overview", icon: <LayoutDashboard className="w-4 h-4" /> },
+    { id: "diffs", label: "What's New", icon: <Sparkles className="w-4 h-4" /> },
+    { id: "runs", label: "Run History", icon: <HistoryIcon className="w-4 h-4" /> },
     { id: "subdomains", label: "Subdomains", icon: <Globe2 className="w-4 h-4" /> },
     { id: "inventory", label: "Asset Inventory", icon: <Database className="w-4 h-4" /> },
     { id: "visualizer", label: "Topology Visualizer", icon: <Network className="w-4 h-4" /> },
@@ -1892,11 +2039,18 @@ const MainDashboard: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-dark-bg text-dark-text flex flex-col">
+      {isInMemoryDb && (
+        <div className="bg-amber-500/20 border-b border-amber-500/50 text-amber-200 px-4 py-2 text-xs font-mono font-bold flex items-center justify-center gap-2 sticky top-0 z-50 backdrop-blur-md shadow-md">
+          <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+          <span>Running on in-memory DB, data will be lost</span>
+        </div>
+      )}
       <Navbar
         projects={projects}
         activeProject={activeProject}
         onSelectProject={setActiveProject}
         onRefreshProjects={fetchProjects}
+        onOpenSettings={() => setShowSettingsModal(true)}
       />
 
       {activeProject ? (
@@ -1956,6 +2110,18 @@ const MainDashboard: React.FC = () => {
               </div>
 
               <button
+                onClick={() => setShowSettingsModal(true)}
+                className="flex items-center space-x-1.5 px-3 py-1.5 bg-dark-card hover:bg-dark-hover border border-dark-border text-cyber-accent rounded text-xs font-bold transition-all cursor-pointer"
+                title="Configure Scope, Rate Limits, and WSL Tools"
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Scope & Settings</span>
+                {(!activeProject.scope?.in_scope?.length && !activeProject.scope?.out_of_scope?.length) && (
+                  <span className="w-2 h-2 rounded-full bg-cyber-warning animate-pulse" />
+                )}
+              </button>
+
+              <button
                 onClick={fetchProjectData}
                 className="flex items-center space-x-1 px-3 py-1.5 bg-dark-card hover:bg-dark-hover border border-dark-border text-slate-400 hover:text-slate-200 rounded text-xs font-bold transition-all cursor-pointer"
               >
@@ -1985,12 +2151,25 @@ const MainDashboard: React.FC = () => {
                 providerStatus={providerStatus}
                 pipelineHalted={scanState.pipelineHalted}
                 providerSkippedReasons={scanState.providerSkippedReasons}
+                onOpenSettings={() => setShowSettingsModal(true)}
                 onSelectSeverity={(severity: string) => {
                   setInitialInventoryTab("nuclei");
                   setInitialSeverityFilter(severity);
                   setActiveTab("inventory");
                 }}
               />
+            )}
+
+            {activeTab === "diffs" && (
+              <DiffTab
+                projectId={activeProject.id}
+                projectName={activeProject.name}
+                latestDiffProp={latestDiff}
+              />
+            )}
+
+            {activeTab === "runs" && (
+              <RunHistoryTab projectId={activeProject.id} />
             )}
 
             {activeTab === "subdomains" && (
@@ -2000,11 +2179,14 @@ const MainDashboard: React.FC = () => {
             {activeTab === "inventory" && (
               <AssetTable
                 assets={assets}
+                projectId={activeProject?.id}
                 projectName={activeProject?.name}
                 dnsRecords={dnsRecords}
                 takeoverRecords={takeoverRecords}
                 normalizedUrlRecords={normalizedUrlRecords}
                 gfRecords={gfRecords}
+                contentPathRecords={contentPathRecords}
+                latestScanTime={stats?.last_scan_time || activeJob?.started_at}
                 initialTab={initialInventoryTab}
                 initialSeverityFilter={initialSeverityFilter}
               />
@@ -2030,6 +2212,14 @@ const MainDashboard: React.FC = () => {
               />
             </div>
           )}
+
+          {/* Project Settings & Tools Modal */}
+          <ProjectSettingsModal
+            isOpen={showSettingsModal}
+            onClose={() => setShowSettingsModal(false)}
+            project={activeProject}
+            onProjectUpdated={handleProjectUpdated}
+          />
         </main>
       ) : (
         <div className="flex-1 flex flex-col items-center justify-center p-6 space-y-6 text-center">
@@ -2051,15 +2241,6 @@ const MainDashboard: React.FC = () => {
   );
 };
 
-const AppContent: React.FC = () => {
-  const { token } = useAuth();
-  return token ? <MainDashboard /> : <AuthPage />;
-};
-
 export default function App() {
-  return (
-    <AuthProvider>
-      <AppContent />
-    </AuthProvider>
-  );
+  return <MainDashboard />;
 }

@@ -39,46 +39,14 @@ class GauProvider(BaseProvider):
 
         yield {"type": "log", "message": "Launching GAU..."}
         
-        tool_path = self.detect_tool("gau")
+        tool_path = self.detect_tool("gau") or "gau"
         is_windows = platform.system().lower() == "windows"
-        
-        # Verify tool works/exists in WSL/Linux
-        test_cmd = ["wsl", "test", "-x", tool_path] if is_windows else ["test", "-x", tool_path]
-        try:
-            res = subprocess.run(test_cmd, capture_output=True, timeout=5)
-            if res.returncode != 0 and not tool_path.startswith("gau"):
-                # Graceful skip
-                warn_msg = f"[!] GAU executable not found or not executable at {tool_path}. Skipping GAU."
-                logger.warning(warn_msg)
-                yield {"type": "log", "message": warn_msg}
-                yield {
-                    "type": "scan_summary",
-                    "provider": "gau",
-                    "urls_found": 0,
-                    "historical_urls": 0,
-                    "status": "SKIPPED"
-                }
-                yield {"type": "log", "message": "[!] Provider gau skipped"}
-                return
-        except Exception as exc:
-            warn_msg = f"[!] Error detecting GAU executable: {exc}. Skipping GAU."
-            logger.warning(warn_msg)
-            yield {"type": "log", "message": warn_msg}
-            yield {
-                "type": "scan_summary",
-                "provider": "gau",
-                "urls_found": 0,
-                "historical_urls": 0,
-                "status": "SKIPPED"
-            }
-            yield {"type": "log", "message": "[!] Provider gau skipped"}
-            return
 
         yield {"type": "log", "message": f"[*] Querying historical URLs for {len(hosts)} hosts..."}
         
         # Build command
         if is_windows:
-            cmd = ["wsl", tool_path, "--providers", "wayback,commoncrawl,otx"]
+            cmd = ["wsl", "-e", tool_path, "--providers", "wayback,commoncrawl,otx"]
         else:
             cmd = [tool_path, "--providers", "wayback,commoncrawl,otx"]
             
@@ -173,10 +141,28 @@ class GauProvider(BaseProvider):
                         
             exit_code = process.wait()
             if exit_code != 0:
+                if exit_code == 127:
+                    from app.core.tools import invalidate_tool_cache
+                    invalidate_tool_cache("gau")
+                    yield {
+                        "type": "stage_error",
+                        "stage": "historical_urls",
+                        "tool": "gau",
+                        "message": f"GAU executable not found at {tool_path}",
+                    }
                 logger.warning(f"[-] GAU exited with code {exit_code}")
                 yield {"type": "log", "message": f"[-] GAU exited with code {exit_code}"}
                 
         except Exception as exc:
+            if "not found" in str(exc).lower() or isinstance(exc, FileNotFoundError):
+                from app.core.tools import invalidate_tool_cache
+                invalidate_tool_cache("gau")
+                yield {
+                    "type": "stage_error",
+                    "stage": "historical_urls",
+                    "tool": "gau",
+                    "message": f"GAU binary not found: {exc}",
+                }
             err_msg = f"[-] GAU execution failed: {exc}"
             logger.exception(err_msg)
             yield {"type": "log", "message": err_msg}

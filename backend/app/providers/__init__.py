@@ -21,6 +21,10 @@ from app.providers.dnsx_provider import DnsxProvider       # noqa: F401
 from app.providers.subzy_provider import SubzyProvider     # noqa: F401
 from app.providers.uro_provider import UroProvider         # noqa: F401
 from app.providers.gf_provider import GfProvider           # noqa: F401
+from app.providers.ffuf_provider import FfufProvider       # noqa: F401
+from app.providers.api_surface_provider import ApiSurfaceProvider  # noqa: F401
+from app.providers.param_discovery_provider import ParamDiscoveryProvider  # noqa: F401
+from app.providers.waymore_provider import WaymoreProvider # noqa: F401
 
 PROVIDERS = {
     "Subfinder":        SubfinderProvider(),
@@ -55,6 +59,11 @@ WS_EVENT_TYPES = {
     "url_event":      "Normalised URL emitted by UroProvider.",
     "gf_event":       "URL classification result emitted by GfProvider.",
     "finding_event":  "Vulnerability finding emitted by NucleiProvider.",
+    "content_path_event": "Directory or file discovered by FfufProvider / Feroxbuster.",
+    "api_spec_event": "API documentation specification route discovered and parsed.",
+    "graphql_event":  "GraphQL endpoint and schema introspection status.",
+    "param_event":    "Parameter discovered by ParamDiscoveryProvider.",
+    "historical_probe_event": "Historical URL liveness verification status.",
 }
 
 

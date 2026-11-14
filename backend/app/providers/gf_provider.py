@@ -173,7 +173,23 @@ class GfProvider(BaseProvider):
 
         is_windows = platform.system().lower() == "windows"
         tool_path = self.detect_tool("gf")
-        resolved_cmd = ["wsl", tool_path] if is_windows else [tool_path]
+        if not tool_path:
+            err_msg = "GF binary not found (tool_missing: gf)"
+            logger.error(err_msg)
+            yield {
+                "type": "stage_error",
+                "stage": "gf",
+                "tool": "gf",
+                "message": err_msg,
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": self.name,
+                "status": "SKIPPED",
+                "count": 0,
+            }
+            return
+        resolved_cmd = ["wsl", "-e", tool_path] if is_windows else [tool_path]
 
         temp_path = ""
         start_ts = time.time()

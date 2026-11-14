@@ -90,7 +90,23 @@ class UroProvider(BaseProvider):
 
         is_windows = platform.system().lower() == "windows"
         tool_path = self.detect_tool("uro")
-        resolved_cmd = ["wsl", tool_path] if is_windows else [tool_path]
+        if not tool_path:
+            err_msg = "Uro binary not found (tool_missing: uro)"
+            logger.error(err_msg)
+            yield {
+                "type": "stage_error",
+                "stage": "uro",
+                "tool": "uro",
+                "message": err_msg,
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": self.name,
+                "status": "SKIPPED",
+                "count": 0,
+            }
+            return
+        resolved_cmd = ["wsl", "-e", tool_path] if is_windows else [tool_path]
 
         temp_path = ""
         start_ts = time.time()

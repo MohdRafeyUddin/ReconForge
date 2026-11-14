@@ -1,6 +1,5 @@
 import React, { useState } from "react";
-import { useAuth } from "../../context/AuthContext";
-import { Shield, Plus, LogOut, Terminal, Layers, Globe } from "lucide-react";
+import { Shield, Plus, Terminal, Layers, Globe, Sliders } from "lucide-react";
 import { apiCall } from "../../services/api";
 
 interface Project {
@@ -15,15 +14,16 @@ interface NavbarProps {
   activeProject: Project | null;
   onSelectProject: (p: Project) => void;
   onRefreshProjects: () => void;
+  onOpenSettings?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   projects,
   activeProject,
   onSelectProject,
-  onRefreshProjects
+  onRefreshProjects,
+  onOpenSettings,
 }) => {
-  const { user, logout } = useAuth();
   const [showModal, setShowModal] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -109,22 +109,24 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Plus className="w-3.5 h-3.5" />
               <span>New Project</span>
             </button>
+
+            {activeProject && onOpenSettings && (
+              <button
+                onClick={onOpenSettings}
+                className="bg-dark-bg border border-dark-border hover:border-cyber-accent/50 text-slate-300 px-2.5 py-1.5 rounded text-xs font-semibold transition-all duration-200 flex items-center space-x-1 cursor-pointer"
+                title="Configure Scope, Rate Limits & WSL Tools"
+              >
+                <Sliders className="w-3.5 h-3.5 text-cyber-accent" />
+                <span>Scope</span>
+              </button>
+            )}
           </div>
         </div>
 
-        {/* User Status and Logout */}
-        <div className="flex items-center space-x-4">
-          <div className="text-right">
-            <div className="text-xs font-mono text-slate-400 uppercase tracking-wider">Operator</div>
-            <div className="text-sm font-bold text-slate-200">{user?.username}</div>
-          </div>
-          <button
-            onClick={logout}
-            className="p-2 bg-dark-bg border border-dark-border hover:border-cyber-danger/50 text-slate-400 hover:text-cyber-danger rounded-lg transition-colors duration-200 cursor-pointer"
-            title="Disconnect Terminal"
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
+        {/* Local Console Mode Badge */}
+        <div className="flex items-center space-x-2 px-3 py-1.5 bg-dark-bg border border-dark-border rounded text-xs font-mono text-slate-400">
+          <div className="w-2 h-2 rounded-full bg-cyber-accent" />
+          <span className="text-slate-300 font-semibold tracking-wide">LOCAL CONSOLE</span>
         </div>
       </nav>
 

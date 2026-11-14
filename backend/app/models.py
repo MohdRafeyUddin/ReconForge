@@ -43,9 +43,76 @@ class ProjectBase(BaseModel):
     description: Optional[str] = ""
     seed_domains: List[str] = []
     target_type: Optional[str] = "DOMAIN"
+    scope: Optional[Dict[str, List[str]]] = Field(default_factory=lambda: {"in_scope": [], "out_of_scope": []})
+    rate_limits: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {
+            "global_rps": 10,
+            "per_tool": {
+                "httpx": 20,
+                "katana": 10,
+                "nuclei": 10,
+                "naabu": 300,
+            },
+        }
+    )
+    custom_headers: Optional[Dict[str, str]] = Field(default_factory=dict)
+    schedule: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {
+            "enabled": False,
+            "interval_hours": 24,
+            "scan_mode": "fast",
+            "last_run": None,
+            "next_run": None,
+        }
+    )
+    alerts: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {
+            "enabled": False,
+            "discord_webhook_url": "",
+            "telegram_bot_token": "",
+            "telegram_chat_id": "",
+            "min_priority": "medium",
+            "events": {
+                "new_subdomains": True,
+                "new_live_hosts": True,
+                "new_ports": True,
+                "new_findings": True,
+                "scan_completed": True,
+            },
+        }
+    )
+    clustering: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {
+            "scan_all_cluster_members": False,
+        }
+    )
+    port_range: Optional[str] = "1-10000"
+    response_body_max_kb: Optional[int] = 500
+    wordlists: Optional[Dict[str, str]] = None
+    per_host_url_cap: Optional[int] = None
+    scan_profile: Optional[str] = "recon"
+    assume_tools_installed: Optional[bool] = True
 
 class ProjectCreate(ProjectBase):
     pass
+
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    seed_domains: Optional[List[str]] = None
+    target_type: Optional[str] = None
+    scope: Optional[Dict[str, List[str]]] = None
+    rate_limits: Optional[Dict[str, Any]] = None
+    custom_headers: Optional[Dict[str, str]] = None
+    schedule: Optional[Dict[str, Any]] = None
+    alerts: Optional[Dict[str, Any]] = None
+    clustering: Optional[Dict[str, Any]] = None
+    port_range: Optional[str] = None
+    response_body_max_kb: Optional[int] = None
+    wordlists: Optional[Dict[str, str]] = None
+    per_host_url_cap: Optional[int] = None
+    scan_profile: Optional[str] = None
+    assume_tools_installed: Optional[bool] = None
 
 class ProjectResponse(ProjectBase):
     id: str
@@ -57,8 +124,21 @@ class ProjectResponse(ProjectBase):
 
 class AssetBase(BaseModel):
     domain: str
-    type: str  # domain, subdomain, ip, service
-    status: str  # live, inactive, unknown
+    type: str  # domain, subdomain, ip, service, content_path, api_spec, graphql_endpoint, param
+    status: str  # live, dead, inactive, unknown
+    value: Optional[str] = None
+    status_class: Optional[str] = None
+    is_interesting: Optional[bool] = False
+    interesting_reason: Optional[str] = None
+    liveness_version: Optional[int] = 2
+    cdn_waf: Optional[Dict[str, Any]] = None
+    cluster_id: Optional[str] = None
+    cluster_role: Optional[str] = None
+    is_cluster_representative: Optional[bool] = None
+    cluster_size: Optional[int] = None
+    cluster_representative_host: Optional[str] = None
+    cluster_skip_reason: Optional[str] = None
+    services: Optional[List[Dict[str, Any]]] = None
     open_ports: List[int] = []
     metadata: Dict[str, Any] = {}
     project_id: str
@@ -66,6 +146,8 @@ class AssetBase(BaseModel):
     sources: List[str] = []
     risk: Optional[Dict[str, Any]] = None
     risk_history: Optional[List[Dict[str, Any]]] = None
+    hunt_priority: Optional[int] = None
+    hunt_reasons: Optional[List[str]] = None
 
 class AssetResponse(AssetBase):
     id: str

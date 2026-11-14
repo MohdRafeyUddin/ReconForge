@@ -1,0 +1,40 @@
+{
+  "factors": {
+    "is_new_or_changed": 15,
+    "status_401_or_403": 15,
+    "auth_or_admin_path": 20,
+    "sensitive_naming": 15,
+    "has_parameters": 15,
+    "has_api_or_graphql": 15,
+    "interesting_content_paths": 10,
+    "no_waf_or_cdn": 10,
+    "high_value_technology": 20,
+    "has_js_endpoints": 10,
+    "many_historical_urls": 10
+  },
+  "caps": {
+    "is_new_or_changed": 15,
+    "status_401_or_403": 15,
+    "auth_or_admin_path": 25,
+    "sensitive_naming": 15,
+    "has_parameters": 20,
+    "has_api_or_graphql": 20,
+    "interesting_content_paths": 15,
+    "no_waf_or_cdn": 10,
+    "high_value_technology": 25,
+    "has_js_endpoints": 10,
+    "many_historical_urls": 10
+  },
+  "sensitive_keywords": [
+    "dev", "stg", "stage", "staging", "uat", "test", "testing",
+    "internal", "corp", "admin", "portal", "vpn", "gateway",
+    "qa", "sandbox", "demo", "preprod", "nonprod"
+  ],
+  "high_value_tech": [
+    "jenkins", "grafana", "kibana", "tomcat", "phpmyadmin",
+    "wordpress", "drupal", "joomla", "spring", "actuator",
+    "sonarqube", "gitlab", "jira", "confluence", "cpanel",
+    "webmin", "keycloak", "rabbitmq", "swagger", "openapi"
+  ]
+}
+

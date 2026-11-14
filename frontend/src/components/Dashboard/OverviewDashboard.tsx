@@ -49,6 +49,16 @@ interface Project {
   name: string;
   description?: string;
   seed_domains: string[];
+  scope?: {
+    in_scope?: string[];
+    out_of_scope?: string[];
+  };
+  rate_limits?: {
+    global_rps?: number;
+    per_tool?: Record<string, number>;
+    tool_overrides?: Record<string, number>;
+  };
+  custom_headers?: Record<string, string>;
 }
 
 interface Asset {
@@ -89,6 +99,8 @@ interface Asset {
     [key: string]: any;
   };
   risk?: any;
+  hunt_priority?: number;
+  hunt_reasons?: string[];
 }
 
 interface OverviewDashboardProps {
@@ -109,6 +121,7 @@ interface OverviewDashboardProps {
   onSelectSeverity?: (severity: string) => void;
   pipelineHalted?: { reason: string; message: string } | null;
   providerSkippedReasons?: Record<string, string>;
+  onOpenSettings?: () => void;
 }
 
 const COLORS = ["#3B82F6", "#06B6D4", "#10B981", "#F59E0B", "#EF4444"];
@@ -138,6 +151,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   onSelectSeverity,
   pipelineHalted = null,
   providerSkippedReasons = {},
+  onOpenSettings,
 }) => {
   const [selectedProvider, setSelectedProvider] = useState("Unified Discovery");
   const [providers, setProviders] = useState<string[]>(FALLBACK_PROVIDERS);
@@ -462,6 +476,11 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   });
   hostsWithRisk.sort((a, b) => b.priorityScore - a.priorityScore);
   const topRiskAssets = hostsWithRisk.filter(h => h.risk).slice(0, 5);
+  const topHuntTargets = assets
+    .filter((a) => (a as any).hunt_priority !== undefined || a.status === "live")
+    .sort((a, b) => (((b as any).hunt_priority ?? 0) - ((a as any).hunt_priority ?? 0)))
+    .slice(0, 5);
+
 
   // Recompute ports distribution dynamically from assets
   const portCounts: Record<number, number> = {};
@@ -557,6 +576,26 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Scope Warning Banner if unconfigured */}
+      {(!activeProject.scope?.in_scope?.length && !activeProject.scope?.out_of_scope?.length) && (
+        <div className="bg-cyber-warning/10 border border-cyber-warning/30 rounded-xl p-3.5 flex items-center justify-between text-cyber-warning glass animate-fadeIn">
+          <div className="flex items-center space-x-2.5 text-xs font-mono">
+            <span className="text-base">⚠</span>
+            <span>
+              <strong>Scope Notice:</strong> Scope rules are not configured for this project. Discovered subdomains and resolved IPs will be scanned without boundary checking.
+            </span>
+          </div>
+          {onOpenSettings && (
+            <button
+              onClick={onOpenSettings}
+              className="px-3 py-1 bg-cyber-warning/20 border border-cyber-warning/40 hover:bg-cyber-warning/30 text-cyber-warning text-[11px] font-bold font-mono rounded cursor-pointer transition-colors shrink-0 ml-3"
+            >
+              Configure Scope
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Pipeline Halted Banner */}
       {pipelineHalted && pipelineHalted.reason === "no_live_hosts" && (
         <div className="bg-cyber-danger/10 border border-cyber-danger/30 rounded-xl p-4 flex items-center space-x-3 text-cyber-danger glass animate-pulse">
@@ -768,7 +807,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
         </div>
       )}
       {/* Risk Scoring Panel */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
         {/* Risk Overview Card */}
         <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass flex flex-col justify-between">
           <div>
@@ -842,7 +881,48 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
             )}
           </div>
         </div>
-      </div>
+      
+        {/* Top Hunt Targets Card */}
+        <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">
+          <h4 className="text-xs font-mono text-slate-400 uppercase tracking-wider mb-4 border-b border-dark-border pb-2 flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-cyber-accent">
+              <span>🎯 Top Hunt Targets</span>
+            </span>
+            <span className="text-[10px] font-mono text-slate-500 uppercase">Bug Bounty Priority</span>
+          </h4>
+          <div className="space-y-2">
+            {topHuntTargets.length === 0 ? (
+              <div className="text-center py-6 text-xs text-slate-500 font-mono">
+                No live host targets identified yet.
+              </div>
+            ) : (
+              topHuntTargets.map((asset) => {
+                const hp = (asset as any).hunt_priority ?? 0;
+                let badgeColor = "bg-slate-500/10 text-slate-400 border-slate-500/20";
+                if (hp >= 80) badgeColor = "bg-cyan-500/15 text-cyan-300 border-cyan-500/40 font-bold";
+                else if (hp >= 50) badgeColor = "bg-amber-500/15 text-amber-300 border-amber-500/40 font-bold";
+                else if (hp >= 20) badgeColor = "bg-blue-500/15 text-blue-300 border-blue-500/40";
+
+                const mainReason = (asset as any).hunt_reasons?.[0] || "Live attack surface";
+
+                return (
+                  <div key={asset.id} className="flex items-center justify-between p-2.5 bg-dark-bg border border-dark-border rounded-lg hover:bg-dark-hover/10 transition-all">
+                    <div className="flex flex-col min-w-0 pr-2">
+                      <span className="text-xs font-mono text-slate-200 truncate font-semibold">{asset.domain}</span>
+                      <span className="text-[10px] text-slate-500 font-mono truncate">{mainReason}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs font-mono px-2 py-0.5 rounded border ${badgeColor}`}>
+                        🎯 {hp}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+</div>
 
       {/* Vulnerability Summary Card */}
       <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">

@@ -1,24 +1,26 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Query
 from bson import ObjectId
-from typing import List, Dict, Any
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+import logging
+
 from app.database import get_database
-from app.auth import get_current_user
 from app.models import AssetResponse, serialize_doc
 
+logger = logging.getLogger("reconforge.assets")
 router = APIRouter(prefix="/assets", tags=["Assets"])
 
 UNIFIED_PROVIDERS = ["subfinder", "assetfinder", "amass", "chaos"]
 
 
 @router.get("/project/{project_id}", response_model=List[AssetResponse])
-async def get_project_assets(project_id: str, current_user: dict = Depends(get_current_user)):
+async def get_project_assets(project_id: str):
     db = get_database()
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid project ID format")
 
     project = await db.projects.find_one({
         "_id": ObjectId(project_id),
-        "owner_id": str(current_user["_id"])
     })
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -29,7 +31,7 @@ async def get_project_assets(project_id: str, current_user: dict = Depends(get_c
 
 
 @router.get("/project/{project_id}/subdomains")
-async def get_project_subdomains(project_id: str, current_user: dict = Depends(get_current_user)):
+async def get_project_subdomains(project_id: str):
     """Returns all subdomain assets with source attribution and timestamps."""
     db = get_database()
     if not ObjectId.is_valid(project_id):
@@ -37,7 +39,6 @@ async def get_project_subdomains(project_id: str, current_user: dict = Depends(g
 
     project = await db.projects.find_one({
         "_id": ObjectId(project_id),
-        "owner_id": str(current_user["_id"])
     })
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -48,14 +49,13 @@ async def get_project_subdomains(project_id: str, current_user: dict = Depends(g
 
 
 @router.get("/project/{project_id}/dashboard-stats")
-async def get_dashboard_stats(project_id: str, current_user: dict = Depends(get_current_user)):
+async def get_dashboard_stats(project_id: str):
     db = get_database()
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid project ID format")
 
     project = await db.projects.find_one({
         "_id": ObjectId(project_id),
-        "owner_id": str(current_user["_id"])
     })
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -117,3 +117,152 @@ async def get_dashboard_stats(project_id: str, current_user: dict = Depends(get_
         "sources_distribution": sources_data,
         "provider_counts": provider_counts,
     }
+
+
+@router.get("/project/{project_id}/asset/{asset_id}/response-body")
+async def get_asset_response_body(
+    project_id: str,
+    asset_id: str,
+):
+    """
+    Retrieval of stored HTTP response bodies (single-user local mode).
+    Guaranteed:
+      - Verifies project exists
+      - Strict path-traversal prevention via response_storage service
+    """
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection is not available")
+    if not ObjectId.is_valid(project_id) or not ObjectId.is_valid(asset_id):
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+
+    project = await db.projects.find_one({
+        "_id": ObjectId(project_id),
+    })
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    asset = await db.assets.find_one({"_id": ObjectId(asset_id), "project_id": project_id})
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    meta = asset.get("metadata") or {}
+    rel_path = meta.get("response_body_path") or asset.get("response_body_path")
+    if not rel_path:
+        raise HTTPException(status_code=404, detail="No response body stored for this asset")
+
+    from app.services.response_storage import read_response_body
+    filename = rel_path.split("/")[-1]
+    content = read_response_body(project_id, filename)
+    if content is None:
+        raise HTTPException(status_code=404, detail="Response body file not found on disk")
+
+    return {
+        "asset_id": asset_id,
+        "domain": asset.get("domain"),
+        "status_code": meta.get("status_code"),
+        "content_length": meta.get("response_body_size") or len(content),
+        "content": content,
+    }
+
+
+@router.get("/project/{project_id}/content-paths")
+async def get_project_content_paths(
+    project_id: str,
+    page: int = 1,
+    limit: int = 50,
+    host: Optional[str] = None,
+    status_code: Optional[int] = None,
+    first_seen_after: Optional[str] = None,
+    current_user: Optional[Any] = None,
+    **kwargs: Any,
+):
+    """
+    Paginated retrieval of discovered content paths.
+    Filters: host, status_code, first_seen_after.
+    Returns: value, host, status_code, content_length, words, lines, redirect_location,
+             calibration_used, first_seen, last_seen.
+    """
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection is not available")
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID format")
+
+    project = await db.projects.find_one({
+        "_id": ObjectId(project_id),
+    })
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    query: Dict[str, Any] = {
+        "project_id": project_id,
+        "type": "content_path",
+    }
+
+    and_conditions: List[Dict[str, Any]] = []
+
+    if host:
+        host_clean = host.strip()
+        and_conditions.append({
+            "$or": [
+                {"domain": host_clean},
+                {"metadata.host": host_clean},
+            ]
+        })
+
+    if status_code is not None:
+        and_conditions.append({
+            "$or": [
+                {"status_code": status_code},
+                {"metadata.status_code": status_code},
+            ]
+        })
+
+    if first_seen_after:
+        try:
+            dt = datetime.fromisoformat(first_seen_after.replace("Z", "+00:00"))
+            if dt.tzinfo is not None:
+                dt_naive = dt.replace(tzinfo=None)
+            else:
+                dt_naive = dt
+            and_conditions.append({"first_seen": {"$gte": dt_naive}})
+        except Exception as pe:
+            logger.debug("[content_paths] Failed to parse first_seen_after date '%s': %s", first_seen_after, pe)
+
+    if and_conditions:
+        query["$and"] = and_conditions
+
+    total = await db.assets.count_documents(query)
+    safe_page = max(1, page)
+    safe_limit = max(1, min(limit, 500))
+    skip = (safe_page - 1) * safe_limit
+
+    cursor = db.assets.find(query).sort([("first_seen", -1), ("_id", -1)]).skip(skip).limit(safe_limit)
+    docs = await cursor.to_list(length=safe_limit)
+
+    items = []
+    for d in docs:
+        meta = d.get("metadata") or {}
+        first_s = d.get("first_seen")
+        last_s = d.get("last_seen")
+        items.append({
+            "value": d.get("value") or meta.get("url") or d.get("domain"),
+            "host": d.get("domain") or meta.get("host") or "",
+            "status_code": d.get("status_code") or meta.get("status_code"),
+            "content_length": meta.get("content_length", 0),
+            "words": meta.get("words", 0),
+            "lines": meta.get("lines", 0),
+            "redirect_location": meta.get("redirect_location", ""),
+            "calibration_used": meta.get("calibration_used", True),
+            "first_seen": first_s.isoformat() if isinstance(first_s, datetime) else (str(first_s) if first_s else None),
+            "last_seen": last_s.isoformat() if isinstance(last_s, datetime) else (str(last_s) if last_s else None),
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "page": safe_page,
+        "limit": safe_limit,
+    }
+

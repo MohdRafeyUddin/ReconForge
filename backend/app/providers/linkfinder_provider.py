@@ -43,35 +43,24 @@ class LinkfinderProvider(BaseProvider):
         
         tool_path = self.detect_tool("linkfinder")
         is_windows = platform.system().lower() == "windows"
-        
-        # Verify tool works/exists
-        test_cmd = ["wsl", "test", "-f", tool_path] if is_windows else ["test", "-f", tool_path]
-        try:
-            res = subprocess.run(test_cmd, capture_output=True, timeout=5)
-            if res.returncode != 0 and not tool_path.endswith("linkfinder.py"):
-                # Graceful skip
-                warn_msg = f"[!] LinkFinder script not found at {tool_path}. Skipping LinkFinder."
-                logger.warning(warn_msg)
-                yield {"type": "log", "message": warn_msg}
-                yield {
-                    "type": "scan_summary",
-                    "provider": "linkfinder",
-                    "extracted_endpoints": 0,
-                    "status": "SKIPPED"
-                }
-                yield {"type": "log", "message": "[!] Provider linkfinder skipped"}
-                return
-        except Exception as exc:
-            warn_msg = f"[!] Error detecting LinkFinder script: {exc}. Skipping LinkFinder."
-            logger.warning(warn_msg)
-            yield {"type": "log", "message": warn_msg}
+
+        if not tool_path:
+            err_msg = "LinkFinder script path not found (None)"
+            logger.error(err_msg)
+            yield {
+                "type": "stage_error",
+                "stage": "linkfinder",
+                "tool": "linkfinder",
+                "message": err_msg,
+            }
             yield {
                 "type": "scan_summary",
                 "provider": "linkfinder",
                 "extracted_endpoints": 0,
-                "status": "SKIPPED"
+                "status": "SKIPPED",
+                "reason": "tool_not_found",
             }
-            yield {"type": "log", "message": "[!] Provider linkfinder skipped"}
+            yield {"type": "log", "message": "[!] Provider linkfinder skipped: tool_not_found"}
             return
 
         yield {"type": "log", "message": f"[*] Analysing {len(js_urls)} JavaScript files..."}
@@ -92,7 +81,7 @@ class LinkfinderProvider(BaseProvider):
                 
             # Build command
             if is_windows:
-                cmd = ["wsl", "python3", tool_path, "-i", js_url, "-o", "cli"]
+                cmd = ["wsl", "-e", "python3", tool_path, "-i", js_url, "-o", "cli"]
             else:
                 cmd = ["python3", tool_path, "-i", js_url, "-o", "cli"]
                 
@@ -178,6 +167,15 @@ class LinkfinderProvider(BaseProvider):
                         process.wait()
                         
             except Exception as e:
+                if "not found" in str(e).lower() or isinstance(e, FileNotFoundError):
+                    from app.core.tools import invalidate_tool_cache
+                    invalidate_tool_cache("linkfinder")
+                    yield {
+                        "type": "stage_error",
+                        "stage": "linkfinder",
+                        "tool": "linkfinder",
+                        "message": f"LinkFinder execution failed: {e}",
+                    }
                 logger.error(f"Failed to run LinkFinder on {js_url}: {e}")
                 
             # Sleep briefly to be nice to event loop

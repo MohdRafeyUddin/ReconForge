@@ -3,7 +3,9 @@ import os
 import shutil
 import platform
 import subprocess
-from typing import AsyncGenerator, Dict, Any, List
+import re
+import shlex
+from typing import AsyncGenerator, Dict, Any, List, Optional
 
 class BaseProvider(ABC):
     """
@@ -46,49 +48,27 @@ class BaseProvider(ABC):
         rest = rest.replace("\\", "/")
         return f"/mnt/{drive_letter}{rest}"
 
+    @classmethod
+    def detect_tool(cls, tool_name: str, force_refresh: bool = False) -> Optional[str]:
+        """
+        Dynamically resolves the absolute path to an executable in WSL or host.
+        Validates tool_name against the tool registry and ^[a-z0-9_-]+$ before execution.
+        Caches resolved absolute paths and NEVER returns bare names with wsl -e.
+        Returns the absolute path (e.g. '/usr/bin/ffuf') if available, or None if missing.
+        """
+        if not isinstance(tool_name, str) or not re.match(r"^[a-z0-9_-]+$", tool_name):
+            raise ValueError(f"Invalid tool name: '{tool_name}'. Must match ^[a-z0-9_-]+$")
+
+        from app.core.tools import RECON_TOOLS, resolve_tool_absolute_path
+        if tool_name not in RECON_TOOLS:
+            raise ValueError(f"Tool '{tool_name}' is not registered in the tool registry")
+
+        return resolve_tool_absolute_path(tool_name, force_refresh=force_refresh)
+
     @staticmethod
-    def detect_tool(tool_name: str) -> str:
-        is_windows = platform.system().lower() == "windows"
-        wsl_user = os.getenv("WSL_USER", "kali")
-        home_dir = f"/home/{wsl_user}" if is_windows else os.path.expanduser("~")
-        
-        candidates = [
-            tool_name,
-            f"{home_dir}/go/bin/{tool_name}",
-            f"{home_dir}/.local/bin/{tool_name}",
-            f"/usr/bin/{tool_name}",
-            f"/usr/local/bin/{tool_name}",
-        ]
-        
-        if not is_windows:
-            path_which = shutil.which(tool_name)
-            if path_which:
-                return path_which
-                
-        if is_windows:
-            for cand in candidates:
-                try:
-                    cmd = ["wsl", "which" if cand == tool_name else "test", "-f" if cand != tool_name else cand]
-                    if cand != tool_name:
-                        cmd.append(cand)
-                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
-                    if proc.returncode == 0:
-                        return cand
-                except Exception:
-                    pass
-        else:
-            for cand in candidates:
-                if cand == tool_name:
-                    if shutil.which(cand):
-                        return cand
-                else:
-                    if os.path.exists(cand):
-                        return cand
-                        
-        # Final fallback
-        if tool_name == "linkfinder":
-            return f"{home_dir}/tools/LinkFinder/linkfinder.py"
-        elif tool_name == "openredirex":
-            return f"{home_dir}/tools/OpenRedirex/openredirex.py"
-        return f"{home_dir}/go/bin/{tool_name}"
+    def format_cmd_log(cmd: List[str]) -> str:
+        """Formats and redacts a command list for safe execution logging."""
+        from app.core.redaction import redact_cmd_args
+        redacted = redact_cmd_args(cmd)
+        return f"[*] Executing command: {' '.join(redacted)}"
 

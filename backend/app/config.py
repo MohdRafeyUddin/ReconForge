@@ -1,4 +1,5 @@
 import os
+from typing import List, Set
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,9 +12,27 @@ class Settings:
     MONGODB_URL: str = os.getenv("MONGODB_URL", "mongodb://127.0.0.1:27017")
     DATABASE_NAME: str = os.getenv("DATABASE_NAME", "reconforge")
     
-    # Security/JWT Config
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "reconforge_super_secret_key_change_me_in_prod")
-    ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 1 day
+    # Tool detection / scan configuration
+    ASSUME_TOOLS_INSTALLED: bool = os.getenv("ASSUME_TOOLS_INSTALLED", "true").lower() in ("true", "1", "yes")
+
+    # Network exposure & security config (single-user local mode)
+    # Default allowed origins: http://localhost:5173 and http://127.0.0.1:5173 only
+    @property
+    def ALLOWED_ORIGINS(self) -> List[str]:
+        env_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
+        if env_origins:
+            return [o.strip() for o in env_origins.split(",") if o.strip()]
+        return ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    # Allowed Host headers for DNS-rebinding prevention (excluding port)
+    @property
+    def ALLOWED_HOSTS(self) -> Set[str]:
+        base_hosts = {"localhost", "127.0.0.1", "::1", "[::1]", "testserver", "test"}
+        env_hosts = os.getenv("ALLOWED_HOSTS", "").strip()
+        if env_hosts:
+            for h in env_hosts.split(","):
+                if h.strip():
+                    base_hosts.add(h.strip().lower())
+        return base_hosts
 
 settings = Settings()

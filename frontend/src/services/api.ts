@@ -7,12 +7,7 @@ export interface ApiRequestOptions extends RequestInit {
 }
 
 export const apiCall = async (endpoint: string, options: ApiRequestOptions = {}) => {
-  const token = options.token || localStorage.getItem("token");
-  
   const headers = new Headers(options.headers || {});
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
   if (!(options.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -23,12 +18,6 @@ export const apiCall = async (endpoint: string, options: ApiRequestOptions = {})
   };
 
   const response = await fetch(`${API_BASE_URL}${endpoint}`, config);
-  
-  if (response.status === 401) {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    // Optionally redirect to login or reload page
-  }
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));

@@ -1,7 +1,12 @@
 import asyncio
 import contextvars
 import logging
+import os
+import platform
+import signal
+import subprocess
 from collections import defaultdict
+from typing import Optional
 from bson import ObjectId
 
 logger = logging.getLogger("reconforge.job_control")
@@ -26,6 +31,60 @@ def unregister_process(proc):
             logger.info(f"Unregistered process {proc.pid} for job {jid}")
         except ValueError:
             pass
+
+
+def kill_process_tree(proc: subprocess.Popen, tool_name: Optional[str] = None) -> None:
+    """
+    Enforces a hard kill of the whole process tree at deadline.
+    On Windows:
+      1. taskkill /F /T /PID <pid> to forcefully kill the Windows process and its entire child tree.
+      2. If tool_name provided, run wsl -e pkill -9 -f <tool_name> to terminate any orphaned Linux processes.
+    On Linux/Unix:
+      1. Send SIGKILL to the process group.
+      2. If tool_name provided, run pkill -9 -f <tool_name>.
+    """
+    if proc is None:
+        return
+
+    pid = getattr(proc, "pid", None)
+    is_windows = platform.system().lower() == "windows"
+
+    if pid:
+        if is_windows:
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=5)
+            except Exception as exc:
+                logger.debug(f"taskkill failed for pid {pid}: {exc}")
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except Exception:
+                pass
+            if tool_name:
+                try:
+                    subprocess.run(["wsl", "-e", "pkill", "-9", "-f", tool_name], capture_output=True, timeout=5)
+                except Exception:
+                    pass
+        else:
+            try:
+                pgid = os.getpgid(pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            if tool_name:
+                try:
+                    subprocess.run(["pkill", "-9", "-f", tool_name], capture_output=True, timeout=5)
+                except Exception:
+                    pass
+
+    try:
+        if proc.poll() is None:
+            proc.kill()
+    except Exception:
+        pass
 
 async def check_job_status():
     jid = current_job_id.get()
