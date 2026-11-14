@@ -96,8 +96,16 @@ export const NormalizedUrlTab: React.FC<NormalizedUrlTabProps> = ({ records, pro
               </td></tr>
             ) : filtered.map((r, idx) => (
               <tr key={idx} className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors">
-                <td className="p-4 font-mono text-slate-400 break-all max-w-xs">{r.original_url}</td>
-                <td className="p-4 font-mono text-cyber-accent break-all max-w-xs">{r.normalized_url}</td>
+                <td className="p-4 font-mono text-slate-400 break-all max-w-xs">
+                  <a href={r.original_url} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline transition-colors">
+                    {r.original_url}
+                  </a>
+                </td>
+                <td className="p-4 font-mono text-cyber-accent break-all max-w-xs">
+                  <a href={r.normalized_url} target="_blank" rel="noopener noreferrer" className="hover:underline transition-colors">
+                    {r.normalized_url}
+                  </a>
+                </td>
                 <td className="p-4">
                   {r.duplicate_removed ? (
                     <span className="px-2 py-0.5 rounded-full text-[10px] bg-slate-500/10 border border-slate-500/30 text-slate-400 uppercase">Removed</span>

@@ -360,9 +360,29 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
                         {f.template_id || f.template || (f.source || f.metadata?.source || "unknown").toUpperCase()}
                       </td>
                       <td className="p-4 max-w-xs truncate text-slate-300" title={f.matched_url || f.endpoint || ""}>
-                        {f.matched_url || f.endpoint || ""}
+                        {f.matched_url || f.endpoint ? (
+                          <a
+                            href={f.matched_url || f.endpoint}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-cyber-accent hover:underline"
+                          >
+                            {f.matched_url || f.endpoint}
+                          </a>
+                        ) : ""}
                       </td>
-                      <td className="p-4 text-slate-300">{f.host}</td>
+                      <td className="p-4 text-slate-300">
+                        {f.host ? (
+                          <a
+                            href={`https://${f.host}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="hover:text-cyber-accent hover:underline"
+                          >
+                            {f.host}
+                          </a>
+                        ) : "-"}
+                      </td>
                       <td className="p-4 max-w-xs truncate text-slate-400">
                         {(f.tags || []).join(", ")}
                       </td>
@@ -436,11 +456,25 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
                               )}
                               <div>
                                 <span className="text-slate-500">Matched URL:</span>{" "}
-                                <span className="text-slate-300 break-all select-all">{f.matched_url}</span>
+                                <a
+                                  href={f.matched_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-cyber-accent hover:underline break-all select-all"
+                                >
+                                  {f.matched_url}
+                                </a>
                               </div>
                               <div>
                                 <span className="text-slate-500">Target Host:</span>{" "}
-                                <span className="text-slate-300">{f.host}</span>
+                                <a
+                                  href={`https://${f.host}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-slate-300 hover:text-cyber-accent hover:underline"
+                                >
+                                  {f.host}
+                                </a>
                               </div>
                               {f.ip && (
                                 <div>

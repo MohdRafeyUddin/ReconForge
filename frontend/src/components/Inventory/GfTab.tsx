@@ -174,8 +174,10 @@ export const GfTab: React.FC<GfTabProps> = ({ records, projectName = "project" }
                   {!isCollapsed && (
                     <div className="border-t border-dark-border max-h-60 overflow-y-auto">
                       {urls.map((url, idx) => (
-                        <div key={idx} className="px-4 py-2 font-mono text-[11px] text-slate-300 break-all hover:text-white hover:bg-dark-hover/20 transition-colors border-b border-dark-border/40 last:border-0 select-all">
-                          {url}
+                        <div key={idx} className="px-4 py-2 font-mono text-[11px] text-slate-300 break-all hover:bg-dark-hover/20 transition-colors border-b border-dark-border/40 last:border-0 select-all">
+                          <a href={url} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                            {url}
+                          </a>
                         </div>
                       ))}
                     </div>

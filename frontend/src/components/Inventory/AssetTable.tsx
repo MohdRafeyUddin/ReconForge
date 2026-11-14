@@ -510,7 +510,11 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                 ) : (
                   historicalUrls.map((urlObj, idx) => (
                     <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-hover/30 transition-colors font-mono text-[11px]">
-                      <td className="p-3 break-all select-all text-slate-300">{urlObj.url}</td>
+                      <td className="p-3 break-all select-all text-slate-300">
+                        <a href={urlObj.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline">
+                          {urlObj.url}
+                        </a>
+                      </td>
                       <td className="p-3">
                         {urlObj.has_params ? (
                           <span className="px-1.5 py-0.5 bg-yellow-500/20 border border-yellow-500/40 text-yellow-400 rounded text-[9px] font-bold">
@@ -777,7 +781,14 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                       <td className="p-4 font-bold text-slate-200">
                         <div className="flex flex-col gap-1.5">
                           <div className="flex items-center space-x-2">
-                            <span>{asset.domain}</span>
+                            <a
+                              href={asset.domain.startsWith("http://") || asset.domain.startsWith("https://") ? asset.domain : `https://${asset.domain}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="hover:text-cyber-accent hover:underline transition-colors break-all"
+                            >
+                              {asset.domain}
+                            </a>
                             <button
                               onClick={() => handleCopy(asset.domain)}
                               className="text-slate-500 hover:text-cyber-accent transition-colors cursor-pointer"
@@ -1061,7 +1072,14 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                                 {asset.metadata.url && (
                                   <div>
                                     <span className="text-slate-500">URL:</span>{" "}
-                                    <span className="text-slate-200 break-all">{asset.metadata.url}</span>
+                                    <a
+                                      href={asset.metadata.url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-cyber-accent hover:underline break-all"
+                                    >
+                                      {asset.metadata.url}
+                                    </a>
                                   </div>
                                 )}
                                 {asset.metadata.status_code !== undefined && (
@@ -1109,7 +1127,14 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                                 {asset.metadata.redirect_location && (
                                   <div>
                                     <span className="text-slate-500">REDIRECT:</span>{" "}
-                                    <span className="text-slate-300 break-all">{asset.metadata.redirect_location}</span>
+                                    <a
+                                      href={asset.metadata.redirect_location.startsWith("http") ? asset.metadata.redirect_location : `https://${asset.domain}${asset.metadata.redirect_location.startsWith("/") ? "" : "/"}${asset.metadata.redirect_location}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-cyber-accent hover:underline break-all"
+                                    >
+                                      {asset.metadata.redirect_location}
+                                    </a>
                                   </div>
                                 )}
                                 {(asset.metadata.tls_info || asset.metadata.ssl_info) && (
@@ -1289,9 +1314,16 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                                                     <span className="text-[9px] px-1.5 py-0.25 bg-dark-card border border-dark-border rounded text-slate-400">{urls.length}</span>
                                                   </div>
                                                   <div className="space-y-1 text-[10px]">
-                                                    {urls.map((url: string, idx: number) => (
-                                                      <div key={idx} className="text-slate-300 break-all select-all hover:text-white py-0.5 border-b border-dark-border/10 last:border-0">{url}</div>
-                                                    ))}
+                                                    {urls.map((url: string, idx: number) => {
+                                                      const fullUrl = url.startsWith("http") ? url : `https://${asset.domain}${url.startsWith("/") ? "" : "/"}${url}`;
+                                                      return (
+                                                        <div key={idx} className="text-slate-300 break-all select-all hover:text-white py-0.5 border-b border-dark-border/10 last:border-0">
+                                                          <a href={fullUrl} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                                                            {url}
+                                                          </a>
+                                                        </div>
+                                                      );
+                                                    })}
                                                   </div>
                                                 </div>
                                               );
@@ -1300,9 +1332,16 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                                         ) : (
                                           <div className="max-h-48 overflow-y-auto bg-dark-bg border border-dark-border rounded p-2 text-[10px] space-y-1 font-mono">
                                             {asset.metadata.katana.endpoints?.length > 0 ? (
-                                              asset.metadata.katana.endpoints.map((ep: string, idx: number) => (
-                                                <div key={idx} className="text-slate-300 break-all select-all hover:text-white py-0.5 border-b border-dark-border/20 last:border-0">{ep}</div>
-                                              ))
+                                              asset.metadata.katana.endpoints.map((ep: string, idx: number) => {
+                                                const fullEp = ep.startsWith("http") ? ep : `https://${asset.domain}${ep.startsWith("/") ? "" : "/"}${ep}`;
+                                                return (
+                                                  <div key={idx} className="text-slate-300 break-all select-all hover:text-white py-0.5 border-b border-dark-border/20 last:border-0">
+                                                    <a href={fullEp} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                                                      {ep}
+                                                    </a>
+                                                  </div>
+                                                );
+                                              })
                                             ) : (
                                               <div className="text-slate-500 italic p-1">No endpoints discovered.</div>
                                             )}
@@ -1316,9 +1355,16 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                                     return (
                                       <div className="max-h-48 overflow-y-auto bg-dark-bg border border-dark-border rounded p-2 text-[10px] space-y-1 font-mono">
                                         {asset.metadata.katana.js_files?.length > 0 ? (
-                                          asset.metadata.katana.js_files.map((js: string, idx: number) => (
-                                            <div key={idx} className="text-slate-300 break-all select-all hover:text-white py-0.5 border-b border-dark-border/20 last:border-0">{js}</div>
-                                          ))
+                                          asset.metadata.katana.js_files.map((js: string, idx: number) => {
+                                            const fullJs = js.startsWith("http") ? js : `https://${asset.domain}${js.startsWith("/") ? "" : "/"}${js}`;
+                                            return (
+                                              <div key={idx} className="text-slate-300 break-all select-all hover:text-white py-0.5 border-b border-dark-border/20 last:border-0">
+                                                <a href={fullJs} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline">
+                                                  {js}
+                                                </a>
+                                              </div>
+                                            );
+                                          })
                                         ) : (
                                           <div className="text-slate-500 italic p-1">No JavaScript files discovered.</div>
                                         )}

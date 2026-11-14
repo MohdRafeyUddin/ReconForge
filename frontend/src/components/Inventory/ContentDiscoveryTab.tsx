@@ -305,7 +305,14 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
                             <Copy className="w-3.5 h-3.5" />
                           )}
                         </button>
-                        <span className="select-all break-all">{r.value}</span>
+                        <a
+                          href={r.value}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="select-all break-all text-slate-200 hover:text-cyber-accent hover:underline transition-colors"
+                        >
+                          {r.value}
+                        </a>
                         {isNew && (
                           <span className="shrink-0 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 rounded text-[9px] font-bold uppercase tracking-wider">
                             New
@@ -315,7 +322,16 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
                     </td>
 
                     {/* Host */}
-                    <td className="p-3.5 text-slate-400 whitespace-nowrap">{r.host}</td>
+                    <td className="p-3.5 text-slate-400 whitespace-nowrap">
+                      <a
+                        href={`https://${r.host}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="hover:text-cyber-accent hover:underline transition-colors"
+                      >
+                        {r.host}
+                      </a>
+                    </td>
 
                     {/* Status Code */}
                     <td className="p-3.5 whitespace-nowrap">
@@ -346,7 +362,16 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
 
                     {/* Redirect */}
                     <td className="p-3.5 text-slate-400 max-w-xs break-all">
-                      {r.redirect_location ? <span>{r.redirect_location}</span> : "—"}
+                      {r.redirect_location ? (
+                        <a
+                          href={r.redirect_location.startsWith("http") ? r.redirect_location : `https://${r.host}${r.redirect_location.startsWith("/") ? "" : "/"}${r.redirect_location}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-cyber-accent hover:underline"
+                        >
+                          {r.redirect_location}
+                        </a>
+                      ) : "—"}
                     </td>
 
                     {/* First Seen */}

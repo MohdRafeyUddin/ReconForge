@@ -179,7 +179,14 @@ export const SubdomainsTab: React.FC<SubdomainsTabProps> = ({ subdomains }) => {
                   className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors duration-150"
                 >
                   <td className="p-4 font-bold text-slate-200 font-mono">
-                    {asset.domain}
+                    <a
+                      href={`https://${asset.domain}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:text-cyber-accent hover:underline transition-colors"
+                    >
+                      {asset.domain}
+                    </a>
                   </td>
                   <td className="p-4">
                     <div className="flex flex-wrap gap-1">

@@ -248,7 +248,17 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                   list.map((item, idx) => (
                     <div key={`${type}-${idx}`} className="truncate">
                       <span className="text-slate-500 mr-2">[{type}]</span>
-                      {item}
+                      {item.startsWith("http://") || item.startsWith("https://") ? (
+                        <a href={item} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                          {item}
+                        </a>
+                      ) : type === "subdomain" || type === "live_host" ? (
+                        <a href={`https://${item}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                          {item}
+                        </a>
+                      ) : (
+                        <span>{item}</span>
+                      )}
                     </div>
                   ))
                 )}
@@ -268,7 +278,17 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                   list.map((item, idx) => (
                     <div key={`${type}-${idx}`} className="truncate">
                       <span className="text-slate-500 mr-2">[{type}]</span>
-                      {item}
+                      {item.startsWith("http://") || item.startsWith("https://") ? (
+                        <a href={item} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                          {item}
+                        </a>
+                      ) : type === "subdomain" || type === "live_host" ? (
+                        <a href={`https://${item}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                          {item}
+                        </a>
+                      ) : (
+                        <span>{item}</span>
+                      )}
                     </div>
                   ))
                 )}
@@ -518,7 +538,19 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                         {runAssets.map((a, idx) => (
                           <tr key={idx} className="border-b border-dark-border/40 hover:bg-dark-hover/20">
                             <td className="p-2 text-slate-500 w-28 uppercase">[{a.type}]</td>
-                            <td className="p-2 text-slate-200 font-semibold truncate">{a.value}</td>
+                            <td className="p-2 text-slate-200 font-semibold truncate">
+                              {a.value.startsWith("http://") || a.value.startsWith("https://") ? (
+                                <a href={a.value} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                                  {a.value}
+                                </a>
+                              ) : a.type === "subdomain" || a.type === "live_host" ? (
+                                <a href={`https://${a.value}`} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
+                                  {a.value}
+                                </a>
+                              ) : (
+                                <span>{a.value}</span>
+                              )}
+                            </td>
                             <td className="p-2 text-slate-400 text-right">{a.discovered_by || "-"}</td>
                           </tr>
                         ))}

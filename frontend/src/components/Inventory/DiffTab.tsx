@@ -527,7 +527,15 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                     key={sub}
                     className="flex items-center justify-between px-3 py-2 bg-emerald-950/20 border border-emerald-500/20 rounded-lg text-xs font-mono text-emerald-300"
                   >
-                    <span className="truncate" title={sub}>{sub}</span>
+                    <a
+                      href={`https://${sub}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="truncate hover:text-cyber-accent hover:underline"
+                      title={sub}
+                    >
+                      {sub}
+                    </a>
                     <span className="text-[10px] px-1.5 py-0.5 bg-emerald-500/20 text-emerald-300 rounded font-bold ml-2">
                       +NEW
                     </span>
@@ -563,9 +571,15 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                     key={sub}
                     className="flex items-center justify-between px-3 py-2 bg-rose-950/20 border border-rose-500/20 rounded-lg text-xs font-mono text-rose-300"
                   >
-                    <span className="truncate line-through opacity-80" title={sub}>
+                    <a
+                      href={`https://${sub}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="truncate line-through opacity-80 hover:text-cyber-accent hover:underline"
+                      title={sub}
+                    >
                       {sub}
-                    </span>
+                    </a>
                     <span className="text-[10px] px-1.5 py-0.5 bg-rose-500/20 text-rose-300 rounded font-bold ml-2">
                       STALE
                     </span>
@@ -601,7 +615,15 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                     key={host}
                     className="flex items-center justify-between px-3 py-2 bg-blue-950/20 border border-blue-500/20 rounded-lg text-xs font-mono text-blue-300"
                   >
-                    <span className="truncate" title={host}>{host}</span>
+                    <a
+                      href={host.startsWith("http") ? host : `https://${host}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="truncate hover:text-cyber-accent hover:underline"
+                      title={host}
+                    >
+                      {host}
+                    </a>
                     <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/20 text-blue-300 rounded font-bold ml-2">
                       LIVE
                     </span>
@@ -722,7 +744,14 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                         key={idx}
                         className="flex items-center justify-between px-3 py-1.5 bg-emerald-950/20 border border-emerald-500/20 rounded text-xs font-mono text-emerald-300"
                       >
-                        <span className="truncate">{p.domain}</span>
+                        <a
+                          href={`https://${p.domain}:${p.port}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="truncate hover:text-cyber-accent hover:underline"
+                        >
+                          {p.domain}
+                        </a>
                         <span className="font-bold bg-emerald-500/30 px-2 py-0.5 rounded text-[10px]">
                           :{p.port}
                         </span>
@@ -745,7 +774,14 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                         key={idx}
                         className="flex items-center justify-between px-3 py-1.5 bg-rose-950/20 border border-rose-500/20 rounded text-xs font-mono text-rose-300"
                       >
-                        <span className="truncate">{p.domain}</span>
+                        <a
+                          href={`https://${p.domain}:${p.port}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="truncate hover:text-cyber-accent hover:underline"
+                        >
+                          {p.domain}
+                        </a>
                         <span className="font-bold bg-rose-500/30 px-2 py-0.5 rounded text-[10px] line-through">
                           :{p.port}
                         </span>
@@ -845,8 +881,26 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                       const sc = cp.status_code || 200;
                       return (
                         <tr key={idx} className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors font-mono">
-                          <td className="p-2.5 text-slate-200 break-all max-w-md">{url}</td>
-                          <td className="p-2.5 text-slate-400">{host}</td>
+                          <td className="p-2.5 text-slate-200 break-all max-w-md">
+                            <a
+                              href={url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-cyber-accent hover:underline"
+                            >
+                              {url}
+                            </a>
+                          </td>
+                          <td className="p-2.5 text-slate-400">
+                            <a
+                              href={`https://${host}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="hover:text-cyber-accent hover:underline"
+                            >
+                              {host}
+                            </a>
+                          </td>
                           <td className="p-2.5">
                             <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                               sc >= 200 && sc < 300

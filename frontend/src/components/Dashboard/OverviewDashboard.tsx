@@ -862,7 +862,14 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                 return (
                   <div key={asset.id} className="flex items-center justify-between p-2.5 bg-dark-bg border border-dark-border rounded-lg hover:bg-dark-hover/10 transition-all">
                     <div className="flex flex-col min-w-0 pr-2">
-                      <span className="text-xs font-mono text-slate-300 truncate font-semibold">{asset.domain}</span>
+                      <a
+                        href={asset.domain.startsWith("http") ? asset.domain : `https://${asset.domain}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-mono text-slate-300 hover:text-cyber-accent hover:underline truncate font-semibold"
+                      >
+                        {asset.domain}
+                      </a>
                       <span className="text-[10px] text-slate-500 font-mono truncate">{mainReason}</span>
                     </div>
                     <div className="flex items-center gap-2">
@@ -908,7 +915,14 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                 return (
                   <div key={asset.id} className="flex items-center justify-between p-2.5 bg-dark-bg border border-dark-border rounded-lg hover:bg-dark-hover/10 transition-all">
                     <div className="flex flex-col min-w-0 pr-2">
-                      <span className="text-xs font-mono text-slate-200 truncate font-semibold">{asset.domain}</span>
+                      <a
+                        href={asset.domain.startsWith("http") ? asset.domain : `https://${asset.domain}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-mono text-slate-200 hover:text-cyber-accent hover:underline truncate font-semibold"
+                      >
+                        {asset.domain}
+                      </a>
                       <span className="text-[10px] text-slate-500 font-mono truncate">{mainReason}</span>
                     </div>
                     <div className="flex items-center gap-2">

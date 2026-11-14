@@ -200,7 +200,16 @@ export const DnsTab: React.FC<DnsTabProps> = ({
                   key={`${r.subdomain}-${idx}`}
                   className="border-b border-dark-border hover:bg-dark-hover/30 transition-colors"
                 >
-                  <td className="p-4 font-bold text-slate-200 font-mono">{r.subdomain}</td>
+                  <td className="p-4 font-bold text-slate-200 font-mono">
+                    <a
+                      href={`https://${r.subdomain}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:text-cyber-accent hover:underline"
+                    >
+                      {r.subdomain}
+                    </a>
+                  </td>
                   <td className="p-4">
                     <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${statusClass(r.status)}`}>
                       {r.status || "unknown"}
@@ -214,7 +223,21 @@ export const DnsTab: React.FC<DnsTabProps> = ({
                   </td>
                   <td className="p-4 font-mono text-slate-400">
                     {r.cname.length > 0 ? (
-                      <span className="text-cyber-accent">{r.cname.join(", ")}</span>
+                      <span className="text-cyber-accent">
+                        {r.cname.map((cn, cnIdx) => (
+                          <span key={cnIdx}>
+                            {cnIdx > 0 && ", "}
+                            <a
+                              href={`https://${cn}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="hover:underline"
+                            >
+                              {cn}
+                            </a>
+                          </span>
+                        ))}
+                      </span>
                     ) : (
                       <span className="text-slate-600">—</span>
                     )}
