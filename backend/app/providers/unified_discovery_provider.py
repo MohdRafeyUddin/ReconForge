@@ -576,16 +576,22 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 else:
                     tasks.append(asyncio.create_task(run_passive(p, lbl)))
 
-            # If ALL passive tools are missing, emit a clear warning event naming them
-            if len(missing_passive) == len(self.PASSIVE_PROVIDERS):
-                names_str = ", ".join(missing_passive)
-                warn_msg = f"[!] WARNING: All passive discovery tools ({names_str}) are missing or uninstalled. Proceeding directly with seed root domain(s)."
+            # CLI passive tools can be missing while the public API sources
+            # (crt.sh / CertSpotter) remain available, so compare against the
+            # CLI-gated subset rather than every provider.
+            cli_passive_tools = {"subfinder", "assetfinder", "chaos", "amass"}
+            missing_cli_passive = [
+                tool for tool in missing_passive if tool in cli_passive_tools
+            ]
+            if len(missing_cli_passive) == len(cli_passive_tools):
+                names_str = ", ".join(missing_cli_passive)
+                warn_msg = f"[!] WARNING: All CLI passive discovery tools ({names_str}) are missing or uninstalled. Proceeding with public API sources and seed root domain(s)."
                 logger.warning(warn_msg)
                 yield {"type": "log", "message": warn_msg}
                 yield {
                     "type": "warning_event",
                     "warning": "all_passive_tools_missing",
-                    "missing_tools": missing_passive,
+                    "missing_tools": missing_cli_passive,
                     "message": warn_msg,
                 }
 

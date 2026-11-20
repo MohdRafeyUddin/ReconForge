@@ -421,6 +421,27 @@ manual tests are in `docs/PHASE8.md`.
 
 ---
 
-## 8. Disclaimer
+## 8. Local backups
+
+ReconForge stores scan data in MongoDB and raw artifacts under
+`backend/storage` / `backend/screenshots`. For personal deployments, take a
+periodic local backup:
+
+```bash
+cd backend
+./venv/Scripts/python.exe scripts/backup_local.py --keep 7
+# Linux/WSL venv:
+# python scripts/backup_local.py --keep 7
+```
+
+The script writes `backups/reconforge_<UTC timestamp>/` with one
+newline-delimited extended-JSON file per collection, `storage.tar.gz`,
+`screenshots.tar.gz`, and a manifest. It keeps the newest 7 backups by default
+(`--keep 0` keeps all) and skips every archive with `--skip-storage`.
+`backups/` is gitignored because it may contain sensitive response data.
+
+---
+
+## 9. Disclaimer
 
 ReconForge is intended solely for authorized security assessment, penetration testing, and educational research. The authors assume no liability for misuse, unauthorized scanning, or damage caused by the application.

@@ -539,6 +539,14 @@ const MainDashboard: React.FC = () => {
     fetchProjects();
   }, []);
 
+  const handleProjectDeleted = (deletedProjectId: string) => {
+    const remaining = projects.filter((project) => project.id !== deletedProjectId);
+    setProjects(remaining);
+    if (activeProject?.id === deletedProjectId) {
+      setActiveProject(remaining.length > 0 ? remaining[0] : null);
+    }
+  };
+
   const fetchProjectData = async () => {
     if (!activeProject) return;
     const projectId = activeProject.id;
@@ -1209,6 +1217,10 @@ const MainDashboard: React.FC = () => {
 
   const handleResetScan = async () => {
     if (!activeJob) return;
+    const confirmed = window.confirm(
+      "Reset the scan dashboard? This permanently deletes all assets, scan history, screenshots, response bodies, and stored JS for this project. The project and its settings are kept."
+    );
+    if (!confirmed) return;
     try {
       await apiCall(`/jobs/${activeJob.id}/reset`, { method: "POST" });
       setScanState(initialScanState);
@@ -2122,7 +2134,7 @@ const MainDashboard: React.FC = () => {
   return (
     <div className="min-h-screen bg-dark-bg text-dark-text flex flex-col">
       {isInMemoryDb && (
-        <div className="bg-amber-500/20 border-b border-amber-500/50 text-amber-200 px-4 py-2 text-xs font-mono font-bold flex items-center justify-center gap-2 sticky top-0 z-50 backdrop-blur-md shadow-md">
+        <div className="bg-amber-950/90 border-b border-amber-500/50 text-amber-200 px-4 py-2 text-xs font-mono font-bold flex items-center justify-center gap-2 sticky top-0 z-50 shadow-md">
           <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
           <span>Running on in-memory DB, data will be lost</span>
         </div>
@@ -2133,6 +2145,7 @@ const MainDashboard: React.FC = () => {
         onSelectProject={setActiveProject}
         onRefreshProjects={fetchProjects}
         onOpenSettings={() => setShowSettingsModal(true)}
+        onProjectDeleted={handleProjectDeleted}
       />
 
       {activeProject ? (
@@ -2185,13 +2198,6 @@ const MainDashboard: React.FC = () => {
                 )}
               </button>
 
-              <button
-                onClick={fetchProjectData}
-                className="flex items-center space-x-1 px-3 py-1.5 bg-dark-card hover:bg-dark-hover border border-dark-border text-slate-400 hover:text-slate-200 rounded text-xs font-bold transition-all cursor-pointer"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Sync Telemetry</span>
-              </button>
             </div>
           </div>
 
@@ -2216,11 +2222,6 @@ const MainDashboard: React.FC = () => {
                 pipelineHalted={scanState.pipelineHalted}
                 providerSkippedReasons={scanState.providerSkippedReasons}
                 onOpenSettings={() => setShowSettingsModal(true)}
-                onSelectSeverity={(severity: string) => {
-                  setInitialInventoryTab("nuclei");
-                  setInitialSeverityFilter(severity);
-                  setActiveTab("inventory");
-                }}
               />
             )}
 

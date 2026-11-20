@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ReconForge — Palette Lab</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      padding: 28px 28px 48px;
+      background: #05070c;
+      color: #e5e7eb;
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+    h1 { font-size: 24px; margin: 0 0 6px; letter-spacing: -0.02em; }
+    .lead { color: #94a3b8; font-size: 13px; margin: 0 0 18px; max-width: 980px; line-height: 1.5; }
+    .lead code { color: #e2e8f0; }
+    .index {
+      display: flex; flex-wrap: wrap; gap: 7px;
+      margin: 0 0 26px; padding: 12px;
+      background: #0b111c; border: 1px solid #1e2638; border-radius: 10px;
+    }
+    .index a {
+      color: #cbd5e1; text-decoration: none; font: 700 10px "Cascadia Mono", Consolas, monospace;
+      border: 1px solid #273349; background: #111827; border-radius: 5px; padding: 5px 7px;
+    }
+    .index a:hover { color: #fff; border-color: #3b82f6; }
+    .index a b { color: #67e8f9; margin-right: 4px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 22px; }
+    .palette {
+      border-radius: 14px; overflow: hidden; border: 1px solid #1e2638;
+      scroll-margin-top: 18px; background: #0b111c;
+    }
+    .mock {
+      background: var(--bg); color: var(--text);
+      font-family: var(--brand-font);
+      border-bottom: 1px solid var(--border);
+    }
+    .topbar {
+      display:flex; align-items:center; justify-content:space-between; gap:12px;
+      padding:12px 15px; background: var(--card); border-bottom:1px solid var(--border);
+    }
+    .brand { display:flex; align-items:center; gap:8px; font-weight:700; font-size:14px; }
+    .dot { width:9px; height:9px; border-radius:50%; background: var(--primary); box-shadow: var(--glow); }
+    .nav { display:flex; gap:5px; font-size:9px; text-transform:uppercase; letter-spacing:.08em; color: var(--muted); font-family: var(--mono); }
+    .nav .active {
+      color: var(--primary); border:1px solid var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent);
+      padding:4px 6px; border-radius:var(--radius-sm);
+    }
+    .nav span { padding:4px 6px; }
+    .content { padding:15px; display:flex; flex-direction:column; gap:11px; }
+    .card { background: var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:13px; }
+    .row { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+    .title { font-size:10px; text-transform:uppercase; letter-spacing:.09em; color: var(--muted); font-family: var(--mono); }
+    .num { font-family: var(--mono); font-size:24px; font-weight:700; color: var(--text); line-height:1.15; }
+    .sub { font-family: var(--mono); font-size:10px; color: var(--muted); }
+    .badges { display:flex; gap:5px; flex-wrap:wrap; }
+    .badge {
+      padding:3px 6px; border-radius:var(--radius-sm); font:700 9px var(--mono);
+      text-transform:uppercase; border:1px solid;
+    }
+    .live { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); border-color: color-mix(in srgb, var(--success) 45%, transparent); }
+    .forbidden { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+    .info { color: var(--primary); background: color-mix(in srgb, var(--primary) 10%, transparent); border-color: color-mix(in srgb, var(--primary) 48%, transparent); }
+    .danger { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+    table { width:100%; border-collapse:collapse; font:10px var(--mono); }
+    th { text-align:left; color: var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.06em; border-bottom:1px solid var(--border); padding:7px 5px; }
+    td { padding:8px 5px; border-bottom:1px solid var(--border); color: var(--text); }
+    td a { color: var(--primary); text-decoration:none; }
+    td a:hover { text-decoration:underline; }
+    .btn {
+      font:700 9px var(--mono); padding:5px 8px; border-radius:var(--radius-sm); cursor:default;
+      border:1px solid var(--border); background: var(--input); color: var(--text); text-transform:uppercase;
+    }
+    .btn.primary {
+      background: var(--button-bg, var(--primary)); color: var(--button-text, #071014); border-color: var(--primary);
+      box-shadow: var(--glow);
+    }
+    .input {
+      font:10px var(--mono); background: var(--input); border:1px solid var(--border); color: var(--text);
+      border-radius:var(--radius-sm); padding:7px 9px; width:100%;
+    }
+    .swatches { display:flex; flex-wrap:wrap; gap:6px; padding:10px 13px 13px; background: var(--card); border-top:1px solid var(--border); }
+    .swatch { display:flex; align-items:center; gap:5px; font:9px var(--mono); color: var(--muted); }
+    .chip { width:11px; height:11px; border-radius:3px; border:1px solid rgba(255,255,255,.15); }
+    .label { padding:10px 13px; background:#0b111c; border-top:1px solid #1e2638; }
+    .label .id {
+      display:inline-block; font:800 10px "Cascadia Mono", Consolas, monospace;
+      color:#67e8f9; border:1px solid #155e75; background:#082f3a; border-radius:4px; padding:2px 6px; margin-right:7px;
+    }
+    .label .name { font-weight:700; font-size:12px; }
+    .label small { display:block; font-weight:400; font-size:10px; color:#94a3b8; margin-top:3px; line-height:1.45; }
+    .copy {
+      float:right; font:700 9px var(--mono); color:#94a3b8; background:#0f172a;
+      border:1px solid #273349; border-radius:4px; padding:4px 7px; cursor:pointer;
+    }
+    .copy:hover { color:#fff; border-color:#3b82f6; }
+    .mock.scanline { position:relative; }
+    .mock.scanline::after {
+      content:""; position:absolute; inset:0; pointer-events:none;
+      background: repeating-linear-gradient(to bottom, rgba(34,197,94,0.045) 0px, rgba(34,197,94,0.045) 1px, transparent 1px, transparent 3px);
+      mix-blend-mode: screen;
+    }
+    .note { margin-top:26px; font-size:12px; color:#94a3b8; line-height:1.6; }
+    .note code { font-family:"Cascadia Mono", Consolas, monospace; color:#e2e8f0; }
+  </style>
+</head>
+<body>
+  <h1>ReconForge — Palette Lab</h1>
+  <p class="lead">
+    12 candidate themes shown with real ReconForge UI elements. Every theme has an ID — just tell me
+    <code>“apply P05”</code> (or any ID) and I’ll implement it across the app. Live app:
+    <code>http://localhost:5173</code>
+  </p>
+  <div class="index" id="index"></div>
+  <div class="grid" id="grid"></div>
+
+  <p class="note">
+    Demo page: <code>http://localhost:5173/palette-demo.html</code><br />
+    Recommendations: <b>P01 Midnight Cyan</b> for the safest upgrade, <b>P05 Black Crimson</b> for a
+    high-contrast hacker look, <b>P06 Black Gold</b> for a premium SOC look, <b>P07 Cyber Lime</b> for
+    something bold and unique.
+  </p>
+
+  <script>
+    const palettes = [
+      {
+        id: "P01", name: "Midnight Cyan",
+        desc: "Deep navy + cyan/blue. Closest to the current identity without the purple cast.",
+        radius: "10px", radiusSm: "5px", brandFont: '"Segoe UI", system-ui, sans-serif',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 16px rgba(34,211,238,.55)",
+        colors: { bg:"#070B12", card:"#0E1624", border:"#1B2433", input:"#111A29", primary:"#22D3EE", secondary:"#3B82F6", success:"#10B981", warning:"#F59E0B", danger:"#F43F5E", text:"#E5E7EB", muted:"#94A3B8" }
+      },
+      {
+        id: "P02", name: "Graphite Emerald",
+        desc: "Charcoal + emerald/teal + sky. Professional recon console, no blue-purple.",
+        radius: "8px", radiusSm: "4px", brandFont: '"Segoe UI", system-ui, sans-serif',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 16px rgba(16,185,129,.5)",
+        colors: { bg:"#0B0F14", card:"#121821", border:"#22303C", input:"#16202A", primary:"#10B981", secondary:"#14B8A6", success:"#10B981", warning:"#F59E0B", danger:"#EF4444", text:"#E8EEF3", muted:"#94A3B8" }
+      },
+      {
+        id: "P03", name: "Obsidian Amber",
+        desc: "Near-black + amber/gold with emerald success. Warm, premium SOC look.",
+        radius: "10px", radiusSm: "5px", brandFont: 'Georgia, "Times New Roman", serif',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 16px rgba(245,158,11,.45)",
+        buttonBg: "linear-gradient(135deg,#F5C542,#B7790B)", buttonText: "#1C1403",
+        colors: { bg:"#0A0A0B", card:"#141417", border:"#2A2A30", input:"#1B1B1F", primary:"#F59E0B", secondary:"#FB923C", success:"#10B981", warning:"#F59E0B", danger:"#EF4444", text:"#F4F4F5", muted:"#A1A1AA" }
+      },
+      {
+        id: "P04", name: "Slate Cobalt",
+        desc: "Blue-gray slate + cobalt/sky with a lime highlight. Clean enterprise product look.",
+        radius: "9px", radiusSm: "5px", brandFont: '"Segoe UI", system-ui, sans-serif',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 16px rgba(37,99,235,.55)",
+        buttonBg: "linear-gradient(135deg,#2563EB,#0EA5E9)", buttonText: "#F8FAFC",
+        colors: { bg:"#0F172A", card:"#1E293B", border:"#334155", input:"#172033", primary:"#2563EB", secondary:"#0EA5E9", success:"#10B981", warning:"#F59E0B", danger:"#F43F5E", text:"#F1F5F9", muted:"#94A3B8" }
+      },
+      {
+        id: "P05", name: "Black Crimson",
+        desc: "Solid OLED black + blood red and ember orange. Sharp edges, aggressive hacker/SOC look.",
+        radius: "4px", radiusSm: "2px", brandFont: '"Cascadia Mono", Consolas, monospace',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 18px rgba(239,68,68,.55)",
+        buttonBg: "linear-gradient(135deg,#EF4444,#F97316)", buttonText: "#120404",
+        colors: { bg:"#000000", card:"#0A0A0A", border:"#262626", input:"#121212", primary:"#EF4444", secondary:"#F97316", success:"#10B981", warning:"#F59E0B", danger:"#F43F5E", text:"#F5F5F5", muted:"#A3A3A3" }
+      },
+      {
+        id: "P06", name: "Black Gold",
+        desc: "Solid OLED black + champagne gold. Luxury/premium feel with serif branding.",
+        radius: "14px", radiusSm: "7px", brandFont: 'Georgia, "Times New Roman", serif',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 20px rgba(212,175,55,.5)",
+        buttonBg: "linear-gradient(135deg,#F5C542,#B8860B)", buttonText: "#1A1403",
+        colors: { bg:"#000000", card:"#0A0A0A", border:"#262626", input:"#121212", primary:"#D4AF37", secondary:"#F5C542", success:"#10B981", warning:"#F59E0B", danger:"#EF4444", text:"#F7F1DF", muted:"#A89F86" }
+      },
+      {
+        id: "P07", name: "Cyber Lime",
+        desc: "Black + acid lime + cyan. Neon, high-energy, very distinct from the current theme.",
+        radius: "6px", radiusSm: "3px", brandFont: '"Cascadia Mono", Consolas, monospace',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 20px rgba(132,204,22,.6)",
+        buttonBg: "linear-gradient(135deg,#BEF264,#22D3EE)", buttonText: "#07120A",
+        colors: { bg:"#050805", card:"#0B120B", border:"#1E2A1C", input:"#0F1A0F", primary:"#84CC16", secondary:"#22D3EE", success:"#22C55E", warning:"#FACC15", danger:"#F43F5E", text:"#ECFCCB", muted:"#9CA88A" }
+      },
+      {
+        id: "P08", name: "Abyss Coral",
+        desc: "Deep ocean teal + coral. Rounded, calm and colorful without any purple.",
+        radius: "13px", radiusSm: "7px", brandFont: '"Segoe UI", system-ui, sans-serif',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 18px rgba(45,212,191,.5)",
+        buttonBg: "linear-gradient(135deg,#2DD4BF,#FB7185)", buttonText: "#04100F",
+        colors: { bg:"#04100F", card:"#0A1C1A", border:"#173B36", input:"#0C2522", primary:"#2DD4BF", secondary:"#FB7185", success:"#34D399", warning:"#FBBF24", danger:"#FB7185", text:"#E6FFFA", muted:"#8FB8B2" }
+      },
+      {
+        id: "P09", name: "Mono Ghost",
+        desc: "Near-monochrome black/white with a single red signal color. Minimal, razor-sharp, zero distraction.",
+        radius: "2px", radiusSm: "1px", brandFont: '"Segoe UI", system-ui, sans-serif',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 10px rgba(255,255,255,.25)",
+        buttonBg: "#F5F5F5", buttonText: "#050505",
+        colors: { bg:"#050505", card:"#0A0A0A", border:"#262626", input:"#101010", primary:"#F5F5F5", secondary:"#F87171", success:"#4ADE80", warning:"#FBBF24", danger:"#F87171", text:"#FAFAFA", muted:"#A3A3A3" }
+      },
+      {
+        id: "P10", name: "Solar Flare",
+        desc: "Blackened brown + orange/rose gradient. Warm, energetic and very different from blue.",
+        radius: "11px", radiusSm: "6px", brandFont: '"Segoe UI", system-ui, sans-serif',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 20px rgba(251,146,60,.55)",
+        buttonBg: "linear-gradient(135deg,#FB923C,#F43F5E)", buttonText: "#170805",
+        colors: { bg:"#0B0704", card:"#171008", border:"#3A2410", input:"#20150C", primary:"#FB923C", secondary:"#F43F5E", success:"#34D399", warning:"#FACC15", danger:"#F43F5E", text:"#FFF7ED", muted:"#B8A18C" }
+      },
+      {
+        id: "P11", name: "Terminal Green",
+        desc: "Matrix-inspired black/green with scanlines, sharp corners and full monospace UI.",
+        radius: "0px", radiusSm: "0px", brandFont: '"Cascadia Mono", Consolas, monospace',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 18px rgba(34,197,94,.6)",
+        scanline: true,
+        colors: { bg:"#030603", card:"#061006", border:"#123B1B", input:"#081808", primary:"#22C55E", secondary:"#86EFAC", success:"#22C55E", warning:"#EAB308", danger:"#EF4444", text:"#DCFCE7", muted:"#86A98D" }
+      },
+      {
+        id: "P12", name: "Arctic Ice",
+        desc: "Cold navy-black + ice blue and white. Frosted, futuristic, high-clarity dashboard.",
+        radius: "12px", radiusSm: "6px", brandFont: '"Segoe UI", system-ui, sans-serif',
+        mono: '"Cascadia Mono", Consolas, monospace', glow: "0 0 18px rgba(125,211,252,.55)",
+        buttonBg: "linear-gradient(135deg,#7DD3FC,#BAE6FD)", buttonText: "#031018",
+        colors: { bg:"#060B12", card:"#0C1520", border:"#1B2C3D", input:"#101C2A", primary:"#7DD3FC", secondary:"#E2E8F0", success:"#34D399", warning:"#FBBF24", danger:"#FB7185", text:"#F0F9FF", muted:"#9FB6C8" }
+      }
+    ];
+
+    const swatchKeys = ["bg", "card", "border", "primary", "secondary", "success", "danger"];
+
+    function mock(p) {
+      const c = p.colors;
+      const style = [
+        `--bg:${c.bg}`, `--card:${c.card}`, `--border:${c.border}`, `--input:${c.input}`,
+        `--primary:${c.primary}`, `--secondary:${c.secondary}`, `--success:${c.success}`,
+        `--warning:${c.warning}`, `--danger:${c.danger}`, `--text:${c.text}`, `--muted:${c.muted}`,
+        `--radius:${p.radius}`, `--radius-sm:${p.radiusSm}`, `--brand-font:${p.brandFont}`,
+        `--mono:${p.mono}`, `--glow:${p.glow}`,
+        p.buttonBg ? `--button-bg:${p.buttonBg}` : "",
+        p.buttonText ? `--button-text:${p.buttonText}` : ""
+      ].filter(Boolean).join(";");
+
+      const swatches = swatchKeys.map((key) => (
+        `<div class="swatch"><span class="chip" style="background:${c[key]}"></span>${c[key]}</div>`
+      )).join("");
+
+      return `
+        <div class="mock ${p.scanline ? "scanline" : ""}" style="${style}">
+          <div class="topbar">
+            <div class="brand"><span class="dot"></span> ReconForge</div>
+            <div class="nav"><span class="active">Inventory</span><span>API</span><span>Cloud</span><span>Shots</span></div>
+          </div>
+          <div class="content">
+            <div class="card">
+              <div class="row">
+                <div>
+                  <div class="title">Live Hosts</div>
+                  <div class="num">1,265</div>
+                  <div class="sub">3 resolved HTTP services</div>
+                </div>
+                <div class="badges"><span class="badge live">Live</span><span class="badge info">API</span><span class="badge danger">403</span></div>
+              </div>
+            </div>
+            <div class="card">
+              <input class="input" value="https://api.example.com/v1/users?role=admin" />
+              <table>
+                <thead><tr><th>URL</th><th>Status</th><th>Action</th></tr></thead>
+                <tbody>
+                  <tr><td><a>api.example.com/v1/users</a></td><td><span class="badge live">200</span></td><td><span class="btn primary">Fuzz</span></td></tr>
+                  <tr><td><a>admin.example.com/dashboard</a></td><td><span class="badge forbidden">403</span></td><td><span class="btn">Body</span></td></tr>
+                  <tr><td><a>bucket.s3.amazonaws.com</a></td><td><span class="badge info">Cloud</span></td><td><span class="btn">Open</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="swatches">${swatches}</div>
+        </div>
+        <div class="label">
+          <button class="copy" data-id="${p.id}">Copy ID</button>
+          <span class="id">${p.id}</span><span class="name">${p.name}</span>
+          <small>${p.desc}</small>
+        </div>`;
+    }
+
+    document.getElementById("grid").innerHTML = palettes.map((p) => (
+      `<section class="palette" id="${p.id}">${mock(p)}</section>`
+    )).join("");
+
+    document.getElementById("index").innerHTML = palettes.map((p) => (
+      `<a href="#${p.id}"><b>${p.id}</b>${p.name}</a>`
+    )).join("");
+
+    document.querySelectorAll(".copy").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-id");
+        try {
+          await navigator.clipboard.writeText(id);
+          btn.textContent = "Copied " + id;
+          setTimeout(() => { btn.textContent = "Copy ID"; }, 1300);
+        } catch {
+          btn.textContent = id;
+        }
+      });
+    });
+  </script>
+</body>
+</html>

@@ -18,6 +18,10 @@ router = APIRouter(prefix="/assets", tags=["Assets"])
 
 UNIFIED_PROVIDERS = ["subfinder", "assetfinder", "amass", "chaos"]
 
+# Personal-use deployments can easily exceed the old 10k row cut-off once
+# historical URLs and content paths accumulate.
+DEFAULT_MAX_ASSET_ROWS = 20000
+
 
 @router.get("/project/{project_id}", response_model=List[AssetResponse])
 async def get_project_assets(
@@ -44,7 +48,7 @@ async def get_project_assets(
         # Prioritize core assets (subdomain, domain, live hosts) over raw historical URLs
         cursor = cursor.sort([("type", -1), ("status", -1), ("hunt_priority", -1)])
 
-    max_len = limit if (limit and limit > 0) else 10000
+    max_len = limit if (limit and limit > 0) else DEFAULT_MAX_ASSET_ROWS
     assets = await cursor.to_list(length=max_len)
     return serialize_doc(assets)
 
@@ -84,7 +88,7 @@ async def get_project_live_hosts(project_id: str):
         "type": {"$in": ["subdomain", "host"]},
         "status": "live",
     }).sort([("hunt_priority", -1), ("domain", 1)])
-    assets = await cursor.to_list(length=5000)
+    assets = await cursor.to_list(length=DEFAULT_MAX_ASSET_ROWS)
 
     hosts: List[Dict[str, Any]] = []
     seen = set()
@@ -297,7 +301,7 @@ async def get_project_host_urls(project_id: str, host: str = Query(...)):
         raise HTTPException(status_code=400, detail="A valid host is required")
 
     cursor = db.assets.find({"project_id": project_id})
-    assets = await cursor.to_list(length=10000)
+    assets = await cursor.to_list(length=DEFAULT_MAX_ASSET_ROWS)
     urls: set = set()
 
     def add_url(value: Any) -> None:
@@ -391,7 +395,7 @@ async def get_project_subdomains(
     cursor = db.assets.find({"project_id": project_id, "type": "subdomain"}).sort(
         [("status", -1), ("hunt_priority", -1)]
     )
-    max_len = limit if (limit and limit > 0) else 10000
+    max_len = limit if (limit and limit > 0) else DEFAULT_MAX_ASSET_ROWS
     assets = await cursor.to_list(length=max_len)
     return serialize_doc(assets)
 
@@ -411,7 +415,7 @@ async def get_project_dns(project_id: str):
         {"project_id": project_id, "metadata.dnsx": {"$exists": True}},
         {"domain": 1, "status": 1, "metadata.dnsx": 1}
     )
-    docs = await cursor.to_list(length=10000)
+    docs = await cursor.to_list(length=DEFAULT_MAX_ASSET_ROWS)
     records = []
     for d in docs:
         dnsx = (d.get("metadata") or {}).get("dnsx") or {}

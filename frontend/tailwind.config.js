@@ -7,7 +7,8 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ["Outfit", "system-ui", "sans-serif"],
+        sans: ["Outfit", "Segoe UI", "system-ui", "sans-serif"],
+        mono: ["Cascadia Mono", "Cascadia Code", "Consolas", "Liberation Mono", "monospace"],
       },
       colors: {
         dark: {

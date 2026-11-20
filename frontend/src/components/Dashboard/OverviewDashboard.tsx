@@ -5,8 +5,8 @@ import { SubzyCard } from "./SubzyCard";
 import { UroCard } from "./UroCard";
 import { GfCard } from "./GfCard";
 import type { GfCategoryStats } from "./GfCard";
-import { Globe, Server, Radio, ShieldAlert, Play, Pause, Square, RotateCcw, RefreshCw, FileText, Link, AlertCircle, CheckCircle, Search, X, ExternalLink } from "lucide-react";
-import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, PieChart, Pie, Cell } from "recharts";
+import { Globe, Server, Radio, ShieldAlert, Play, Pause, Square, RotateCcw, RefreshCw, FileText, Link, CheckCircle, Search, X, ExternalLink } from "lucide-react";
+import { ResponsiveContainer, Tooltip, PieChart, Pie, Cell } from "recharts";
 import { apiCall } from "../../services/api";
 import { HighlightText, ExactMatchBadge, getExactMatchFields } from "../Common/HighlightText";
 
@@ -123,7 +123,6 @@ interface OverviewDashboardProps {
   onResetScan?: () => void;
   stages?: Record<string, string>;
   providerStatus?: Record<string, string>;
-  onSelectSeverity?: (severity: string) => void;
   pipelineHalted?: { reason: string; message: string } | null;
   providerSkippedReasons?: Record<string, string>;
   onOpenSettings?: () => void;
@@ -153,7 +152,6 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   onResetScan,
   stages = {},
   providerStatus = {},
-  onSelectSeverity,
   pipelineHalted = null,
   providerSkippedReasons = {},
   onOpenSettings,
@@ -578,20 +576,6 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   }, [matchingAssets, dashboardSearch]);
 
 
-  // Recompute ports distribution dynamically from assets
-  const portCounts: Record<number, number> = {};
-  assets.forEach((a) => {
-    (a.open_ports || []).forEach((p: number) => {
-      portCounts[p] = (portCounts[p] || 0) + 1;
-    });
-  });
-  const derivedPortsDistribution = Object.entries(portCounts)
-    .map(([port, count]) => ({
-      port: parseInt(port),
-      count: count as number,
-    }))
-    .sort((a, b) => b.count - a.count);
-
   // Recompute sources distribution dynamically from assets
   const sourceGroups: Record<string, number> = {};
   assets.forEach((a) => {
@@ -941,7 +925,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
       </div>
 
       {/* Upper stats row */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
         <StatCard
           title="Total Domains/Assets"
           value={derivedTotalAssets > 0 ? derivedTotalAssets : "-"}
@@ -981,14 +965,6 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           icon={<Link className="w-6 h-6" />}
           colorClass="text-cyber-warning"
           glowClass="glow-orange"
-        />
-        <StatCard
-          title="Security Findings"
-          value={totalNucleiFindings > 0 ? totalNucleiFindings : "-"}
-          subtext="Vulnerabilities & exposures"
-          icon={<AlertCircle className="w-6 h-6" />}
-          colorClass="text-cyber-danger"
-          glowClass="glow-red"
         />
       </div>
 
@@ -1227,31 +1203,6 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
         </div>
 </div>
 
-      {/* Vulnerability Summary Card */}
-      <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">
-        <h4 className="text-xs font-mono text-slate-400 uppercase tracking-wider mb-4 border-b border-dark-border pb-2">
-          Vulnerability Summary (Nuclei)
-        </h4>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-          {[
-            { label: "Critical", count: criticalCount, color: "text-cyber-danger", border: "border-cyber-danger/30" },
-            { label: "High", count: highCount, color: "text-orange-500", border: "border-orange-500/30" },
-            { label: "Medium", count: mediumCount, color: "text-cyber-warning", border: "border-cyber-warning/30" },
-            { label: "Low", count: lowCount, color: "text-cyber-accent", border: "border-cyber-accent/30" },
-            { label: "Info", count: infoCount, color: "text-slate-400", border: "border-slate-500/30" }
-          ].map((item) => (
-            <div
-              key={item.label}
-              onClick={() => onSelectSeverity && onSelectSeverity(item.label)}
-              className={`bg-dark-bg border ${item.border} rounded-lg p-3.5 flex flex-col items-center text-center transition-all hover:scale-[1.02] hover:bg-dark-hover/10 cursor-pointer`}
-            >
-              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1.5">{item.label}</span>
-              <span className={`text-3xl font-mono font-bold ${item.color}`}>{item.count}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
       {/* Main split grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Column: Scope Control Panel */}
@@ -1313,12 +1264,6 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
                     <div className="flex justify-between text-xs font-mono">
                       <span className="text-slate-500">Interesting Endpoints</span>
                       <span className="text-cyber-warning">{stats.gf_total}</span>
-                    </div>
-                  )}
-                  {totalNucleiFindings > 0 && (
-                    <div className="flex justify-between text-xs font-mono">
-                      <span className="text-slate-500">Security Findings</span>
-                      <span className="text-cyber-danger font-bold">{totalNucleiFindings}</span>
                     </div>
                   )}
                   {stats.dnsx_resolved === undefined && stats.uro_normalised === undefined && (
@@ -1462,37 +1407,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
 
         {/* Center/Right Columns: Charts */}
         <div className="lg:col-span-2 space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {/* Open Ports Chart */}
-            <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">
-              <h4 className="text-xs font-mono text-slate-400 uppercase tracking-wider mb-4 border-b border-dark-border pb-2">
-                Open Ports Frequency
-              </h4>
-              <div className="h-64">
-                {derivedPortsDistribution.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-xs text-slate-500 uppercase tracking-widest font-mono">
-                    No Port Data Discovered
-                  </div>
-                ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={derivedPortsDistribution}>
-                      <XAxis dataKey="port" stroke="#6B7280" fontSize={11} tickLine={false} />
-                      <YAxis stroke="#6B7280" fontSize={11} tickLine={false} allowDecimals={false} />
-                      <Tooltip
-                        contentStyle={{ backgroundColor: "#111622", borderColor: "#1E2638", color: "#F3F4F6", borderRadius: "6px" }}
-                        labelFormatter={(label) => `Port ${label}`}
-                      />
-                      <Bar dataKey="count" fill="#3B82F6" radius={[4, 4, 0, 0]}>
-                        {derivedPortsDistribution.map((_, index) => (
-                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
-            </div>
-
+          <div className="grid grid-cols-1 gap-6">
             {/* Discovery Source Distribution */}
             <div className="bg-dark-card border border-dark-border rounded-xl p-5 glass">
               <h4 className="text-xs font-mono text-slate-400 uppercase tracking-wider mb-4 border-b border-dark-border pb-2">

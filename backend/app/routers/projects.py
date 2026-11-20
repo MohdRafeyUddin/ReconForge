@@ -1,3 +1,7 @@
+import asyncio
+import logging
+import os
+import shutil
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, status
 from bson import ObjectId
@@ -6,6 +10,8 @@ from app.database import get_database
 from app.models import ProjectCreate, ProjectUpdate, ProjectResponse, serialize_doc
 from app.core.scan_options import normalize_phase_switches
 from app.providers.unified_discovery_provider import detect_target_type
+
+logger = logging.getLogger("reconforge.projects")
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 
@@ -207,25 +213,118 @@ async def get_project(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
     return serialize_doc(mask_project_secrets(project))
 
+def _remove_project_dir(base_dir: str, *parts: str) -> bool:
+    """Safely removes a project-scoped directory under an allowed base."""
+    try:
+        base = os.path.abspath(base_dir)
+        target = os.path.abspath(os.path.join(base, *parts))
+        if os.path.commonpath([target, base]) != base:
+            logger.warning("Refusing to delete path outside base: %s", target)
+            return False
+        if not os.path.isdir(target):
+            return False
+        shutil.rmtree(target, ignore_errors=True)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to remove project directory %s: %s", parts, exc)
+        return False
+
+
 @router.delete("/{project_id}")
 async def delete_project(project_id: str):
     db = get_database()
     if not ObjectId.is_valid(project_id):
         raise HTTPException(status_code=400, detail="Invalid project ID format")
-        
+
     project = await db.projects.find_one({
         "_id": ObjectId(project_id),
     })
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-        
-    # Delete project
+
+    # 1. Stop and cancel any active scans for this project before deleting
+    #    their records, otherwise background tasks keep writing assets.
+    from app.job_control import (
+        active_job_tasks,
+        active_processes,
+        kill_process_tree,
+        mark_job_stopped,
+    )
+
+    active_jobs = await db.jobs.find({
+        "project_id": project_id,
+        "status": {"$in": ["running", "pending", "paused"]},
+    }).to_list(length=200)
+    runner_tasks = []
+    for job in active_jobs:
+        job_key = str(job["_id"])
+        mark_job_stopped(job_key)
+        task = active_job_tasks.get(job_key)
+        if task is not None and not task.done():
+            task.cancel()
+            runner_tasks.append(task)
+        for proc in list(active_processes.get(job_key, [])):
+            try:
+                kill_process_tree(proc)
+            except Exception as exc:
+                logger.warning("Failed to kill process %s for project delete: %s", proc.pid, exc)
+        active_processes.pop(job_key, None)
+    if runner_tasks:
+        await asyncio.wait(runner_tasks, timeout=3)
+
+    # 2. Delete relational/run data for the project.
+    collections = (
+        "assets",
+        "jobs",
+        "run_assets",
+        "scan_runs",
+        "scan_diffs",
+        "system_locks",
+    )
+    deleted_counts = {}
+    for collection in collections:
+        try:
+            result = await db[collection].delete_many({"project_id": project_id})
+            deleted_counts[collection] = result.deleted_count
+        except Exception as exc:
+            logger.warning("Failed deleting %s for project %s: %s", collection, project_id, exc)
+
     await db.projects.delete_one({"_id": ObjectId(project_id)})
-    # Clean up associated assets and jobs
-    await db.assets.delete_many({"project_id": project_id})
-    await db.jobs.delete_many({"project_id": project_id})
-    
-    return {"message": "Project and all associated data deleted successfully"}
+
+    # 3. Remove filesystem artifacts for the project.
+    removed_dirs = []
+    try:
+        from app.services.response_storage import delete_project_response_bodies
+        if delete_project_response_bodies(project_id):
+            removed_dirs.append("storage/responses")
+    except Exception as exc:
+        logger.warning("Response body cleanup failed for %s: %s", project_id, exc)
+    try:
+        from app.services.run_history import RUNS_BASE_DIR
+        if _remove_project_dir(RUNS_BASE_DIR, project_id):
+            removed_dirs.append("storage/runs")
+    except Exception as exc:
+        logger.warning("Run history cleanup failed for %s: %s", project_id, exc)
+    try:
+        from app.services.screenshot_storage import SCREENSHOT_ROOT
+        if _remove_project_dir(SCREENSHOT_ROOT, project_id):
+            removed_dirs.append("storage/screenshots")
+    except Exception as exc:
+        logger.warning("Screenshot cleanup failed for %s: %s", project_id, exc)
+    try:
+        from app.providers.js_analysis_provider import JS_STORAGE_ROOT
+        if _remove_project_dir(JS_STORAGE_ROOT, "js", project_id):
+            removed_dirs.append("storage/js")
+    except Exception as exc:
+        logger.warning("JS storage cleanup failed for %s: %s", project_id, exc)
+
+    return {
+        "message": "Project and all associated data deleted successfully",
+        "project_id": project_id,
+        "stopped_jobs": len(active_jobs),
+        "deleted_counts": deleted_counts,
+        "removed_dirs": removed_dirs,
+    }
 
 @router.get("/{project_id}/risk-scores")
 async def get_project_risk_scores(project_id: str):

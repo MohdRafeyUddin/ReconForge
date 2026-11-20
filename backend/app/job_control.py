@@ -6,7 +6,7 @@ import platform
 import signal
 import subprocess
 from collections import defaultdict
-from typing import Optional
+from typing import Dict, Optional
 from bson import ObjectId
 
 logger = logging.getLogger("reconforge.job_control")
@@ -21,10 +21,69 @@ current_phase = contextvars.ContextVar("current_phase", default=None)
 active_processes = defaultdict(list)
 # Maps id(proc) -> phase label so a phase time cap can kill only its own tree.
 active_process_phases: dict = {}
+# Registry of the asyncio task currently running each job, so /stop can
+# cancel the whole runner instead of only flipping the database status.
+active_job_tasks: Dict[str, asyncio.Task] = {}
+# Jobs explicitly stopped by the user. Providers consult this before starting
+# new work and before registering new subprocesses.
+stopped_jobs: set = set()
+# Jobs paused by the user, with an event that is set again on resume/stop.
+paused_jobs: set = set()
+_resume_events: Dict[str, asyncio.Event] = {}
+
+
+def mark_job_stopped(job_id: str) -> None:
+    key = str(job_id)
+    stopped_jobs.add(key)
+    paused_jobs.discard(key)
+    event = _resume_events.pop(key, None)
+    if event is not None:
+        event.set()
+
+
+def clear_job_stopped(job_id: str) -> None:
+    stopped_jobs.discard(str(job_id))
+
+
+def mark_job_paused(job_id: str) -> None:
+    key = str(job_id)
+    if key in stopped_jobs:
+        return
+    paused_jobs.add(key)
+    event = _resume_events.get(key)
+    if event is None or event.is_set():
+        _resume_events[key] = asyncio.Event()
+
+
+def resume_job_flag(job_id: str) -> None:
+    key = str(job_id)
+    paused_jobs.discard(key)
+    event = _resume_events.pop(key, None)
+    if event is not None:
+        event.set()
+
+
+async def wait_if_paused(job_id: str) -> None:
+    """Blocks while a job is paused; wakes on resume or stop."""
+    key = str(job_id)
+    while key in paused_jobs:
+        if key in stopped_jobs:
+            break
+        event = _resume_events.get(key)
+        if event is None:
+            await asyncio.sleep(0.5)
+        else:
+            await event.wait()
+    if key in stopped_jobs:
+        raise Exception("Job stopped")
 
 def register_process(proc):
     jid = current_job_id.get()
     if jid:
+        if str(jid) in stopped_jobs:
+            logger.info(f"Refusing to register process {proc.pid}: job {jid} is stopped")
+            kill_process_tree(proc)
+            return
         active_processes[jid].append(proc)
         active_process_phases[id(proc)] = current_phase.get()
         logger.info(f"Registered process {proc.pid} for job {jid}")
@@ -110,7 +169,10 @@ async def check_job_status():
     jid = current_job_id.get()
     if not jid:
         return
-    
+    if str(jid) in stopped_jobs:
+        raise Exception("Job stopped")
+    await wait_if_paused(jid)
+
     from app.database import get_database
     db = get_database()
     if db is None:
@@ -120,15 +182,14 @@ async def check_job_status():
         job = await db.jobs.find_one({"_id": ObjectId(jid)})
         if not job:
             break
-            
+
         status = job.get("status")
         if status == "stopped":
             logger.info(f"Job {jid} is STOPPED. Raising exception.")
             raise Exception("Job stopped")
-            
+
         if status == "paused":
-            # Loop and wait
-            await asyncio.sleep(1)
+            await wait_if_paused(jid)
             continue
-            
+
         break

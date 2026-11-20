@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import re
+import shutil
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Any
@@ -199,9 +201,16 @@ async def get_registered_providers():
 async def run_discovery_job(job_id: str, project_id: str, provider_name: str, seed_domains: List[str]):
     import time
     from app.core.scope import normalize_seed_domain
-    from app.job_control import current_job_id
+    from app.job_control import (
+        active_job_tasks,
+        current_job_id,
+        mark_job_paused,
+        wait_if_paused,
+    )
     current_job_id.set(job_id)
-    live_running_jobs.add(str(job_id))
+    task_key = str(job_id)
+    active_job_tasks[task_key] = asyncio.current_task()
+    live_running_jobs.add(task_key)
 
     # Normalize seeds before passing to any tool (e.g. *.example.com -> example.com)
     normalized_seeds = []
@@ -216,7 +225,8 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
     db = get_database()
     if db is None:
         logger.error("Database is not initialized. Cannot run job.")
-        live_running_jobs.discard(str(job_id))
+        active_job_tasks.pop(task_key, None)
+        live_running_jobs.discard(task_key)
         return
 
     provider = PROVIDERS.get(provider_name)
@@ -227,12 +237,32 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
             {"$set": {"status": "failed", "finished_at": datetime.utcnow()}, "$push": {"logs": err_msg}}
         )
         await manager.broadcast(job_id, {"type": "log", "message": err_msg})
-        live_running_jobs.discard(str(job_id))
+        active_job_tasks.pop(task_key, None)
+        live_running_jobs.discard(task_key)
         return
 
     # Initialize tool resolution cache if not loaded
     from app.core.tools import _ensure_cache_loaded, invalidate_tool_cache
     _ensure_cache_loaded()
+
+    # The user may have pressed Pause/Stop before the background task began.
+    pre_job = await db.jobs.find_one({"_id": ObjectId(job_id)}, {"status": 1})
+    pre_status = str((pre_job or {}).get("status") or "")
+    if pre_status == "paused":
+        mark_job_paused(job_id)
+        try:
+            await wait_if_paused(job_id)
+        except Exception:
+            active_job_tasks.pop(task_key, None)
+            live_running_jobs.discard(task_key)
+            return
+        pre_job = await db.jobs.find_one({"_id": ObjectId(job_id)}, {"status": 1})
+        pre_status = str((pre_job or {}).get("status") or "")
+    if pre_status in ("stopped", "interrupted"):
+        logger.info("Job %s was stopped before the runner started; exiting.", job_id)
+        active_job_tasks.pop(task_key, None)
+        live_running_jobs.discard(task_key)
+        return
 
     # Update job state to running with initial heartbeat
     now_init = datetime.utcnow()
@@ -262,6 +292,7 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
     passive_killed_or_failed: bool = False
     rejected_urls_count: int = 0
     last_hb_time = time.time()
+    last_status_check = time.time()
     scan_diff = None
     summary = {}
     project_doc = None
@@ -312,6 +343,45 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
             if time.time() - last_hb_time > 5:
                 await db.jobs.update_one({"_id": ObjectId(job_id)}, {"$set": {"heartbeat": datetime.utcnow()}})
                 last_hb_time = time.time()
+
+            # Stop/pause promptly even if a provider swallows its own status error.
+            if time.time() - last_status_check > 1.5:
+                current_doc = await db.jobs.find_one(
+                    {"_id": ObjectId(job_id)}, {"status": 1}
+                )
+                last_status_check = time.time()
+                current_status = str((current_doc or {}).get("status") or "")
+                if current_status in ("stopped", "interrupted"):
+                    logger.info(
+                        "Job %s is %s; closing provider generator and stopping.",
+                        job_id, current_status,
+                    )
+                    try:
+                        await generator.aclose()
+                    except Exception:
+                        pass
+                    return
+                if current_status == "paused":
+                    mark_job_paused(job_id)
+                    try:
+                        await wait_if_paused(job_id)
+                    except Exception:
+                        try:
+                            await generator.aclose()
+                        except Exception:
+                            pass
+                        return
+                    last_status_check = time.time()
+                    current_doc = await db.jobs.find_one(
+                        {"_id": ObjectId(job_id)}, {"status": 1}
+                    )
+                    current_status = str((current_doc or {}).get("status") or "")
+                    if current_status in ("stopped", "interrupted"):
+                        try:
+                            await generator.aclose()
+                        except Exception:
+                            pass
+                        return
 
             if not event or not isinstance(event, dict):
                 continue
@@ -1122,6 +1192,29 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
                     warn_msg = event.get("message", "Warning")
                     await db.jobs.update_one({"_id": ObjectId(job_id)}, {"$push": {"logs": f"[!] {warn_msg}"}})
 
+        # A stop can arrive after the last in-loop status check but before
+        # completion bookkeeping. Never let that path mark the job completed.
+        final_job = await db.jobs.find_one(
+            {"_id": ObjectId(job_id)}, {"status": 1}
+        )
+        final_status = str((final_job or {}).get("status") or "")
+        if final_status == "paused":
+            mark_job_paused(job_id)
+            try:
+                await wait_if_paused(job_id)
+            except Exception:
+                return
+            final_job = await db.jobs.find_one(
+                {"_id": ObjectId(job_id)}, {"status": 1}
+            )
+            final_status = str((final_job or {}).get("status") or "")
+        if final_status in ("stopped", "interrupted"):
+            logger.info(
+                "Job %s was %s before completion bookkeeping; skipping completion.",
+                job_id, final_status,
+            )
+            return
+
         # Run Risk Scoring Engine automatically on Unified Discovery completion
         if provider_name == "Unified Discovery":
             try:
@@ -1271,7 +1364,9 @@ async def run_discovery_job(job_id: str, project_id: str, provider_name: str, se
         await manager.broadcast(job_id, {"type": "log", "message": fail_msg})
         await manager.broadcast(job_id, {"type": "status", "status": "failed"})
     finally:
-        live_running_jobs.discard(str(job_id))
+        live_running_jobs.discard(task_key)
+        if active_job_tasks.get(task_key) is asyncio.current_task():
+            active_job_tasks.pop(task_key, None)
         try:
             await db.jobs.update_one(
                 {"_id": ObjectId(job_id)},
@@ -1409,10 +1504,19 @@ async def pause_job(job_id: str):
     job = await db.jobs.find_one({"_id": ObjectId(job_id)})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
+    current_status = str(job.get("status") or "")
+    if current_status in ("completed", "failed", "stopped", "interrupted"):
+        raise HTTPException(status_code=409, detail=f"Job is already {current_status}")
+    if current_status == "paused":
+        return {"status": "paused"}
+
+    from app.job_control import mark_job_paused
+
+    mark_job_paused(job_id)
     await db.jobs.update_one(
         {"_id": ObjectId(job_id)},
-        {"$set": {"status": "paused"}}
+        {"$set": {"status": "paused", "paused_at": datetime.utcnow()}},
     )
     await manager.broadcast(job_id, {"type": "status", "status": "paused"})
     await manager.broadcast(job_id, {"type": "log", "message": "[*] Scan paused by user."})
@@ -1427,10 +1531,19 @@ async def resume_job(job_id: str):
     job = await db.jobs.find_one({"_id": ObjectId(job_id)})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
+    current_status = str(job.get("status") or "")
+    if current_status in ("stopped", "interrupted", "failed", "completed"):
+        raise HTTPException(status_code=409, detail=f"Job cannot be resumed from {current_status}")
+    if current_status == "running":
+        return {"status": "running"}
+
+    from app.job_control import resume_job_flag
+
+    resume_job_flag(job_id)
     await db.jobs.update_one(
         {"_id": ObjectId(job_id)},
-        {"$set": {"status": "running"}}
+        {"$set": {"status": "running", "resumed_at": datetime.utcnow()}},
     )
     await manager.broadcast(job_id, {"type": "status", "status": "running"})
     await manager.broadcast(job_id, {"type": "log", "message": "[*] Scan resumed by user."})
@@ -1445,21 +1558,45 @@ async def stop_job(job_id: str):
     job = await db.jobs.find_one({"_id": ObjectId(job_id)})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
+    current_status = str(job.get("status") or "")
+    if current_status in ("completed", "failed", "stopped", "interrupted"):
+        return {"status": current_status}
+
     await db.jobs.update_one(
         {"_id": ObjectId(job_id)},
-        {"$set": {"status": "stopped", "finished_at": datetime.utcnow()}}
+        {"$set": {
+            "status": "stopped",
+            "finished_at": datetime.utcnow(),
+            "stopped_at": datetime.utcnow(),
+        }},
     )
-    
-    from app.job_control import active_processes
-    procs = list(active_processes.get(job_id, []))
+
+    from app.job_control import (
+        active_job_tasks,
+        active_processes,
+        kill_process_tree,
+        mark_job_stopped,
+    )
+
+    mark_job_stopped(str(job_id))
+
+    # Cancel the actual runner task first so no further events are consumed
+    # or persisted. This is the part the old Stop handler was missing.
+    task = active_job_tasks.get(str(job_id))
+    if task is not None and not task.done():
+        logger.info("Cancelling job task %s for stopped job %s", task.get_name(), job_id)
+        task.cancel()
+
+    procs = list(active_processes.get(str(job_id), []))
     for p in procs:
         try:
-            logger.info(f"Terminating process {p.pid} for stopped job {job_id}")
-            p.terminate()
+            logger.info(f"Killing process tree {p.pid} for stopped job {job_id}")
+            kill_process_tree(p)
         except Exception as e:
-            logger.error(f"Error terminating process: {e}")
-            
+            logger.error(f"Error killing process tree: {e}")
+    active_processes.pop(str(job_id), None)
+
     await manager.broadcast(job_id, {"type": "status", "status": "stopped"})
     await manager.broadcast(job_id, {"type": "log", "message": "[-] Scan stopped by user."})
     return {"status": "stopped"}
@@ -1473,23 +1610,74 @@ async def reset_job(job_id: str):
     job = await db.jobs.find_one({"_id": ObjectId(job_id)})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     project_id = job.get("project_id")
-    
-    from app.job_control import active_processes
-    procs = list(active_processes.get(job_id, []))
-    for p in procs:
+
+    # Stop/cancel any runner still attached before deleting its data,
+    # otherwise late events can repopulate the dashboard after reset.
+    from app.job_control import (
+        active_job_tasks,
+        active_processes,
+        kill_process_tree,
+        mark_job_stopped,
+    )
+
+    mark_job_stopped(job_id)
+    task = active_job_tasks.get(str(job_id))
+    if task is not None and not task.done():
+        task.cancel()
+    for proc in list(active_processes.get(str(job_id), [])):
         try:
-            p.terminate()
+            kill_process_tree(proc)
         except Exception:
             pass
-            
+    active_processes.pop(str(job_id), None)
+    if task is not None:
+        await asyncio.wait([task], timeout=2)
+
+    deleted_counts = {}
     if project_id:
-        await db.assets.delete_many({"project_id": project_id})
-        await db.jobs.delete_many({"project_id": project_id})
+        for collection in ("assets", "jobs", "run_assets", "scan_runs", "scan_diffs", "system_locks"):
+            try:
+                result = await db[collection].delete_many({"project_id": project_id})
+                deleted_counts[collection] = result.deleted_count
+            except Exception as exc:
+                logger.warning("Reset cleanup failed for %s.%s: %s", project_id, collection, exc)
+
+        def _remove_dir(base: str, *parts: str) -> None:
+            target = os.path.join(base, *parts)
+            try:
+                base_abs = os.path.abspath(base)
+                target = os.path.abspath(target)
+                if os.path.commonpath([target, base_abs]) == base_abs and os.path.isdir(target):
+                    shutil.rmtree(target, ignore_errors=True)
+            except Exception as exc:
+                logger.warning("Reset artifact cleanup failed for %s: %s", target, exc)
+
+        try:
+            from app.services.response_storage import delete_project_response_bodies
+            delete_project_response_bodies(project_id)
+        except Exception:
+            pass
+        try:
+            from app.services.run_history import RUNS_BASE_DIR
+            _remove_dir(RUNS_BASE_DIR, project_id)
+        except Exception:
+            pass
+        try:
+            from app.services.screenshot_storage import SCREENSHOT_ROOT
+            _remove_dir(SCREENSHOT_ROOT, project_id)
+        except Exception:
+            pass
+        try:
+            from app.providers.js_analysis_provider import JS_STORAGE_ROOT
+            _remove_dir(JS_STORAGE_ROOT, "js", project_id)
+        except Exception:
+            pass
 
     await manager.broadcast(job_id, {"type": "status", "status": "idle"})
-    return {"status": "reset"}
+    await manager.broadcast(job_id, {"type": "log", "message": "[*] Scan dashboard reset by user."})
+    return {"status": "reset", "deleted_counts": deleted_counts}
 
 
 # =============================================================================
@@ -1650,7 +1838,12 @@ async def run_targeted_job(
     time_cap_seconds: int = 600,
 ) -> None:
     """Runs ffuf/arjun/naabu against only the selected hosts."""
-    from app.job_control import current_job_id, current_phase, kill_phase_processes
+    from app.job_control import (
+        active_job_tasks,
+        current_job_id,
+        current_phase,
+        kill_phase_processes,
+    )
     from app.core.scope import is_in_scope
     from app.providers.naabu_provider import NaabuProvider
     from app.providers.ffuf_provider import FfufProvider
@@ -1658,10 +1851,20 @@ async def run_targeted_job(
     from app.providers.gowitness_provider import GowitnessProvider
 
     current_job_id.set(job_id)
-    live_running_jobs.add(str(job_id))
+    task_key = str(job_id)
+    active_job_tasks[task_key] = asyncio.current_task()
+    live_running_jobs.add(task_key)
     db = get_database()
     if db is None:
-        live_running_jobs.discard(str(job_id))
+        active_job_tasks.pop(task_key, None)
+        live_running_jobs.discard(task_key)
+        return
+
+    pre_job = await db.jobs.find_one({"_id": ObjectId(job_id)}, {"status": 1})
+    if str((pre_job or {}).get("status") or "") in ("stopped", "interrupted"):
+        logger.info("Targeted job %s was stopped before start; exiting.", job_id)
+        active_job_tasks.pop(task_key, None)
+        live_running_jobs.discard(task_key)
         return
 
     project = await db.projects.find_one({"_id": ObjectId(project_id)}) or {}
@@ -2121,7 +2324,12 @@ async def run_targeted_job(
             phase_timings.append({"phase": targeted_exec_phase, "duration_seconds": duration})
         if phase_ran:
             executed_phases.add(targeted_exec_phase)
-        status = "failed" if failed else "completed"
+        current_job = await db.jobs.find_one({"_id": ObjectId(job_id)}, {"status": 1})
+        current_status = str((current_job or {}).get("status") or "")
+        if current_status in ("stopped", "interrupted"):
+            status = current_status
+        else:
+            status = "failed" if failed else "completed"
         await db.jobs.update_one(
             {"_id": ObjectId(job_id)},
             {"$set": {
@@ -2137,9 +2345,14 @@ async def run_targeted_job(
         await manager.broadcast(job_id, {"type": "status", "status": status})
         await manager.broadcast(job_id, {
             "type": "log",
-            "message": f"[{'√' if status == 'completed' else '!'}] Targeted {tool} run {status} in {duration}s.",
+            "message": (
+                f"[-] Targeted {tool} run stopped by user in {duration}s."
+                if status == "stopped"
+                else f"[{'√' if status == 'completed' else '!'}] Targeted {tool} run {status} in {duration}s."
+            ),
         })
-        live_running_jobs.discard(str(job_id))
+        active_job_tasks.pop(task_key, None)
+        live_running_jobs.discard(task_key)
         try:
             from app.services.run_history import record_run_history
             await record_run_history(

@@ -47,6 +47,7 @@ provider_keys.json
 *.db
 mongodb_data/
 mongodb-data/
+backups/
 
 # IDE
 .vscode/

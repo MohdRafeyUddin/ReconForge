@@ -49,8 +49,39 @@ def check_startup_dependencies() -> None:
 # Enforce startup import check
 check_startup_dependencies()
 
+
+def _warn_local_only_security() -> None:
+    """Warns if the local-mode API is configured for non-loopback exposure."""
+    local_hosts = {"localhost", "127.0.0.1", "::1", "[::1]", "testserver", "test"}
+    local_prefixes = (
+        "http://localhost", "https://localhost",
+        "http://127.0.0.1", "https://127.0.0.1",
+    )
+    nonlocal_hosts = sorted(
+        host for host in settings.ALLOWED_HOSTS if host not in local_hosts
+    )
+    nonlocal_origins = sorted(
+        origin for origin in settings.ALLOWED_ORIGINS
+        if not origin.startswith(local_prefixes)
+    )
+    if nonlocal_hosts or nonlocal_origins:
+        logger.warning(
+            "[security] Non-local exposure detected (hosts=%s, origins=%s). "
+            "ReconForge currently uses local-mode auth only — do not expose "
+            "this API publicly.",
+            nonlocal_hosts or "-",
+            nonlocal_origins or "-",
+        )
+    else:
+        logger.info(
+            "[security] Local-only mode: auth is a local stub and the API "
+            "should remain bound to 127.0.0.1."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _warn_local_only_security()
     # Connect to database on startup
     await connect_to_mongo()
     db = get_database()

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Shield, Plus, Terminal, Layers, Globe, Sliders } from "lucide-react";
+import { Shield, Plus, Terminal, Layers, Globe, Sliders, Trash2, AlertTriangle } from "lucide-react";
 import { apiCall } from "../../services/api";
 
 interface Project {
@@ -15,6 +15,7 @@ interface NavbarProps {
   onSelectProject: (p: Project) => void;
   onRefreshProjects: () => void;
   onOpenSettings?: () => void;
+  onProjectDeleted?: (projectId: string) => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -23,6 +24,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSelectProject,
   onRefreshProjects,
   onOpenSettings,
+  onProjectDeleted,
 }) => {
   const [showModal, setShowModal] = useState(false);
   const [name, setName] = useState("");
@@ -30,6 +32,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [seedDomains, setSeedDomains] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [deleteError, setDeleteError] = useState("");
+  const [deleting, setDeleting] = useState(false);
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,6 +72,24 @@ export const Navbar: React.FC<NavbarProps> = ({
       setError(err.message || "Failed to create project");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleDeleteProject = async () => {
+    if (!activeProject || deleteConfirm !== activeProject.name) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await apiCall(`/projects/${activeProject.id}`, { method: "DELETE" });
+      const deletedId = activeProject.id;
+      setShowDeleteModal(false);
+      setDeleteConfirm("");
+      onProjectDeleted?.(deletedId);
+      onRefreshProjects();
+    } catch (err: any) {
+      setDeleteError(err.message || "Failed to delete project");
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -118,6 +142,21 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 <Sliders className="w-3.5 h-3.5 text-cyber-accent" />
                 <span>Scope</span>
+              </button>
+            )}
+
+            {activeProject && (
+              <button
+                onClick={() => {
+                  setDeleteError("");
+                  setDeleteConfirm("");
+                  setShowDeleteModal(true);
+                }}
+                className="bg-rose-500/10 border border-rose-500/35 hover:bg-rose-500/20 text-rose-300 px-2.5 py-1.5 rounded text-xs font-semibold transition-all duration-200 flex items-center space-x-1 cursor-pointer"
+                title="Permanently delete the active project"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete</span>
               </button>
             )}
           </div>
@@ -202,6 +241,53 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Project Modal */}
+      {showDeleteModal && activeProject && (
+        <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50 animate-fadeIn">
+          <div className="bg-dark-card border border-rose-500/40 max-w-md w-full p-6 rounded-lg shadow-2xl">
+            <h2 className="text-lg font-bold mb-2 text-rose-300 flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5" />
+              Delete Project
+            </h2>
+            <p className="text-xs text-slate-300 font-mono leading-relaxed">
+              This permanently deletes <span className="text-white font-bold">{activeProject.name}</span>,
+              including all assets, scans, run history, screenshots, response bodies, and stored JS.
+              Active scans will be stopped. This cannot be undone.
+            </p>
+            <div className="mt-4">
+              <label className="block text-[10px] font-mono text-slate-400 uppercase tracking-wider mb-1.5">
+                Type <span className="text-rose-300">{activeProject.name}</span> to confirm
+              </label>
+              <input
+                value={deleteConfirm}
+                onChange={(event) => setDeleteConfirm(event.target.value)}
+                placeholder={activeProject.name}
+                className="w-full bg-dark-input border border-dark-border rounded px-3 py-2 text-sm font-mono text-slate-100 focus:outline-none focus:border-rose-400"
+              />
+            </div>
+            {deleteError && (
+              <div className="mt-3 text-xs font-mono text-rose-300">{deleteError}</div>
+            )}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setShowDeleteModal(false)}
+                disabled={deleting}
+                className="px-4 py-2 border border-dark-border rounded text-sm font-semibold text-slate-400 hover:text-slate-200 cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteProject}
+                disabled={deleting || deleteConfirm !== activeProject.name}
+                className="px-4 py-2 bg-rose-500/20 border border-rose-500/50 text-rose-200 rounded text-sm font-bold uppercase tracking-wider hover:bg-rose-500/30 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {deleting ? "Deleting..." : "Delete Permanently"}
+              </button>
+            </div>
           </div>
         </div>
       )}
