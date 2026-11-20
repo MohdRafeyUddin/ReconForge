@@ -12,6 +12,16 @@ interface ScanRun {
   status: string;
   scan_mode?: string;
   scan_profile?: string;
+  run_kind?: string;
+  targeted?: {
+    tool?: string;
+    hosts?: string[];
+    port_range?: string;
+    time_cap_seconds?: number;
+  } | null;
+  phase_durations?: { phase: string; duration_seconds: number }[];
+  skipped_phases?: { phase?: string; tool?: string; reason?: string }[];
+  targeted_counts?: Record<string, number>;
   executed_phases?: string[];
   stage_markers?: {
     stage: string;
@@ -22,13 +32,28 @@ interface ScanRun {
   counts?: {
     subdomains?: number;
     resolved?: number;
+    resolved_hosts?: number;
+    passive_candidates?: number;
     live?: number;
+    live_hosts?: number;
     ports?: number;
+    urls_total?: number;
+    urls?: Record<string, number>;
     urls_by_source?: Record<string, number>;
     content_paths?: number;
     params?: number;
     findings?: number;
     rejected_urls?: number;
+    js_files?: number;
+    api_specs?: number;
+    graphql_endpoints?: number;
+    historical_urls?: number;
+    normalized_urls?: number;
+    gf_urls?: number;
+    secrets?: number;
+    cloud_buckets?: number;
+    recon_info?: number;
+    screenshots?: number;
   };
   tool_versions?: Record<string, string>;
   config_snapshot?: {
@@ -37,6 +62,8 @@ interface ScanRun {
     custom_header_names?: string[];
     scan_profile?: string;
     port_range?: string;
+    phase_switches?: Record<string, { enabled?: boolean; time_cap_seconds?: number }>;
+    job_kind?: string;
   };
 }
 
@@ -495,8 +522,9 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                   <th className="p-3">Mode / Profile</th>
                   <th className="p-3">Started</th>
                   <th className="p-3">Duration</th>
-                  <th className="p-3">Subdomains</th>
-                  <th className="p-3">Live Hosts</th>
+                  <th className="p-3">Resolved Hosts</th>
+                  <th className="p-3">Live HTTP Hosts</th>
+                  <th className="p-3">Passive Candidates</th>
                   <th className="p-3">Findings</th>
                   <th className="p-3 text-right">Actions</th>
                 </tr>
@@ -504,7 +532,7 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
               <tbody>
                 {filteredRuns.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="p-8 text-center text-slate-500 font-mono text-xs">
+                    <td colSpan={10} className="p-8 text-center text-slate-500 font-mono text-xs">
                       No runs match your search query "{runsSearch}".
                     </td>
                   </tr>
@@ -538,7 +566,11 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                           </span>
                         </td>
                         <td className="p-3 text-slate-300">
-                          <HighlightText text={r.scan_mode || "fast"} highlight={runsSearch} /> / <span className="text-slate-400"><HighlightText text={r.scan_profile || "recon"} highlight={runsSearch} /></span>
+                          <HighlightText
+                            text={r.run_kind === "targeted" ? `targeted:${r.targeted?.tool || "run"}` : (r.scan_mode || "full")}
+                            highlight={runsSearch}
+                          />{" "}
+                          / <span className="text-slate-400"><HighlightText text={r.scan_profile || "recon"} highlight={runsSearch} /></span>
                         </td>
                         <td className="p-3 text-slate-400">
                           {new Date(r.started_at).toLocaleString()}
@@ -547,10 +579,13 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                           {formatSecs(r.duration_sec)}
                         </td>
                         <td className="p-3 text-slate-200 font-bold">
-                          {r.counts?.subdomains ?? "-"}
+                          {r.counts?.resolved_hosts ?? r.counts?.subdomains ?? "-"}
                         </td>
                         <td className="p-3 text-slate-200 font-bold">
-                          {r.counts?.live ?? "-"}
+                          {r.counts?.live_hosts ?? r.counts?.live ?? "-"}
+                        </td>
+                        <td className="p-3 text-slate-400 font-bold">
+                          {r.counts?.passive_candidates ?? 0}
                         </td>
                         <td className="p-3 text-slate-200 font-bold">
                           {r.counts?.findings ?? 0}
@@ -613,7 +648,10 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                     Run Inspection: {selectedRun.job_id}
                   </h3>
                   <div className="text-xs text-slate-400 font-mono">
-                    Mode: {selectedRun.scan_mode || "fast"} | Profile: {selectedRun.scan_profile || "recon"} | Started:{" "}
+                    {selectedRun.run_kind === "targeted"
+                      ? `Targeted: ${selectedRun.targeted?.tool || "run"} (${selectedRun.targeted?.hosts?.length || 0} host(s))`
+                      : `Mode: ${selectedRun.scan_mode || "full"}`}{" "}
+                    | Profile: {selectedRun.scan_profile || "recon"} | Started:{" "}
                     {new Date(selectedRun.started_at).toLocaleString()}
                   </div>
                 </div>
@@ -629,24 +667,125 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
             {/* Modal Body */}
             <div className="p-5 overflow-y-auto space-y-5 text-xs font-mono">
               {/* Counts & Markers Grid */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 <div className="bg-dark-bg border border-dark-border rounded-lg p-3">
                   <div className="text-[10px] text-slate-500 uppercase">Duration</div>
                   <div className="text-base font-bold text-slate-200 mt-1">{formatSecs(selectedRun.duration_sec)}</div>
                 </div>
                 <div className="bg-dark-bg border border-dark-border rounded-lg p-3">
-                  <div className="text-[10px] text-slate-500 uppercase">Subdomains</div>
-                  <div className="text-base font-bold text-slate-200 mt-1">{selectedRun.counts?.subdomains ?? 0}</div>
+                  <div className="text-[10px] text-slate-500 uppercase">Resolved Hosts</div>
+                  <div className="text-base font-bold text-slate-200 mt-1">
+                    {selectedRun.counts?.resolved_hosts ?? selectedRun.counts?.subdomains ?? 0}
+                  </div>
                 </div>
                 <div className="bg-dark-bg border border-dark-border rounded-lg p-3">
-                  <div className="text-[10px] text-slate-500 uppercase">Live Hosts</div>
-                  <div className="text-base font-bold text-slate-200 mt-1">{selectedRun.counts?.live ?? 0}</div>
+                  <div className="text-[10px] text-slate-500 uppercase">Live HTTP Hosts</div>
+                  <div className="text-base font-bold text-slate-200 mt-1">
+                    {selectedRun.counts?.live_hosts ?? selectedRun.counts?.live ?? 0}
+                  </div>
+                </div>
+                <div className="bg-dark-bg border border-dark-border rounded-lg p-3">
+                  <div className="text-[10px] text-slate-500 uppercase">Passive Candidates</div>
+                  <div className="text-base font-bold text-slate-400 mt-1">
+                    {selectedRun.counts?.passive_candidates ?? 0}
+                  </div>
                 </div>
                 <div className="bg-dark-bg border border-dark-border rounded-lg p-3">
                   <div className="text-[10px] text-slate-500 uppercase">Findings</div>
                   <div className="text-base font-bold text-cyber-accent mt-1">{selectedRun.counts?.findings ?? 0}</div>
                 </div>
               </div>
+
+              {/* Phase 8 counts */}
+              <div className="flex flex-wrap gap-2 text-[11px] font-mono">
+                <span className="px-2 py-1 rounded bg-dark-bg border border-dark-border text-slate-400">
+                  JS files: <span className="text-cyan-300 font-bold">{selectedRun.counts?.js_files ?? 0}</span>
+                </span>
+                <span className="px-2 py-1 rounded bg-dark-bg border border-dark-border text-slate-400">
+                  Secrets: <span className="text-rose-300 font-bold">{selectedRun.counts?.secrets ?? 0}</span>
+                </span>
+                <span className="px-2 py-1 rounded bg-dark-bg border border-dark-border text-slate-400">
+                  Buckets: <span className="text-amber-300 font-bold">{selectedRun.counts?.cloud_buckets ?? 0}</span>
+                </span>
+                <span className="px-2 py-1 rounded bg-dark-bg border border-dark-border text-slate-400">
+                  Recon info: <span className="text-sky-300 font-bold">{selectedRun.counts?.recon_info ?? 0}</span>
+                </span>
+                <span className="px-2 py-1 rounded bg-dark-bg border border-dark-border text-slate-400">
+                  Screenshots: <span className="text-violet-300 font-bold">{selectedRun.counts?.screenshots ?? 0}</span>
+                </span>
+              </div>
+
+              {/* URL counts are separate from host counts */}
+              {selectedRun.counts?.urls && (
+                <div className="bg-dark-bg border border-dark-border rounded-lg p-4">
+                  <div className="text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-2">
+                    URL Counts ({selectedRun.counts.urls_total ?? 0} total)
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    {Object.entries(selectedRun.counts.urls).map(([key, value]) => (
+                      <div key={key} className="flex items-center justify-between gap-2 bg-dark-card border border-dark-border rounded px-2.5 py-1.5">
+                        <span className="text-slate-400 truncate">{key.replace(/_/g, " ")}</span>
+                        <span className="text-slate-200 font-bold">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Skipped phases (switch off / no eligible work) */}
+              {selectedRun.skipped_phases && selectedRun.skipped_phases.length > 0 && (
+                <div className="bg-dark-bg border border-dark-border rounded-lg p-4">
+                  <div className="text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-2">
+                    Skipped Phases
+                  </div>
+                  <div className="space-y-1.5">
+                    {selectedRun.skipped_phases.map((sp, idx) => (
+                      <div key={idx} className="flex items-start gap-2 text-[11px]">
+                        <span className="text-amber-400 font-bold">[{sp.phase || sp.tool || "phase"}]</span>
+                        <span className="text-slate-300">{sp.reason || "skipped"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Per-Phase Durations */}
+              {selectedRun.phase_durations && selectedRun.phase_durations.length > 0 && (
+                <div className="bg-dark-bg border border-dark-border rounded-lg p-4">
+                  <div className="text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-2">
+                    Per-Phase Durations
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                    {selectedRun.phase_durations.map((pd, idx) => (
+                      <div key={`${pd.phase}-${idx}`} className="flex items-center justify-between gap-2 bg-dark-card border border-dark-border rounded px-2.5 py-1.5">
+                        <span className="text-slate-400 truncate">{pd.phase.replace(/_/g, " ")}</span>
+                        <span className="text-slate-200 font-bold shrink-0">{formatSecs(pd.duration_seconds)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {selectedRun.run_kind === "targeted" && selectedRun.targeted?.hosts?.length ? (
+                <div className="bg-dark-bg border border-dark-border rounded-lg p-4">
+                  <div className="text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-2">
+                    Selected Hosts ({selectedRun.targeted.tool || "targeted"})
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedRun.targeted.hosts.map((h) => (
+                      <a
+                        key={h}
+                        href={h.startsWith("http") ? h : `https://${h}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-2 py-0.5 bg-dark-card border border-dark-border rounded text-[11px] text-slate-300 break-all hover:text-cyber-accent hover:border-cyber-accent/50"
+                      >
+                        {h}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
               {/* Stage Markers (Skipped/Timeout/Error) */}
               {selectedRun.stage_markers && selectedRun.stage_markers.length > 0 && (
@@ -733,6 +872,11 @@ export const RunHistoryTab: React.FC<RunHistoryTabProps> = ({ projectId }) => {
                       <option value="url">URLs</option>
                       <option value="content_path">Content Paths</option>
                       <option value="param">Params</option>
+                      <option value="js_file">JS Files</option>
+                      <option value="historical_url">Historical URLs</option>
+                      <option value="secret_finding">Secrets</option>
+                      <option value="bucket">Buckets</option>
+                      <option value="recon_info">Recon Info</option>
                       <option value="finding">Findings</option>
                     </select>
                   </div>

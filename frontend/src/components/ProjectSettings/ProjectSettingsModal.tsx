@@ -74,8 +74,76 @@ export interface ProjectSettingsModalProps {
     assume_tools_installed?: boolean;
     enable_root_expansion?: boolean;
     max_permutations?: number;
+    oast?: { enabled?: boolean; server?: string; token?: string };
+    nuclei_options?: { auto_scan?: boolean; update_templates?: boolean; custom_templates_dir?: string };
+    cloud_enum?: { enabled?: boolean };
+    js_analysis?: { enabled?: boolean };
+    secrets_scan?: { enabled?: boolean };
+    tech_routing?: { enabled?: boolean };
+    ffuf_options?: { enabled?: boolean; concurrency?: number; rate_strategy?: string };
+    phase_switches?: Record<string, { enabled?: boolean; time_cap_seconds?: number }>;
   };
   onProjectUpdated: (updatedProject: any) => void;
+}
+
+const PHASE_SWITCH_DEFS = [
+  {
+    key: "dns_bruteforce",
+    label: "DNS Brute Force + Permutations",
+    cost: "High",
+    defaultCap: 600,
+    description: "Puredns/alterx wordlist brute force and permutations on resolved domain names.",
+  },
+  {
+    key: "waymore",
+    label: "Waymore",
+    cost: "Medium",
+    defaultCap: 240,
+    description: "Supplemental historical URL extraction from archive indices.",
+  },
+  {
+    key: "ffuf",
+    label: "FFUF Content Discovery",
+    cost: "High",
+    defaultCap: 600,
+    description: "Directory/file discovery on live priority hosts.",
+  },
+  {
+    key: "param_discovery",
+    label: "Arjun / x8 Parameter Discovery",
+    cost: "Medium",
+    defaultCap: 300,
+    description: "Hidden GET/POST parameter discovery on top-priority endpoints.",
+  },
+  {
+    key: "wide_port_scan",
+    label: "Wide Port Scan",
+    cost: "High",
+    defaultCap: 600,
+    description: "Upgrades the baseline top-1000 port scan to the project port range.",
+  },
+  {
+    key: "active_scanners",
+    label: "Active Scanners (Nuclei, Dalfox, OpenRedirex)",
+    cost: "Very High",
+    defaultCap: 900,
+    description: "Still governed by the scan profile; recon skips all active passes.",
+  },
+  {
+    key: "screenshots",
+    label: "GoWitness Screenshots",
+    cost: "Medium",
+    defaultCap: 300,
+    description: "Headless-browser screenshots of live HTTP hosts.",
+  },
+] as const;
+
+type PhaseSwitchState = Record<string, { enabled: boolean; time_cap_seconds: number }>;
+
+function defaultPhaseSwitchState(): PhaseSwitchState {
+  return Object.fromEntries(
+    PHASE_SWITCH_DEFS.map((def) => [def.key, { enabled: false, time_cap_seconds: def.defaultCap }])
+  );
 }
 
 interface ToolStatus {
@@ -95,7 +163,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   project,
   onProjectUpdated,
 }) => {
-  const [activeTab, setActiveTab] = useState<"scope" | "rate_limits" | "clustering" | "schedule" | "alerts" | "tools" | "suggested_roots" | "api_keys">("scope");
+  const [activeTab, setActiveTab] = useState<"scope" | "rate_limits" | "clustering" | "phases" | "schedule" | "alerts" | "tools" | "suggested_roots" | "api_keys" | "phase8">("scope");
 
   // Scope state
   const [inScopeText, setInScopeText] = useState("");
@@ -108,6 +176,14 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   const [katanaRps, setKatanaRps] = useState<string>("");
   const [nucleiRps, setNucleiRps] = useState<string>("");
   const [naabuRate, setNaabuRate] = useState<string>("");
+  const [ffufRps, setFfufRps] = useState<string>("");
+
+  // Per-phase switches (all default OFF)
+  const [phaseSwitches, setPhaseSwitches] = useState<PhaseSwitchState>(defaultPhaseSwitchState);
+
+  // Parallel FFUF worker settings (gated by the ffuf phase switch)
+  const [ffufConcurrency, setFfufConcurrency] = useState(3);
+  const [ffufRateStrategy, setFfufRateStrategy] = useState<"split" | "per_worker">("split");
 
   // Custom Header state
   const [headerKey, setHeaderKey] = useState("X-Bug-Bounty");
@@ -116,7 +192,6 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   // Schedule state (Phase 2)
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [intervalHours, setIntervalHours] = useState(24);
-  const [scheduleScanMode, setScheduleScanMode] = useState("fast");
   const [lastRun, setLastRun] = useState<string | null>(null);
   const [nextRun, setNextRun] = useState<string | null>(null);
 
@@ -168,6 +243,15 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
   const [savingKeys, setSavingKeys] = useState(false);
   const [keysSavedSuccess, setKeysSavedSuccess] = useState(false);
 
+  // Phase 8 — JS/secrets/cloud/OAST/Nuclei/tech-routing settings
+  const [oastEnabled, setOastEnabled] = useState(false);
+  const [oastServer, setOastServer] = useState("");
+  const [oastToken, setOastToken] = useState("");
+  const [nucleiAutoScan, setNucleiAutoScan] = useState(false);
+  const [nucleiUpdateTemplates, setNucleiUpdateTemplates] = useState(false);
+  const [nucleiCustomTemplatesDir, setNucleiCustomTemplatesDir] = useState("");
+  const [enableCloudEnum, setEnableCloudEnum] = useState(false);
+
   // Form saving state
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -188,6 +272,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
       setKatanaRps(overrides.katana ? String(overrides.katana) : "");
       setNucleiRps(overrides.nuclei ? String(overrides.nuclei) : "");
       setNaabuRate(overrides.naabu ? String(overrides.naabu) : "");
+      setFfufRps(overrides.ffuf ? String(overrides.ffuf) : "");
 
       const headers = project.custom_headers || {};
       const firstKey = Object.keys(headers)[0];
@@ -199,11 +284,22 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
         setHeaderValue("");
       }
 
-      // Schedule fields
+      // Per-phase switches (legacy projects default to all OFF)
+      const storedSwitches = project.phase_switches || {};
+      const nextSwitches = defaultPhaseSwitchState();
+      for (const def of PHASE_SWITCH_DEFS) {
+        const stored = storedSwitches[def.key];
+        nextSwitches[def.key] = {
+          enabled: Boolean(stored?.enabled),
+          time_cap_seconds: Number(stored?.time_cap_seconds) || def.defaultCap,
+        };
+      }
+      setPhaseSwitches(nextSwitches);
+
+      // Schedule fields (legacy scan_mode is ignored by the scheduler)
       const sched = project.schedule || {};
       setScheduleEnabled(Boolean(sched.enabled));
       setIntervalHours(sched.interval_hours || 24);
-      setScheduleScanMode(sched.scan_mode || "fast");
       setLastRun(sched.last_run ? String(sched.last_run) : null);
       setNextRun(sched.next_run ? String(sched.next_run) : null);
 
@@ -233,6 +329,19 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
       setAssumeToolsInstalled(project.assume_tools_installed !== false);
       setEnableRootExpansion(Boolean(project.enable_root_expansion));
       setMaxPermutations(project.max_permutations || 50000);
+
+      // Phase 8 fields
+      setOastEnabled(Boolean(project.oast?.enabled));
+      setOastServer(project.oast?.server || "");
+      setOastToken(project.oast?.token || "");
+      setNucleiAutoScan(Boolean(project.nuclei_options?.auto_scan));
+      setNucleiUpdateTemplates(Boolean(project.nuclei_options?.update_templates));
+      setNucleiCustomTemplatesDir(project.nuclei_options?.custom_templates_dir || "");
+      setEnableCloudEnum(Boolean(project.cloud_enum?.enabled));
+
+      // Parallel FFUF worker settings
+      setFfufConcurrency(project.ffuf_options?.concurrency || 3);
+      setFfufRateStrategy(project.ffuf_options?.rate_strategy === "per_worker" ? "per_worker" : "split");
     }
   }, [project, isOpen]);
 
@@ -396,6 +505,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
       if (katanaRps.trim()) tool_overrides.katana = parseInt(katanaRps, 10);
       if (nucleiRps.trim()) tool_overrides.nuclei = parseInt(nucleiRps, 10);
       if (naabuRate.trim()) tool_overrides.naabu = parseInt(naabuRate, 10);
+      if (ffufRps.trim()) tool_overrides.ffuf = parseInt(ffufRps, 10);
 
       const custom_headers: Record<string, string> = {};
       if (headerKey.trim() && headerValue.trim()) {
@@ -413,10 +523,10 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
           tool_overrides,
         },
         custom_headers,
+        phase_switches: phaseSwitches,
         schedule: {
           enabled: scheduleEnabled,
           interval_hours: Number(intervalHours) || 24,
-          scan_mode: scheduleScanMode,
         },
         alerts: {
           enabled: alertsEnabled,
@@ -435,6 +545,24 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
         assume_tools_installed: assumeToolsInstalled,
         enable_root_expansion: enableRootExpansion,
         max_permutations: Number(maxPermutations) || 50000,
+        oast: {
+          enabled: oastEnabled,
+          server: oastServer.trim(),
+          token: oastToken.trim(),
+        },
+        nuclei_options: {
+          auto_scan: nucleiAutoScan,
+          update_templates: nucleiUpdateTemplates,
+          custom_templates_dir: nucleiCustomTemplatesDir.trim(),
+        },
+        cloud_enum: {
+          enabled: enableCloudEnum,
+        },
+        ffuf_options: {
+          enabled: true,
+          concurrency: Number(ffufConcurrency) || 3,
+          rate_strategy: ffufRateStrategy,
+        },
       };
 
       const updated = await apiCall(`/projects/${project.id}`, {
@@ -487,7 +615,7 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex border-b border-dark-border bg-dark-bg/40 px-6 pt-2">
+        <div className="flex border-b border-dark-border bg-dark-bg/40 px-6 pt-2 overflow-x-auto">
           <button
             onClick={() => setActiveTab("scope")}
             className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-bold font-mono uppercase tracking-wider border-b-2 transition-all cursor-pointer ${
@@ -587,6 +715,34 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
           >
             <Key className="w-3.5 h-3.5" />
             <span>API Keys</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab("phases")}
+            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-bold font-mono uppercase tracking-wider border-b-2 transition-all cursor-pointer ${
+              activeTab === "phases"
+                ? "border-cyber-accent text-cyber-accent bg-cyber-accent/5"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>Scan Phases</span>
+            {Object.values(phaseSwitches).some((sw) => sw.enabled) && (
+              <span className="w-2 h-2 rounded-full bg-cyber-accent" />
+            )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab("phase8")}
+            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-bold font-mono uppercase tracking-wider border-b-2 transition-all cursor-pointer ${
+              activeTab === "phase8"
+                ? "border-cyber-accent text-cyber-accent bg-cyber-accent/5"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <Terminal className="w-3.5 h-3.5" />
+            <span>Phase 8</span>
+            {oastEnabled && <span className="w-2 h-2 rounded-full bg-cyber-accent" />}
           </button>
 
           <button
@@ -824,7 +980,68 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
                       className="w-full mt-1 bg-dark-input border border-dark-border rounded p-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-cyber-accent"
                     />
                   </div>
+
+                  <div>
+                    <label className="text-[10px] font-mono text-slate-400 uppercase">
+                      FFUF (<code className="text-cyber-accent">-rate</code>)
+                    </label>
+                    <input
+                      type="number"
+                      placeholder={String(globalRps)}
+                      value={ffufRps}
+                      onChange={(e) => setFfufRps(e.target.value)}
+                      className="w-full mt-1 bg-dark-input border border-dark-border rounded p-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-cyber-accent"
+                    />
+                  </div>
                 </div>
+              </div>
+
+              {/* Parallel FFUF */}
+              <div className="bg-dark-bg/60 border border-dark-border rounded-lg p-4 space-y-3">
+                <div>
+                  <h4 className="text-xs font-mono text-slate-300 font-bold uppercase tracking-wider">
+                    FFUF Worker Options
+                  </h4>
+                  <p className="text-[11px] text-slate-500 font-mono mt-1">
+                    Enabled by the FFUF switch under Scan Phases. Runs only on live priority hosts
+                    (cluster representatives + 401/403 hosts).
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] font-mono text-slate-400 uppercase">
+                      Parallel workers
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={ffufConcurrency}
+                      onChange={(e) => setFfufConcurrency(parseInt(e.target.value, 10) || 1)}
+                      className="w-full mt-1 bg-dark-input border border-dark-border rounded p-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-cyber-accent"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-mono text-slate-400 uppercase">
+                      Rate strategy
+                    </label>
+                    <select
+                      value={ffufRateStrategy}
+                      onChange={(e) => setFfufRateStrategy(e.target.value as "split" | "per_worker")}
+                      className="w-full mt-1 bg-dark-input border border-dark-border rounded p-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-cyber-accent"
+                    >
+                      <option value="split">Split total budget (safe)</option>
+                      <option value="per_worker">Full rate per worker (N× traffic)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <p className="text-[10px] text-slate-500 font-mono">
+                  {ffufRateStrategy === "split"
+                    ? `Total FFUF rate is shared: each of ${ffufConcurrency} workers gets ~1/${ffufConcurrency} of the FFUF rate. Raise the FFUF rate to finish faster.`
+                    : `Each of ${ffufConcurrency} workers uses the full FFUF rate (aggregate up to ${ffufConcurrency}×). Only use if the target allows it.`}
+                </p>
               </div>
 
               {/* Custom Header Injection */}
@@ -1033,17 +1250,11 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
 
                   <div>
                     <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                      Scan Profile Mode
+                      Scan Type
                     </label>
-                    <select
-                      value={scheduleScanMode}
-                      onChange={(e) => setScheduleScanMode(e.target.value)}
-                      disabled={!scheduleEnabled}
-                      className="w-full bg-dark-input border border-dark-border rounded p-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-cyber-accent disabled:opacity-40"
-                    >
-                      <option value="fast">Fast Scan (Subdomains, DNS, Ports, HTTP)</option>
-                      <option value="deep">Deep Scan (Full 10-Phase Pipeline + Active Probes)</option>
-                    </select>
+                    <div className="w-full bg-dark-input/60 border border-dark-border rounded p-2 text-xs font-mono text-slate-400">
+                      Full scan (per-phase switches from the Scan Phases tab apply)
+                    </div>
                   </div>
                 </div>
 
@@ -1389,6 +1600,170 @@ export const ProjectSettingsModal: React.FC<ProjectSettingsModalProps> = ({
                   <Save className="w-3.5 h-3.5" />
                   <span>{savingKeys ? "Saving & Syncing..." : "Save & Sync Provider Keys"}</span>
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: PHASE 8 (JS, secrets, cloud, OAST, Nuclei, tech routing) */}
+          {activeTab === "phases" && (
+            <div className="space-y-4">
+              <div className="p-4 bg-dark-bg/60 border border-dark-border rounded-lg">
+                <h4 className="text-xs font-mono text-slate-200 font-bold uppercase tracking-wider">
+                  Single Full Scan — Per-Phase Switches
+                </h4>
+                <p className="text-[11px] text-slate-400 font-mono mt-1 leading-relaxed">
+                  Passive discovery, DNS, HTTP probing, takeover checks, Katana, SubJS, JS analysis,
+                  URL merge/Uro and GF always run. Expensive phases below default to OFF and each has
+                  a hard time cap; the process tree is killed at the deadline and partial results are kept.
+                </p>
+              </div>
+
+              {PHASE_SWITCH_DEFS.map((def) => {
+                const sw = phaseSwitches[def.key] || {
+                  enabled: false,
+                  time_cap_seconds: def.defaultCap,
+                };
+                return (
+                  <div
+                    key={def.key}
+                    className="bg-dark-bg/60 border border-dark-border rounded-lg p-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 className="text-xs font-mono text-slate-300 font-bold uppercase tracking-wider">
+                          {def.label}
+                        </h4>
+                        <span className="px-1.5 py-0.5 rounded border border-dark-border bg-dark-input text-[9px] font-mono text-slate-400 uppercase">
+                          Est. cost: {def.cost}
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded border text-[9px] font-mono uppercase ${
+                            sw.enabled
+                              ? "border-cyber-accent/40 bg-cyber-accent/10 text-cyber-accent"
+                              : "border-dark-border bg-dark-input text-slate-500"
+                          }`}
+                        >
+                          {sw.enabled ? "Enabled" : "Off"}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 font-mono mt-1 leading-relaxed">
+                        {def.description}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-4 shrink-0">
+                      <div>
+                        <label className="text-[10px] font-mono text-slate-400 uppercase block">
+                          Time cap (s)
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={7200}
+                          value={sw.time_cap_seconds}
+                          onChange={(e) =>
+                            setPhaseSwitches((prev) => ({
+                              ...prev,
+                              [def.key]: {
+                                ...prev[def.key],
+                                time_cap_seconds: Math.max(1, Math.min(parseInt(e.target.value, 10) || def.defaultCap, 7200)),
+                              },
+                            }))
+                          }
+                          className="w-24 mt-1 bg-dark-input border border-dark-border rounded p-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-cyber-accent"
+                        />
+                      </div>
+                      <label className="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={sw.enabled}
+                          onChange={(e) =>
+                            setPhaseSwitches((prev) => ({
+                              ...prev,
+                              [def.key]: { ...prev[def.key], enabled: e.target.checked },
+                            }))
+                          }
+                          className="sr-only peer"
+                        />
+                        <div className="w-11 h-6 bg-dark-input rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyber-accent"></div>
+                      </label>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {activeTab === "phase8" && (
+            <div className="space-y-4">
+              <div className="p-4 bg-dark-bg/60 border border-dark-border rounded-lg">
+                <h4 className="text-xs font-mono text-slate-200 font-bold uppercase tracking-wider flex items-center gap-2">
+                  <Terminal className="w-4 h-4 text-cyber-accent" />
+                  <span>Phase 8 Integrations</span>
+                </h4>
+                <p className="text-[11px] text-slate-400 font-mono mt-1">
+                  jsluice/xnLinkFinder, secret scanning and tech routing run automatically when their tools are installed.
+                  OAST and cloud enumeration are opt-in and configurable per project.
+                </p>
+              </div>
+
+              <div className="bg-dark-bg/60 border border-dark-border rounded-lg p-4 space-y-3">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <span className="text-xs font-mono font-bold uppercase text-slate-200">OAST (Interactsh)</span>
+                  <input type="checkbox" checked={oastEnabled} onChange={(e) => setOastEnabled(e.target.checked)} className="accent-cyber-accent" />
+                </label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <input
+                    type="text"
+                    placeholder="Interactsh server (blank = public default)"
+                    value={oastServer}
+                    onChange={(e) => setOastServer(e.target.value)}
+                    disabled={!oastEnabled}
+                    className="w-full bg-dark-input border border-dark-border rounded p-2 text-xs font-mono text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyber-accent disabled:opacity-50"
+                  />
+                  <input
+                    type="password"
+                    placeholder="Interactsh token (optional)"
+                    value={oastToken}
+                    onChange={(e) => setOastToken(e.target.value)}
+                    disabled={!oastEnabled}
+                    className="w-full bg-dark-input border border-dark-border rounded p-2 text-xs font-mono text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyber-accent disabled:opacity-50"
+                  />
+                </div>
+                <p className="text-[10px] text-slate-500 font-mono">
+                  OAST tokens are masked on read and never logged. Dalfox uses -b; Nuclei uses -iserver/-interactsh-token.
+                </p>
+              </div>
+
+              <div className="bg-dark-bg/60 border border-dark-border rounded-lg p-4 space-y-3">
+                <h5 className="text-xs font-mono font-bold uppercase text-slate-200">Nuclei Options</h5>
+                <label className="flex items-center justify-between cursor-pointer">
+                  <span className="text-[11px] font-mono text-slate-300">Automatic scan mode (-as) for tech-routed hosts</span>
+                  <input type="checkbox" checked={nucleiAutoScan} onChange={(e) => setNucleiAutoScan(e.target.checked)} className="accent-cyber-accent" />
+                </label>
+                <label className="flex items-center justify-between cursor-pointer">
+                  <span className="text-[11px] font-mono text-slate-300">Update templates at scan start</span>
+                  <input type="checkbox" checked={nucleiUpdateTemplates} onChange={(e) => setNucleiUpdateTemplates(e.target.checked)} className="accent-cyber-accent" />
+                </label>
+                <input
+                  type="text"
+                  placeholder="Custom templates dir inside WSL (optional), e.g. /home/kali/nuclei-templates-custom"
+                  value={nucleiCustomTemplatesDir}
+                  onChange={(e) => setNucleiCustomTemplatesDir(e.target.value)}
+                  className="w-full bg-dark-input border border-dark-border rounded p-2 text-xs font-mono text-slate-100 placeholder-slate-600 focus:outline-none focus:border-cyber-accent"
+                />
+              </div>
+
+              <div className="bg-dark-bg/60 border border-dark-border rounded-lg p-4">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <div>
+                    <span className="text-xs font-mono font-bold uppercase text-slate-200">Cloud Bucket Enumeration</span>
+                    <p className="text-[10px] text-slate-500 font-mono mt-1">
+                      Opt-in, deep-mode only. Reports only buckets tied to in-scope seed names.
+                    </p>
+                  </div>
+                  <input type="checkbox" checked={enableCloudEnum} onChange={(e) => setEnableCloudEnum(e.target.checked)} className="accent-cyber-accent" />
+                </label>
               </div>
             </div>
           )}

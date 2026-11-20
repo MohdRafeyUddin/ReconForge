@@ -19,6 +19,41 @@ from app.providers.base import BaseProvider
 
 logger = logging.getLogger("reconforge.providers.naabu")
 
+# ---------------------------------------------------------------------------
+# Nmap service-detection defaults (global defaults + per-project overrides)
+# ---------------------------------------------------------------------------
+_NMAP_DEFAULTS_FALLBACK: Dict[str, Any] = {
+    "enabled": True,
+    "scan_modes": ["deep"],
+    "max_hosts": 25,
+    "concurrency": 5,
+    "timeout_seconds": 15,
+    "version_light": True,
+    "priority": "interesting",
+}
+_NMAP_DEFAULTS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "config", "nmap_defaults.json"
+)
+_NMAP_DEFAULTS_CACHE: Optional[Dict[str, Any]] = None
+
+
+def _load_nmap_defaults() -> Dict[str, Any]:
+    global _NMAP_DEFAULTS_CACHE
+    if _NMAP_DEFAULTS_CACHE is not None:
+        return dict(_NMAP_DEFAULTS_CACHE)
+    defaults = dict(_NMAP_DEFAULTS_FALLBACK)
+    try:
+        with open(_NMAP_DEFAULTS_PATH, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            for key in defaults:
+                if key in loaded and loaded[key] is not None:
+                    defaults[key] = loaded[key]
+    except Exception as exc:
+        logger.warning("Failed to load nmap_defaults.json (%s); using built-in defaults", exc)
+    _NMAP_DEFAULTS_CACHE = defaults
+    return dict(defaults)
+
 
 class NaabuProvider(BaseProvider):
     @property
@@ -75,6 +110,128 @@ class NaabuProvider(BaseProvider):
 
         return None
 
+    @staticmethod
+    def normalize_nmap_options(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Merges per-project options over global defaults and clamps ranges."""
+        opts = _load_nmap_defaults()
+        if isinstance(raw, dict):
+            for key in list(opts.keys()):
+                if key in raw and raw[key] is not None:
+                    opts[key] = raw[key]
+        try:
+            opts["max_hosts"] = max(1, min(int(opts.get("max_hosts") or 25), 500))
+        except Exception:
+            opts["max_hosts"] = 25
+        try:
+            opts["concurrency"] = max(1, min(int(opts.get("concurrency") or 5), 20))
+        except Exception:
+            opts["concurrency"] = 5
+        try:
+            opts["timeout_seconds"] = max(5, min(int(opts.get("timeout_seconds") or 15), 120))
+        except Exception:
+            opts["timeout_seconds"] = 15
+        modes = opts.get("scan_modes")
+        if isinstance(modes, str):
+            modes = [modes]
+        if not isinstance(modes, list):
+            modes = ["deep"]
+        opts["scan_modes"] = [str(m).strip().lower() for m in modes if str(m).strip()]
+        opts["enabled"] = bool(opts.get("enabled", True))
+        opts["version_light"] = bool(opts.get("version_light", True))
+        return opts
+
+    @staticmethod
+    def select_nmap_targets(
+        open_ports_by_host: Dict[str, Any],
+        scan_mode: str,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Returns (selected_targets, skipped_count, skip_reason).
+
+        Deep mode is the default; Fast mode skips service detection entirely.
+        Hosts are prioritized by non-standard open ports, then port count, and
+        capped at ``max_hosts`` to bound total runtime.
+        """
+        opts = NaabuProvider.normalize_nmap_options(options)
+        if not opts.get("enabled", True):
+            return [], 0, "disabled"
+        modes = opts.get("scan_modes") or []
+        if scan_mode not in modes and "always" not in modes:
+            return [], 0, f"{scan_mode} mode (service detection disabled)"
+
+        items = [
+            (str(host), sorted(int(p) for p in ports))
+            for host, ports in open_ports_by_host.items()
+            if ports
+        ]
+        if opts.get("priority", "interesting") == "interesting":
+            items.sort(key=lambda item: (
+                -sum(1 for p in item[1] if p not in (80, 443)),
+                -len(item[1]),
+                item[0],
+            ))
+        else:
+            items.sort(key=lambda item: item[0])
+
+        max_hosts = int(opts["max_hosts"])
+        skipped = max(0, len(items) - max_hosts)
+        return items[:max_hosts], skipped, ""
+
+    @staticmethod
+    def parse_nmap_services(output: str) -> List[Dict[str, Any]]:
+        """Parses nmap -sV lines into service records."""
+        services: List[Dict[str, Any]] = []
+        for line in (output or "").splitlines():
+            l_strip = line.strip()
+            if "/tcp" not in l_strip and "/udp" not in l_strip:
+                continue
+            parts = l_strip.split(None, 3)
+            if len(parts) < 3 or parts[1] != "open":
+                continue
+            port_proto = parts[0].split("/")
+            try:
+                port_num = int(port_proto[0])
+            except Exception:
+                continue
+            services.append({
+                "port": port_num,
+                "protocol": port_proto[1] if len(port_proto) > 1 else "tcp",
+                "service": parts[2],
+                "version": parts[3] if len(parts) > 3 else "",
+            })
+        return services
+
+    async def _run_nmap_async(self, cmd: List[str], timeout: int) -> Any:
+        """Runs nmap without blocking the event loop; kills it on timeout."""
+        from app.job_control import register_process, unregister_process
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        register_process(proc)
+        try:
+            try:
+                out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                return (
+                    proc.returncode or 0,
+                    (out_b or b"").decode("utf-8", errors="replace"),
+                    (err_b or b"").decode("utf-8", errors="replace"),
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+                return -1, "", f"timeout after {timeout}s"
+        finally:
+            unregister_process(proc)
+
     async def discover(
         self,
         seed_domains: List[str],
@@ -82,6 +239,7 @@ class NaabuProvider(BaseProvider):
         scan_mode: str = "fast",
         port_range: Optional[str] = None,
         cdn_excluded_hosts: Optional[Dict[str, str]] = None,
+        nmap_options: Optional[Dict[str, Any]] = None,
         timeout: Optional[int] = None,
         **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -90,7 +248,7 @@ class NaabuProvider(BaseProvider):
 
         all_hosts = list(dict.fromkeys(h.strip().lower() for h in seed_domains if h and h.strip()))
 
-        yield {"type": "log", "message": f"\n========== Naabu Port Scan ({scan_mode.upper()} MODE) =========="}
+        yield {"type": "log", "message": "\n========== Naabu Port Scan =========="}
         yield {"type": "log", "message": "Launching Naabu..."}
 
         # CDN exclusions (exclude CDN edge IPs/hosts from wide port scans)
@@ -178,11 +336,15 @@ class NaabuProvider(BaseProvider):
                 "-silent",
             ]
 
-            # Fast mode uses top ports (default). Deep mode uses wide port range.
+            # Baseline scans stay on the top-1000 ports; the wide switch
+            # (passed as scan_mode="deep") upgrades to the project port range.
             if scan_mode == "deep":
                 target_range = port_range if port_range else "1-10000"
                 naabu_flags.extend(["-p", target_range])
-                yield {"type": "log", "message": f"[*] Deep mode: scanning port range {target_range}"}
+                yield {"type": "log", "message": f"[*] Wide port scan: scanning port range {target_range}"}
+            else:
+                naabu_flags.extend(["-top-ports", "1000"])
+                yield {"type": "log", "message": "[*] Baseline port scan: top 1000 ports"}
 
             if rate_limit:
                 naabu_flags.extend(["-rate", str(rate_limit)])
@@ -261,59 +423,108 @@ class NaabuProvider(BaseProvider):
                 except OSError:
                     logger.warning("Failed to remove Naabu target file: %s", temp_path)
 
-        # Optional: Nmap -sV service detection on open ports (Deep mode or when ports found)
+        # Optional nmap -sV service detection.
+        # Bounded by max_hosts/concurrency/timeout; Deep mode only by default.
         host_services: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        nmap_cfg = self.normalize_nmap_options(
+            nmap_options if nmap_options is not None else kwargs.get("nmap_options")
+        )
+        nmap_selected: List[Any] = []
+        nmap_skipped = 0
+        nmap_reason = ""
+
         if open_ports_by_host:
-            if not is_tool_available("nmap"):
+            nmap_selected, nmap_skipped, nmap_reason = self.select_nmap_targets(
+                open_ports_by_host, scan_mode, nmap_cfg
+            )
+            if nmap_reason:
+                yield {
+                    "type": "stage_skipped",
+                    "stage": "Service Detection (nmap)",
+                    "tool": "nmap",
+                    "reason": nmap_reason,
+                }
+                yield {"type": "log", "message": f"[*] Nmap service detection skipped ({nmap_reason})."}
+            elif not is_tool_available("nmap"):
                 yield {"type": "stage_skipped", "stage": "Service Detection (nmap)", "tool": "nmap", "reason": "tool_missing: nmap"}
                 yield {"type": "log", "message": "[!] Tool 'nmap' is not installed in WSL. Skipping service detection (-sV)."}
             else:
-                yield {"type": "log", "message": "\n[*] Running Nmap service detection (-sV) on open ports..."}
                 nmap_path = self.detect_tool("nmap")
-                nmap_exec = "wsl" if is_windows else nmap_path
-                nmap_base_args = ["-e", nmap_path] if is_windows else []
+                if not nmap_path:
+                    yield {"type": "stage_skipped", "stage": "Service Detection (nmap)", "tool": "nmap", "reason": "tool_missing: nmap"}
+                    yield {"type": "log", "message": "[!] Tool 'nmap' is not installed in WSL. Skipping service detection (-sV)."}
+                else:
+                    concurrency = int(nmap_cfg["concurrency"])
+                    nmap_timeout = int(nmap_cfg["timeout_seconds"])
+                    yield {
+                        "type": "log",
+                        "message": (
+                            f"\n[*] Running Nmap -sV on {len(nmap_selected)}/{len(open_ports_by_host)} host(s) "
+                            f"with open ports (concurrency {concurrency}, timeout {nmap_timeout}s/host)..."
+                        ),
+                    }
+                    if nmap_skipped:
+                        yield {
+                            "type": "log",
+                            "message": (
+                                f"[*] Service-detection cap: skipping {nmap_skipped} host(s) "
+                                f"(max_hosts={nmap_cfg['max_hosts']}). Increase nmap_options.max_hosts to scan more."
+                            ),
+                        }
 
-                for target_host, ports_set in open_ports_by_host.items():
-                    await check_job_status()
-                    ports_str = ",".join(str(p) for p in sorted(ports_set))
-                    nmap_cmd = [nmap_exec, *nmap_base_args, "-sV", "-T4", "--open", "-p", ports_str, target_host]
+                    nmap_exec = "wsl" if is_windows else nmap_path
+                    nmap_base_args = ["-e", nmap_path] if is_windows else []
+                    sem = asyncio.Semaphore(concurrency)
+                    result_queue: asyncio.Queue = asyncio.Queue()
 
-                    try:
-                        nmap_proc = subprocess.Popen(
-                            nmap_cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            encoding="utf-8",
-                            errors="replace",
-                        )
-                        register_process(nmap_proc)
-                        try:
-                            nmap_out, _ = nmap_proc.communicate(timeout=30)
-                        except subprocess.TimeoutExpired:
-                            logger.warning("[-] nmap service detection timed out on %s; terminating subprocess", target_host)
-                            nmap_proc.kill()
-                            nmap_out, _ = nmap_proc.communicate()
-                        finally:
-                            unregister_process(nmap_proc)
+                    async def run_nmap(host: str, ports: List[int]) -> None:
+                        services: List[Dict[str, Any]] = []
+                        err_msg = ""
+                        async with sem:
+                            try:
+                                await check_job_status()
+                                ports_str = ",".join(str(p) for p in ports)
+                                nmap_flags = [
+                                    "-sV", "-T4", "--open",
+                                    "--max-retries", "1",
+                                    "--host-timeout", f"{nmap_timeout}s",
+                                ]
+                                if nmap_cfg.get("version_light", True):
+                                    nmap_flags.append("--version-light")
+                                nmap_flags.extend(["-p", ports_str, host])
+                                cmd = [nmap_exec, *nmap_base_args, *nmap_flags]
+                                rc, out, err = await self._run_nmap_async(cmd, timeout=nmap_timeout)
+                                services = self.parse_nmap_services(out)
+                                if rc != 0:
+                                    err_msg = (
+                                        f"[-] nmap service detection failed on {host} "
+                                        f"(rc={rc}): {(err or '').strip()[:160]}"
+                                    )
+                            except Exception as exc:
+                                err_msg = f"[-] nmap service detection failed on {host}: {exc}"
+                            finally:
+                                await result_queue.put((host, services, err_msg))
 
-                        # Parse nmap output lines (e.g., "80/tcp open http Apache httpd 2.4.41")
-                        for line in (nmap_out or "").splitlines():
-                            l_strip = line.strip()
-                            if "/tcp" in l_strip or "/udp" in l_strip:
-                                parts = l_strip.split(None, 3)
-                                if len(parts) >= 3 and parts[1] == "open":
-                                    p_num = self._to_int(parts[0].split("/")[0])
-                                    proto = parts[0].split("/")[1] if "/" in parts[0] else "tcp"
-                                    svc = parts[2]
-                                    ver = parts[3] if len(parts) > 3 else ""
-                                    svc_info = {"port": p_num, "protocol": proto, "service": svc, "version": ver}
-                                    host_services[target_host].append(svc_info)
-                                    log_line = f"[+] [nmap -sV] {target_host}:{p_num} -> {svc} {ver}".strip()
-                                    logger.info(log_line)
-                                    yield {"type": "log", "message": log_line}
-                    except Exception as nmap_err:
-                        logger.debug("nmap failed on %s: %s", target_host, nmap_err)
+                    nmap_tasks = [asyncio.create_task(run_nmap(h, p)) for h, p in nmap_selected]
+                    for _ in nmap_tasks:
+                        target_host, services, err_msg = await result_queue.get()
+                        if services:
+                            host_services[target_host].extend(services)
+                            for svc in services:
+                                log_line = (
+                                    f"[+] [nmap -sV] {target_host}:{svc['port']} -> "
+                                    f"{svc['service']} {svc.get('version', '')}"
+                                ).strip()
+                                logger.info(log_line)
+                                yield {"type": "log", "message": log_line}
+                        if err_msg:
+                            logger.debug(err_msg)
+                            yield {"type": "log", "message": err_msg}
+                    await asyncio.gather(*nmap_tasks, return_exceptions=True)
+                    yield {
+                        "type": "log",
+                        "message": f"[√] Nmap service detection completed for {len(host_services)} host(s).",
+                    }
 
         total_ports = sum(len(ports) for ports in open_ports_by_host.values())
         for host, ports in sorted(open_ports_by_host.items()):
@@ -365,4 +576,9 @@ class NaabuProvider(BaseProvider):
             "open_ports": total_ports,
             "duration_seconds": duration_s,
             "hosts_in": hosts_in,
+            "nmap_enabled": bool(nmap_cfg.get("enabled")),
+            "nmap_hosts_selected": len(nmap_selected),
+            "nmap_hosts_with_services": len(host_services),
+            "nmap_hosts_skipped": nmap_skipped,
+            "nmap_skip_reason": nmap_reason,
         }

@@ -21,6 +21,7 @@ SUPPORTED_PROVIDERS = [
     "virustotal",
     "github",
     "chaos",
+    "certspotter",
 ]
 
 
@@ -32,17 +33,35 @@ def _get_provider_keys_path() -> str:
 
 
 def load_provider_keys() -> Dict[str, Any]:
-    """Loads provider keys from local JSON file. Returns empty dict if absent."""
+    """Loads provider keys from local JSON file and environment. Returns empty dict if absent."""
     path = _get_provider_keys_path()
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception as exc:
-        logger.warning(f"Could not load provider_keys.json: {exc}")
-        return {}
+    data: Dict[str, Any] = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+        except Exception as exc:
+            logger.warning(f"Could not load provider_keys.json: {exc}")
+
+    # Fallback to env vars for chaos / pdcp if not explicitly defined in json
+    if not data.get("chaos"):
+        from dotenv import load_dotenv
+        from pathlib import Path
+        _b_env = Path(__file__).resolve().parent.parent.parent / ".env"
+        if _b_env.is_file():
+            load_dotenv(dotenv_path=_b_env)
+        env_chaos = os.getenv("PDCP_API_KEY") or os.getenv("CHAOS_KEY") or os.getenv("PROJECTDISCOVERY_API_KEY")
+        if env_chaos:
+            data["chaos"] = env_chaos.strip()
+
+    if not data.get("certspotter"):
+        env_cs = os.getenv("CERTSPOTTER_API_KEY") or os.getenv("CERTSPOTTER_KEY")
+        if env_cs:
+            data["certspotter"] = env_cs.strip()
+
+    return data
 
 
 def mask_key(val: Any) -> str:

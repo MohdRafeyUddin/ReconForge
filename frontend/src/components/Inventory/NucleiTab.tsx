@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { Search, Download, ChevronDown, ChevronRight, Copy, AlertCircle } from "lucide-react";
 import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
+import { Pagination, usePagination } from "../Common/Pagination";
 
 export interface NucleiFindingRecord {
   template_id?: string;
@@ -131,6 +132,13 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
       return matchesSearch && matchesSeverity && matchesHost && matchesTemplate && matchesTag && matchesPass && matchesSource;
     });
   }, [findings, search, filterSeverity, filterHost, filterTemplate, filterTag, filterPass, filterSource]);
+
+  const { page, setPage, pageSize, setPageSize, pageItems, total } =
+    usePagination(
+      filtered,
+      20,
+      `${search}|${filterSeverity}|${filterHost}|${filterTemplate}|${filterTag}|${filterPass}|${filterSource}`
+    );
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -334,7 +342,7 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
                 </td>
               </tr>
             ) : (
-              filtered.map((f, idx) => {
+              pageItems.map((f, idx) => {
                 const uniqueId = `${f.template_id || f.template || "unknown"}-${f.matched_url || f.endpoint || ""}-${idx}`;
                 const isExpanded = expandedId === uniqueId;
 
@@ -683,6 +691,14 @@ export const NucleiTab: React.FC<NucleiTabProps> = ({
           </tbody>
         </table>
       </div>
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        itemLabel="finding(s)"
+      />
     </div>
   );
 };

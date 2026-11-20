@@ -3,6 +3,7 @@ import logging
 import os
 import platform
 import subprocess
+import tempfile
 import time
 from typing import AsyncGenerator, Dict, Any, List
 from urllib.parse import urlparse
@@ -42,17 +43,22 @@ class SubjsProvider(BaseProvider):
         is_windows = platform.system().lower() == "windows"
 
         yield {"type": "log", "message": f"[*] Scanning {len(urls)} URLs for JS files..."}
-        
-        # Build command
+
+        # SubJS only reads URLs from a file (-i); it ignores stdin.
+        temp_in = tempfile.NamedTemporaryFile(
+            mode="w", delete=False, suffix=".txt", encoding="utf-8", newline="\n"
+        )
+        for url in urls:
+            temp_in.write(f"{url}\n")
+        temp_in.close()
+        wsl_in = self.wsl_path_convert(temp_in.name) if is_windows else temp_in.name
         if is_windows:
-            cmd = ["wsl", "-e", tool_path]
+            cmd = ["wsl", "-e", tool_path, "-i", wsl_in, "-c", "10", "-t", "15"]
         else:
-            cmd = [tool_path]
-            
-        exec_msg = f"[*] Executing command: {' '.join(cmd)}"
-        logger.info(exec_msg)
-        yield {"type": "log", "message": exec_msg}
-        
+            cmd = [tool_path, "-i", wsl_in, "-c", "10", "-t", "15"]
+
+        yield {"type": "log", "message": self.format_cmd_log(cmd)}
+
         start_ts = time.time()
         js_files_found = set()
         
@@ -62,7 +68,7 @@ class SubjsProvider(BaseProvider):
             
             process = subprocess.Popen(
                 cmd,
-                stdin=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -71,14 +77,7 @@ class SubjsProvider(BaseProvider):
                 bufsize=1
             )
             register_process(process)
-            
-            # Write URLs to stdin
-            try:
-                process.stdin.write("\n".join(urls) + "\n")
-                process.stdin.close()
-            except Exception as e:
-                logger.error(f"Error writing to SubJS stdin: {e}")
-                
+
             # Read stdout with timeout protection (300 seconds)
             timeout = 300
             loop = asyncio.get_event_loop()
@@ -181,7 +180,13 @@ class SubjsProvider(BaseProvider):
             err_msg = f"[-] SubJS execution failed: {exc}"
             logger.exception(err_msg)
             yield {"type": "log", "message": err_msg}
-            
+        finally:
+            try:
+                if os.path.exists(temp_in.name):
+                    os.unlink(temp_in.name)
+            except Exception:
+                pass
+
         duration_s = int(time.time() - start_ts)
         complete_msg = f"[√] SubJS completed. Total JavaScript files discovered: {len(js_files_found)}"
         yield {"type": "log", "message": complete_msg}

@@ -1,7 +1,12 @@
 import os
+from pathlib import Path
 from typing import List, Set
 from dotenv import load_dotenv
 
+# Load from backend/.env and root .env
+_backend_env = Path(__file__).resolve().parent.parent / ".env"
+if _backend_env.is_file():
+    load_dotenv(dotenv_path=_backend_env)
 load_dotenv()
 
 class Settings:
@@ -14,6 +19,10 @@ class Settings:
     
     # Tool detection / scan configuration
     ASSUME_TOOLS_INSTALLED: bool = os.getenv("ASSUME_TOOLS_INSTALLED", "true").lower() in ("true", "1", "yes")
+
+    # ProjectDiscovery / Chaos API Key
+    PDCP_API_KEY: str = os.getenv("PDCP_API_KEY", "")
+    CHAOS_KEY: str = os.getenv("CHAOS_KEY", "")
 
     # Network exposure & security config (single-user local mode)
     # Default allowed origins: http://localhost:5173 and http://127.0.0.1:5173 only

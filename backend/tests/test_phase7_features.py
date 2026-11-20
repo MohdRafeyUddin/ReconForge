@@ -332,8 +332,8 @@ async def test_root_expansion_opt_in_and_approval_workflow():
 
 
 @pytest.mark.asyncio
-async def test_fast_mode_skips_dns_bruteforce_stage(monkeypatch):
-    """Verifies that UnifiedDiscoveryProvider in Fast mode skips Phase 1.5 with stage_skipped."""
+async def test_dns_bruteforce_switch_off_skips_stage(monkeypatch):
+    """Verifies that Phase 1.5 is skipped when the per-project DNS brute force switch is OFF."""
     from app.providers import unified_discovery_provider
 
     class MockPassiveProvider:
@@ -359,7 +359,10 @@ async def test_fast_mode_skips_dns_bruteforce_stage(monkeypatch):
     async for ev in discovery.discover(
         seed_domains=["example.com"],
         scan_mode="fast",
-        project_config={"scope": {"in_scope": ["*.example.com"], "out_of_scope": []}},
+        project_config={
+            "scope": {"in_scope": ["*.example.com"], "out_of_scope": []},
+            "phase_switches": {"dns_bruteforce": {"enabled": False, "time_cap_seconds": 60}},
+        },
     ):
         events.append(ev)
         # Stop after reaching DNS brute force stage
@@ -368,4 +371,4 @@ async def test_fast_mode_skips_dns_bruteforce_stage(monkeypatch):
 
     skipped = [e for e in events if e.get("type") == "stage_skipped" and e.get("tool") == "puredns"]
     assert len(skipped) == 1
-    assert "deep mode only" in skipped[0]["reason"].lower()
+    assert skipped[0]["reason"] == "switch: dns_bruteforce disabled"

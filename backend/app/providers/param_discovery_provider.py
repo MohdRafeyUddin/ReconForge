@@ -44,10 +44,11 @@ class ParamDiscoveryProvider(BaseProvider):
         rate_limit: int = 10,
         custom_headers: Optional[Dict[str, str]] = None,
         timeout: int = 15,
+        wordlist: Optional[str] = "small",
         is_windows: bool = False,
     ) -> List[str]:
         """
-        Builds the Arjun command using real CLI flags:
+        Builds the Arjun command using verified CLI flags:
           --rate-limit <rate_limit>
           --headers <newline-separated headers>
           -T <timeout>
@@ -55,6 +56,7 @@ class ParamDiscoveryProvider(BaseProvider):
           -u <url>
           -oJ <wsl_out>
           -m GET
+          -w <wordlist> (default: small to avoid massive 25k wordlist timeouts)
         """
         cmd: List[str] = ["wsl", "-e"] if is_windows else []
         threads = str(min(rate_limit, 5))
@@ -67,6 +69,8 @@ class ParamDiscoveryProvider(BaseProvider):
             "-T", str(timeout),
             "-m", "GET",
         ])
+        if wordlist:
+            cmd.extend(["-w", wordlist])
         if custom_headers:
             headers_val = "\n".join(f"{k}: {v}" for k, v in custom_headers.items() if k and v)
             if headers_val:
@@ -123,6 +127,7 @@ class ParamDiscoveryProvider(BaseProvider):
         scope: Optional[Dict[str, List[str]]] = None,
         max_endpoints_to_probe: int = 25,
         per_host_timeout: int = 60,
+        **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Executes Arjun or x8 parameter discovery on priority endpoints.
@@ -178,13 +183,18 @@ class ParamDiscoveryProvider(BaseProvider):
         total_params_found = 0
         start_ts = time.time()
 
+        consecutive_failures = 0
+        successful_endpoints: List[str] = []
+        failed_endpoints: List[str] = []
+        untested_endpoints: List[str] = []
+
         yield {
             "type": "log",
             "message": f"\n========== Parameter Discovery ({tool_name.upper()}) ==========\n"
                        f"[*] Probing {len(targets)} priority endpoints for hidden parameters (Rate limit: {rate_limit})...",
         }
 
-        for url in targets:
+        for idx, url in enumerate(targets):
             url = url.strip()
             if not url or not is_in_scope(url, scope):
                 continue
@@ -206,6 +216,7 @@ class ParamDiscoveryProvider(BaseProvider):
                     wsl_out=wsl_out,
                     rate_limit=rate_limit,
                     custom_headers=custom_headers,
+                    wordlist=kwargs.get("wordlist", "small"),
                     is_windows=is_windows,
                 )
             else:
@@ -233,11 +244,15 @@ class ParamDiscoveryProvider(BaseProvider):
             )
             register_process(proc)
 
+            timed_out = False
             try:
                 loop = asyncio.get_event_loop()
                 await asyncio.wait_for(loop.run_in_executor(None, proc.wait), timeout=per_host_timeout)
             except asyncio.TimeoutError:
+                timed_out = True
                 proc.kill()
+                consecutive_failures += 1
+                failed_endpoints.append(url)
                 yield {
                     "type": "stage_timeout",
                     "stage": "param_discovery",
@@ -247,6 +262,34 @@ class ParamDiscoveryProvider(BaseProvider):
                 yield {"type": "log", "message": f"[-] Parameter discovery timed out ({per_host_timeout}s) on {url}."}
             finally:
                 unregister_process(proc)
+
+            # Check circuit breaker on timeout
+            if timed_out:
+                try:
+                    if os.path.exists(out_tmp.name):
+                        os.unlink(out_tmp.name)
+                except Exception:
+                    pass
+
+                if consecutive_failures >= 3:
+                    untested_endpoints = [t.strip() for t in targets[idx + 1:] if t and t.strip()]
+                    circuit_msg = (
+                        f"[-] Circuit breaker triggered: {consecutive_failures} consecutive failures/timeouts in parameter discovery. "
+                        f"Stopping phase. Untested endpoints ({len(untested_endpoints)}): {', '.join(untested_endpoints[:5])}"
+                        f"{'...' if len(untested_endpoints) > 5 else ''}"
+                    )
+                    logger.error(circuit_msg)
+                    yield {
+                        "type": "stage_error",
+                        "stage": "param_discovery",
+                        "tool": tool_name,
+                        "error": "Circuit breaker triggered: 3 consecutive failures/timeouts",
+                        "reason": "circuit_breaker: 3 consecutive failures/timeouts",
+                        "untested_endpoints": untested_endpoints,
+                    }
+                    yield {"type": "log", "message": circuit_msg}
+                    break
+                continue
 
             # Requirement 4: If tool exits non-zero (including 4294967295 / WSL errors),
             # discard stdout, emit stage_error, and never parse stdout of a failed process
@@ -270,6 +313,8 @@ class ParamDiscoveryProvider(BaseProvider):
                 ret = 0
 
             if ret != 0:
+                consecutive_failures += 1
+                failed_endpoints.append(url)
                 err_msg = ""
                 try:
                     if proc.stderr:
@@ -281,22 +326,47 @@ class ParamDiscoveryProvider(BaseProvider):
                 except Exception:
                     pass
                 err_msg = err_msg.strip() or f"Process exited with code {ret}"
-                logger.error(f"[param_discovery] Tool {tool_name} exited with non-zero code {ret} on {url}: {err_msg}")
+                err_snippet = err_msg[:500]
+                logger.error(f"[param_discovery] Tool {tool_name} exited with non-zero code {ret} on {url}: {err_snippet}")
                 yield {
                     "type": "stage_error",
                     "stage": "param_discovery",
                     "tool": tool_name,
                     "returncode": ret,
-                    "error": f"Tool {tool_name} exited with code {ret}",
-                    "reason": f"Tool {tool_name} exited with code {ret}: {err_msg}",
+                    "error": f"Tool {tool_name} exited with code {ret}: {err_snippet}",
+                    "reason": f"Tool {tool_name} exited with code {ret}: {err_snippet}",
                 }
-                yield {"type": "log", "message": f"[-] Stage error: {tool_name} exited with code {ret} on {url}: {err_msg[:120]}"}
+                yield {"type": "log", "message": f"[-] Stage error: {tool_name} exited with code {ret} on {url}: {err_snippet}"}
                 try:
                     if os.path.exists(out_tmp.name):
                         os.unlink(out_tmp.name)
                 except Exception:
                     pass
+
+                # Circuit breaker check on exit code != 0
+                if consecutive_failures >= 3:
+                    untested_endpoints = [t.strip() for t in targets[idx + 1:] if t and t.strip()]
+                    circuit_msg = (
+                        f"[-] Circuit breaker triggered: {consecutive_failures} consecutive failures/timeouts in parameter discovery. "
+                        f"Stopping phase. Untested endpoints ({len(untested_endpoints)}): {', '.join(untested_endpoints[:5])}"
+                        f"{'...' if len(untested_endpoints) > 5 else ''}"
+                    )
+                    logger.error(circuit_msg)
+                    yield {
+                        "type": "stage_error",
+                        "stage": "param_discovery",
+                        "tool": tool_name,
+                        "error": "Circuit breaker triggered: 3 consecutive failures/timeouts",
+                        "reason": "circuit_breaker: 3 consecutive failures/timeouts",
+                        "untested_endpoints": untested_endpoints,
+                    }
+                    yield {"type": "log", "message": circuit_msg}
+                    break
                 continue
+
+            # Successful run on this endpoint
+            consecutive_failures = 0
+            successful_endpoints.append(url)
 
             # Parse results
             params_for_url: List[str] = []
@@ -384,7 +454,11 @@ class ParamDiscoveryProvider(BaseProvider):
             "provider": self.name,
             "status": "completed",
             "count": total_params_found,
-            "targets_scanned": len(targets),
+            "targets_scanned": len(successful_endpoints),
+            "endpoints_succeeded": len(successful_endpoints),
+            "endpoints_failed": len(failed_endpoints),
+            "endpoints_untested": len(untested_endpoints),
+            "untested_endpoints": untested_endpoints,
             "duration_seconds": duration,
         }
         yield {

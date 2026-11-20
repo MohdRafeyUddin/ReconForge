@@ -99,7 +99,7 @@ ReconForge executes automated workflows in distinct sequential passes. Stage gat
 *   **Nuclei**: Multi-pass template scanner checking for exposures (`HostExposure` pass) and bug classes (`EndpointBugClass`/`EndpointCritical` passes).
 *   **Dalfox**: Active parameter verification for Cross-Site Scripting (XSS).
 *   **OpenRedirex**: Validates open redirects against parameterized parameters.
-*   **GoWitness**: Captures screenshots of live HTTP endpoints for visual verification.
+*   **GoWitness**: Captures screenshots of live host roots plus priority-ranked discovered URLs for visual verification.
 
 ---
 

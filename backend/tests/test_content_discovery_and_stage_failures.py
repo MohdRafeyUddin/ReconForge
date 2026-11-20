@@ -685,3 +685,88 @@ async def test_mock_cursor_skip_limit_and_content_paths_on_mock_db():
     assert res["page"] == 2
     assert res["limit"] == 5
     assert len(res["items"]) == 5
+
+
+def test_content_paths_http_endpoint_no_422_with_limit_query_param():
+    """
+    Verifies GET /api/v1/assets/project/{project_id}/content-paths?limit=500
+    does NOT return 422 Unprocessable Entity due to kwargs parameter parsing.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    test_client = TestClient(app)
+    res = test_client.get("/api/v1/assets/project/6af725abbc5a445b420f2c94/content-paths?limit=500")
+    assert res.status_code != 422, f"Expected non-422, but got 422: {res.text}"
+
+
+@pytest.mark.asyncio
+async def test_unified_discovery_null_wordlists_and_waf_events_no_nonetype_error():
+    """
+    Verifies that UnifiedDiscoveryProvider handles project_config with wordlists=None,
+    clustering=None, and wafw00f events without raising 'NoneType' object has no attribute 'get'.
+    """
+    from app.providers.unified_discovery_provider import UnifiedDiscoveryProvider
+    from unittest.mock import patch
+
+    prov = UnifiedDiscoveryProvider()
+    prov.providers = []  # Bypass external passive tools
+
+    async def mock_run_phase(provider_obj, targets, phase_label, **kwargs):
+        if "DNS" in phase_label:
+            yield {
+                "type": "asset",
+                "data": {
+                    "domain": "testaspnet.vulnweb.com",
+                    "status": "resolved",
+                    "resolved_ip": "44.228.249.3",
+                },
+            }
+        elif "HTTPX" in phase_label or "probing" in phase_label.lower():
+            yield {
+                "type": "asset",
+                "data": {
+                    "domain": "testaspnet.vulnweb.com",
+                    "type": "subdomain",
+                    "status": "live",
+                    "status_code": 200,
+                    "metadata": {"url": "http://testaspnet.vulnweb.com", "status_code": 200},
+                },
+            }
+        elif "WAF" in phase_label:
+            yield {
+                "type": "asset",
+                "data": {
+                    "domain": "testaspnet.vulnweb.com",
+                    "type": "subdomain",
+                    "status": "live",
+                    "cdn_waf": {"is_waf": True, "waf_name": "RequestValidationMode (Microsoft)"},
+                },
+            }
+            yield {"type": "log", "message": "[√] wafw00f finished: 1 WAF(s) detected."}
+        else:
+            yield {"type": "log", "message": f"{phase_label} mocked"}
+
+    with patch.object(prov, "_run_phase", side_effect=mock_run_phase), \
+         patch("app.providers.unified_discovery_provider.is_tool_available", return_value=True), \
+         patch("app.core.tools.is_tool_available", return_value=True):
+
+        events = []
+        try:
+            async for ev in prov.discover(
+                ["vulnweb.com"],
+                scan_mode="fast",
+                project_config={
+                    "project_id": str(ObjectId()),
+                    "wordlists": None,
+                    "clustering": None,
+                    "scope": None,
+                },
+            ):
+                events.append(ev)
+                if ev.get("type") == "cluster_summary" or "wafw00f" in str(ev.get("message", "")):
+                    break
+        except AttributeError as exc:
+            pytest.fail(f"UnifiedDiscoveryProvider raised unexpected AttributeError: {exc}")
+
+        assert any(e.get("type") == "cluster_summary" or "WAF" in str(e.get("message", "")) for e in events)

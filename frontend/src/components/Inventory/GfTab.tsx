@@ -1,6 +1,8 @@
 import React, { useState, useMemo } from "react";
 import { Search, Download, ChevronDown, ChevronRight } from "lucide-react";
 import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
+import { Pagination, usePagination } from "../Common/Pagination";
+import { FetchBodyButton } from "./FetchBodyButton";
 
 export interface GfUrlRecord {
   url: string;
@@ -11,6 +13,7 @@ export interface GfUrlRecord {
 
 interface GfTabProps {
   records: GfUrlRecord[];
+  projectId?: string;
   projectName?: string;
 }
 
@@ -50,7 +53,7 @@ const CATEGORY_COLORS: Record<string, string> = {
 const categoryColor = (cat: string) =>
   CATEGORY_COLORS[cat.toLowerCase()] || "bg-slate-500/20 border-slate-500/50 text-slate-400";
 
-export const GfTab: React.FC<GfTabProps> = ({ records, projectName = "project" }) => {
+export const GfTab: React.FC<GfTabProps> = ({ records, projectId, projectName = "project" }) => {
   const [search, setSearch] = useState("");
   const [filterCat, setFilterCat] = useState("all");
   const [showExport, setShowExport] = useState(false);
@@ -76,17 +79,20 @@ export const GfTab: React.FC<GfTabProps> = ({ records, projectName = "project" }
     });
   }, [records, search, filterCat]);
 
+  const { page, setPage, pageSize, setPageSize, pageItems, total } =
+    usePagination(filtered, 20, `${search}|${filterCat}`);
+
   // Group by category for display
   const grouped = useMemo(() => {
     const map: Record<string, string[]> = {};
-    filtered.forEach((r) => {
+    pageItems.forEach((r) => {
       r.categories.forEach((cat) => {
         if (!map[cat]) map[cat] = [];
         if (!map[cat].includes(r.url)) map[cat].push(r.url);
       });
     });
     return map;
-  }, [filtered]);
+  }, [pageItems]);
 
   const toggleCollapse = (cat: string) =>
     setCollapsed((prev) => ({ ...prev, [cat]: !prev[cat] }));
@@ -190,6 +196,7 @@ export const GfTab: React.FC<GfTabProps> = ({ records, projectName = "project" }
                             <a href={url} target="_blank" rel="noopener noreferrer" className="hover:text-cyber-accent hover:underline">
                               <HighlightText text={url} highlight={search} />
                             </a>
+                            <FetchBodyButton projectId={projectId} url={url} compact />
                             {exactMatch && <ExactMatchBadge />}
                           </div>
                         );
@@ -202,8 +209,16 @@ export const GfTab: React.FC<GfTabProps> = ({ records, projectName = "project" }
         )}
       </div>
 
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        itemLabel="classified URL(s)"
+      />
       <div className="px-4 py-2 border-t border-dark-border bg-dark-bg/30 text-[10px] font-mono text-slate-600">
-        {filtered.length} / {records.length} classified URLs · {Object.keys(grouped).length} categories
+        {records.length} total classified URLs · {allCategories.length} categories
       </div>
     </div>
   );

@@ -32,10 +32,10 @@ interface Project {
     tool_overrides?: Record<string, number>;
   };
   custom_headers?: Record<string, string>;
+  phase_switches?: Record<string, { enabled?: boolean; time_cap_seconds?: number }>;
   schedule?: {
     enabled?: boolean;
     interval_hours?: number;
-    scan_mode?: string;
     last_run?: string | null;
     next_run?: string | null;
   };
@@ -328,11 +328,10 @@ const MainDashboard: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("dashboard");
-  const [initialInventoryTab, setInitialInventoryTab] = useState<"assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei" | "historical_urls" | "js_files" | "screenshots">("assets");
+  const [initialInventoryTab, setInitialInventoryTab] = useState<"assets" | "dns" | "takeovers" | "content_discovery" | "api_endpoints" | "normalized_urls" | "gf" | "nuclei" | "recon_info" | "secrets" | "cloud_buckets" | "historical_urls" | "js_files" | "screenshots">("assets");
   const [initialSeverityFilter, setInitialSeverityFilter] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isReconnect, setIsReconnect] = useState(false);
-  const [scanMode, setScanMode] = useState<"fast" | "deep">("fast");
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [latestDiff, setLatestDiff] = useState<ScanDiffDoc | null>(null);
 
@@ -1025,9 +1024,15 @@ const MainDashboard: React.FC = () => {
           );
         }
         if (hasPipelineComplete || (activeJobFromServer && activeJobFromServer.status === "completed")) {
+          nextCurrentStage = "completed";
           Object.keys(nextProviderStatus).forEach((key) => {
             if (nextProviderStatus[key] === "RUNNING" || nextProviderStatus[key] === "PENDING") {
               nextProviderStatus[key] = "COMPLETED";
+            }
+          });
+          Object.keys(nextStages).forEach((key) => {
+            if (nextStages[key] !== "SKIPPED") {
+              nextStages[key] = "COMPLETED";
             }
           });
         }
@@ -1113,7 +1118,7 @@ const MainDashboard: React.FC = () => {
     if (!activeProject) return;
     try {
       const job = await apiCall(
-        `/jobs/project/${activeProject.id}/provider/${encodeURIComponent(providerName)}?scan_mode=${scanMode}`,
+        `/jobs/project/${activeProject.id}/provider/${encodeURIComponent(providerName)}`,
         { method: "POST" }
       );
       setIsReconnect(false);
@@ -1765,8 +1770,9 @@ const MainDashboard: React.FC = () => {
                   
                   return {
                     ...prev,
+                    jobId: (data.status === "completed" || data.status === "failed" || data.status === "stopped") ? null : prev.jobId,
                     activeJobObject: prev.activeJobObject
-                      ? { ...prev.activeJobObject, status: data.status }
+                      ? { ...prev.activeJobObject, status: data.status, finished_at: new Date().toISOString() }
                       : null,
                     stages: nextStageData.stages,
                     currentStage: nextStageData.currentStage,
@@ -2162,27 +2168,9 @@ const MainDashboard: React.FC = () => {
             </div>
 
             <div className="flex items-center space-x-2">
-              <div className="flex items-center space-x-1 bg-dark-bg border border-dark-border rounded p-0.5 font-mono text-[10px]">
-                <button
-                  onClick={() => setScanMode("fast")}
-                  className={`px-2 py-1 rounded transition-colors cursor-pointer uppercase font-bold ${
-                    scanMode === "fast" 
-                      ? "bg-cyber-accent text-dark-bg font-extrabold" 
-                      : "text-slate-400 hover:text-slate-200 font-semibold"
-                  }`}
-                >
-                  Fast Scan
-                </button>
-                <button
-                  onClick={() => setScanMode("deep")}
-                  className={`px-2 py-1 rounded transition-colors cursor-pointer uppercase font-bold ${
-                    scanMode === "deep" 
-                      ? "bg-red-500 text-white font-extrabold" 
-                      : "text-slate-400 hover:text-slate-200 font-semibold"
-                  }`}
-                >
-                  Deep Scan
-                </button>
+              <div className="flex items-center space-x-1.5 bg-dark-bg border border-dark-border rounded px-2.5 py-1.5 font-mono text-[10px] text-slate-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyber-accent" />
+                <span className="uppercase font-bold tracking-wider">Full Scan</span>
               </div>
 
               <button
@@ -2262,9 +2250,10 @@ const MainDashboard: React.FC = () => {
                 normalizedUrlRecords={normalizedUrlRecords}
                 gfRecords={gfRecords}
                 contentPathRecords={contentPathRecords}
-                latestScanTime={stats?.last_scan_time || activeJob?.started_at}
+                latestScanTime={activeJob?.started_at || scanState.lastCompletedJobObject?.started_at || stats?.last_scan_time}
                 initialTab={initialInventoryTab}
                 initialSeverityFilter={initialSeverityFilter}
+                onRefresh={fetchProjectData}
               />
             )}
           </div>

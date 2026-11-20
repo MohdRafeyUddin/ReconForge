@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import platform
 import subprocess
 from typing import AsyncGenerator, Dict, Any, List
@@ -24,8 +25,39 @@ class ChaosProvider(BaseProvider):
         yield {"type": "log", "message": msg}
 
         is_windows = platform.system().lower() == "windows"
-        tool_path = self.detect_tool("chaos")
 
+        chaos_key = (
+            os.getenv("PDCP_API_KEY")
+            or os.getenv("CHAOS_KEY")
+            or os.getenv("PROJECTDISCOVERY_API_KEY")
+        )
+        if not chaos_key:
+            try:
+                from app.core.provider_keys import load_provider_keys
+                chaos_key = load_provider_keys().get("chaos")
+            except Exception:
+                chaos_key = None
+
+        if not chaos_key:
+            skip_msg = "[*] Chaos API key not configured. Skipping Chaos dataset query."
+            logger.info(skip_msg)
+            yield {"type": "log", "message": skip_msg}
+            yield {
+                "type": "stage_skipped",
+                "stage": "Passive Discovery (chaos)",
+                "tool": "chaos",
+                "reason": "no_api_key",
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": "chaos",
+                "status": "SKIPPED",
+                "count": 0,
+                "reason": "no_api_key",
+            }
+            return
+
+        tool_path = self.detect_tool("chaos")
         if not tool_path:
             err_msg = "Chaos binary not found (tool_missing: chaos)"
             logger.error(err_msg)
@@ -43,15 +75,20 @@ class ChaosProvider(BaseProvider):
             }
             return
 
+        from app.core.scope import get_root_domain
+
         for domain in seed_domains:
+            target_domain = get_root_domain(domain) or domain
+            key_args = ["-key", chaos_key] if chaos_key else []
             if is_windows:
                 executable = "wsl"
-                args = ["-e", tool_path, "-d", domain, "-silent"]
+                args = ["-e", tool_path, *key_args, "-d", target_domain, "-silent", "-duc"]
             else:
                 executable = tool_path
-                args = ["-d", domain, "-silent"]
+                args = [*key_args, "-d", target_domain, "-silent", "-duc"]
 
-            cmd_str = f"{executable} {' '.join(args)}"
+            safe_args = [a if a != chaos_key else "[REDACTED]" for a in args]
+            cmd_str = f"{executable} {' '.join(safe_args)}"
             exec_msg = f"[*] Executing command: {cmd_str}"
             logger.info(exec_msg)
             yield {"type": "log", "message": exec_msg}
@@ -66,6 +103,7 @@ class ChaosProvider(BaseProvider):
                 # Keep subprocess pattern consistent with other providers.
                 process = subprocess.Popen(
                     [executable, *args],
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,

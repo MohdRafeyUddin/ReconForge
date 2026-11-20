@@ -149,8 +149,16 @@ def get_executed_phases(job: Optional[Dict[str, Any]]) -> Set[str]:
     if not job:
         return set()
     phases = set(job.get("executed_phases") or [])
+    # New full runs record executed phases authoritatively. Legacy fast/deep
+    # jobs keep the old log-inference behaviour so their diffs still work.
+    is_legacy_job = str(job.get("scan_mode") or "").strip().lower() in ("fast", "deep")
+    explicit_phases = (job.get("executed_phases") is not None) and not is_legacy_job
     logs_list = job.get("logs") or []
     logs = " ".join(logs_list).lower()
+
+    # Targeted runs are not full pipeline runs; never infer phases for them.
+    if str(job.get("job_kind") or "").lower() == "targeted" or job.get("scan_mode") == "targeted":
+        return phases
 
     # Tool missing gating: if tool was missing or phase skipped, phase did NOT run
     if "tool_missing: ffuf" in logs or "tool_missing: feroxbuster" in logs or "skipping content discovery" in logs:
@@ -180,11 +188,11 @@ def get_executed_phases(job: Optional[Dict[str, Any]]) -> Set[str]:
         phases.add("takeover_crosscheck")
 
     # If no logs provided and no explicit phases, assume standard pipeline executed subdomain_discovery and port_scanning
-    if not logs_list and not phases:
+    if not explicit_phases and not logs_list and not phases:
         phases.add("subdomain_discovery")
         phases.add("port_scanning")
         phases.add("web_probing")
-    else:
+    elif not explicit_phases:
         if "skipping passive discovery" not in logs:
             phases.add("subdomain_discovery")
         if "skipping naabu" not in logs and ("naabu" in logs or "port scan" in logs or job.get("scan_mode") != "fast_no_ports"):
@@ -193,11 +201,44 @@ def get_executed_phases(job: Optional[Dict[str, Any]]) -> Set[str]:
             phases.add("web_probing")
         if "katana" in logs or "gau" in logs or "uro" in logs:
             phases.add("crawling")
-        if "subjs" in logs or "linkfinder" in logs:
+        if "subjs" in logs or "linkfinder" in logs or "jsluice" in logs or "js analysis" in logs:
             phases.add("js_analysis")
         if "nuclei" in logs or "dalfox" in logs or "openredirex" in logs:
             phases.add("vulnerability_scan")
+
+    # Stage 1 switches: a skipped-by-switch phase did NOT execute, even if the
+    # tool name appears in the skip line.
+    if "dns brute force & permutations disabled by project switch" in logs:
+        phases.discard("dns_bruteforce")
+    if "ffuf content discovery disabled by project switch" in logs:
+        phases.discard("content_discovery")
+    if "parameter discovery disabled by project switch" in logs:
+        phases.discard("param_discovery")
+    if "active scanners disabled by project switch" in logs:
+        phases.discard("vulnerability_scan")
+        phases.discard("tech_routing")
+    if "gowitness screenshots disabled by project switch" in logs:
+        phases.discard("screenshots")
     return phases
+
+
+def compute_modified_js_files(
+    current_js_meta: Dict[str, Dict[str, Any]],
+    prev_js_meta: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Returns JS files present in both scans whose SHA-256 changed."""
+    modified: List[Dict[str, Any]] = []
+    for js_url in sorted(set(current_js_meta.keys()) & set(prev_js_meta.keys())):
+        old_hash = prev_js_meta[js_url].get("hash")
+        new_hash = current_js_meta[js_url].get("hash")
+        if old_hash and new_hash and old_hash != new_hash:
+            modified.append({
+                "url": js_url,
+                "host": current_js_meta[js_url].get("host") or prev_js_meta[js_url].get("host") or "",
+                "old_hash": old_hash,
+                "new_hash": new_hash,
+            })
+    return modified
 
 
 def compute_finding_key(template_id: str, matched_at: str, host: str) -> str:
@@ -316,6 +357,11 @@ async def compute_and_save_diff(
     both_ran_content = bool("content_discovery" in curr_phases and "content_discovery" in prev_phases)
     both_ran_api = bool("api_surface" in curr_phases and "api_surface" in prev_phases)
     both_ran_params = bool("param_discovery" in curr_phases and "param_discovery" in prev_phases)
+    both_ran_js = bool("js_analysis" in curr_phases and "js_analysis" in prev_phases)
+    both_ran_vuln = bool("vulnerability_scan" in curr_phases and "vulnerability_scan" in prev_phases)
+    both_ran_secrets = bool("secret_scan" in curr_phases and "secret_scan" in prev_phases)
+    both_ran_buckets = bool("cloud_enum" in curr_phases and "cloud_enum" in prev_phases)
+    both_ran_screenshots = bool("screenshots" in curr_phases and "screenshots" in prev_phases)
 
     # 3. Query all assets for this project
     all_assets_cursor = db.assets.find({"project_id": project_id})
@@ -335,6 +381,8 @@ async def compute_and_save_diff(
 
     current_js_files: Set[str] = set()
     prev_js_files: Set[str] = set()
+    current_js_meta: Dict[str, Dict[str, Any]] = {}
+    prev_js_meta: Dict[str, Dict[str, Any]] = {}
 
     current_findings: List[Dict[str, Any]] = []
     prev_finding_keys: Set[str] = set()
@@ -350,6 +398,18 @@ async def compute_and_save_diff(
 
     current_params: Dict[str, Dict[str, Any]] = {}
     prev_params: Dict[str, Dict[str, Any]] = {}
+
+    current_secrets: Dict[str, Dict[str, Any]] = {}
+    prev_secrets: Dict[str, Dict[str, Any]] = {}
+
+    current_buckets: Dict[str, Dict[str, Any]] = {}
+    prev_buckets: Dict[str, Dict[str, Any]] = {}
+
+    current_recon_info: Dict[str, Dict[str, Any]] = {}
+    prev_recon_info: Dict[str, Dict[str, Any]] = {}
+
+    current_screenshots: Dict[str, Dict[str, Any]] = {}
+    prev_screenshots: Dict[str, Dict[str, Any]] = {}
 
     for doc in all_assets:
         a_type = doc.get("type", "subdomain")
@@ -428,13 +488,29 @@ async def compute_and_save_diff(
                 if fp and (domain not in prev_fingerprints or doc.get("scan_id") == prev_job_id):
                     prev_fingerprints[domain] = fp
 
-        # 3b. JS Files
+        # 3b. JS Files (URL + content hash for modified-JS detection)
         elif a_type == "js_file":
-            js_url = doc.get("metadata", {}).get("url") or val
+            js_meta = doc.get("metadata") or {}
+            js_url = js_meta.get("url") or val
+            if not js_url:
+                continue
+            current_hash = js_meta.get("hash") or js_meta.get("sha256")
+            previous_hash = js_meta.get("previous_hash") or js_meta.get("previous_sha256")
+            js_host = js_meta.get("host") or (urlparse(js_url).hostname or "")
             if seen_in_current:
                 current_js_files.add(js_url)
+                current_js_meta[js_url] = {
+                    "url": js_url,
+                    "host": js_host,
+                    "hash": current_hash,
+                }
             if seen_in_prev and not (first_seen >= scan_started_at):
                 prev_js_files.add(js_url)
+                prev_js_meta[js_url] = {
+                    "url": js_url,
+                    "host": js_host,
+                    "hash": previous_hash or current_hash,
+                }
 
         # 3c. Findings
         elif a_type == "finding":
@@ -528,6 +604,115 @@ async def compute_and_save_diff(
             if seen_in_prev and not (first_seen >= scan_started_at):
                 prev_params[p_key] = p_item
 
+        # 3h. Secret findings (masked values only)
+        elif a_type in ("secret_finding", "secret"):
+            meta = doc.get("metadata") or {}
+            s_key = meta.get("identity_key") or doc.get("value") or val
+            s_item = {
+                "key": s_key,
+                "secret_type": meta.get("secret_type") or meta.get("detector") or "secret",
+                "host": meta.get("host") or doc.get("domain") or "",
+                "url": meta.get("location_url") or meta.get("url") or "",
+                "location": meta.get("location") or "",
+                "line": meta.get("line") or 0,
+                "masked_preview": meta.get("masked_preview") or meta.get("prefix") or "",
+                "severity": meta.get("severity") or "medium",
+            }
+            if seen_in_current:
+                current_secrets[s_key] = s_item
+            if seen_in_prev and not (first_seen >= scan_started_at):
+                prev_secrets[s_key] = s_item
+
+        # 3i. Cloud buckets
+        elif a_type in ("bucket", "cloud_bucket"):
+            meta = doc.get("metadata") or {}
+            b_key = doc.get("value") or meta.get("url") or val
+            b_item = {
+                "value": b_key,
+                "url": meta.get("url") or b_key,
+                "host": meta.get("host") or doc.get("domain") or "",
+                "bucket_name": meta.get("bucket_name") or "",
+                "provider": meta.get("provider") or "",
+                "public": bool(meta.get("public")),
+                "in_scope_keyword": meta.get("in_scope_keyword") or meta.get("tied_to_keyword") or "",
+            }
+            if seen_in_current:
+                current_buckets[b_key] = b_item
+            if seen_in_prev and not (first_seen >= scan_started_at):
+                prev_buckets[b_key] = b_item
+
+        # 3j. Info-level Nuclei recon notes (never vulnerabilities)
+        elif a_type == "recon_info":
+            meta = doc.get("metadata") or {}
+            r_key = doc.get("value") or f"{meta.get('template_id')}:{meta.get('matched_url')}:{meta.get('host')}"
+            r_item = {
+                "key": r_key,
+                "template_id": meta.get("template_id") or "",
+                "template_name": meta.get("template_name") or "",
+                "matched_url": meta.get("matched_url") or "",
+                "host": meta.get("host") or doc.get("domain") or "",
+                "tags": meta.get("tags") or [],
+                "severity": "info",
+            }
+            if seen_in_current:
+                current_recon_info[r_key] = r_item
+            if seen_in_prev and not (first_seen >= scan_started_at):
+                prev_recon_info[r_key] = r_item
+
+        # 3k. Screenshots (page hash changes)
+        elif a_type == "screenshot":
+            meta = doc.get("metadata") or {}
+            shot_url = meta.get("url") or doc.get("value") or val
+            page_hash = meta.get("page_hash") or meta.get("screenshot_hash") or ""
+            shot_item = {
+                "url": shot_url,
+                "host": meta.get("host") or doc.get("domain") or "",
+                "page_hash": page_hash,
+                "screenshot_path": meta.get("screenshot_path") or "",
+                "filename": meta.get("filename") or "",
+                "run_id": meta.get("run_id") or "",
+            }
+            if seen_in_current:
+                current_screenshots[shot_url] = shot_item
+            if seen_in_prev and not (first_seen >= scan_started_at):
+                prev_screenshots[shot_url] = shot_item
+
+    # Screenshot per-run history: run_assets keeps every run's page hash, so
+    # compare current vs previous even though the assets document is upserted.
+    async def _load_run_screenshots(job_id: Any) -> Dict[str, Dict[str, Any]]:
+        if not job_id:
+            return {}
+        found: Dict[str, Dict[str, Any]] = {}
+        try:
+            cursor = db.run_assets.find({
+                "project_id": project_id,
+                "job_id": str(job_id),
+                "type": "screenshot",
+            })
+            async for shot in cursor:
+                meta = shot.get("metadata") or {}
+                shot_url = meta.get("url") or shot.get("value") or ""
+                if not shot_url:
+                    continue
+                found[shot_url] = {
+                    "url": shot_url,
+                    "host": meta.get("host") or shot.get("domain") or "",
+                    "page_hash": meta.get("page_hash") or meta.get("screenshot_hash") or "",
+                    "screenshot_path": meta.get("screenshot_path") or "",
+                    "filename": meta.get("filename") or "",
+                    "run_id": str(job_id),
+                }
+        except Exception:
+            pass
+        return found
+
+    current_run_shots = await _load_run_screenshots(current_job_id)
+    prev_run_shots = await _load_run_screenshots(prev_job_id)
+    if current_run_shots:
+        current_screenshots = current_run_shots
+    if prev_run_shots:
+        prev_screenshots = prev_run_shots
+
     # Reset consecutive_absent_count for subdomains seen in current scan
     for dom in current_subdomains:
         doc = current_subdomains[dom]
@@ -554,12 +739,18 @@ async def compute_and_save_diff(
         closed_ports = []
         changed_hosts = []
         new_js_files = sorted(list(current_js_files))
+        modified_js_files = []
         new_findings = current_findings
         # Initial scan: baseline new asset types — do not report as new when no earlier completed scan executed that phase
         new_content_paths = []
         new_api_specs = []
         new_graphql_endpoints = []
         new_params = []
+        # Phase 8 additions are baselined on first appearance.
+        new_secret_findings = []
+        new_buckets = []
+        new_recon_info = []
+        changed_screenshots = []
     else:
         # Comparison vs previous scan
         new_subdomains = sorted(list(set(current_subdomains.keys()) - set(prev_subdomains.keys())))
@@ -651,11 +842,19 @@ async def compute_and_save_diff(
                     "new_fingerprint": new_fp,
                 })
 
-        # JS Files
-        new_js_files = sorted(list(current_js_files - prev_js_files))
+        # JS Files — diff only if both scans ran JS analysis
+        if both_ran_js:
+            new_js_files = sorted(list(current_js_files - prev_js_files))
+            modified_js_files = compute_modified_js_files(current_js_meta, prev_js_meta)
+        else:
+            new_js_files = []
+            modified_js_files = []
 
-        # New Findings (deduplicated against findings from previous scan)
-        new_findings = [f for f in current_findings if f.get("key") not in prev_finding_keys]
+        # New Findings — diff only if both scans ran the vulnerability phase
+        if both_ran_vuln:
+            new_findings = [f for f in current_findings if f.get("key") not in prev_finding_keys]
+        else:
+            new_findings = []
 
         # Content Paths: diff only if both scans ran content_discovery
         if both_ran_content:
@@ -689,6 +888,43 @@ async def compute_and_save_diff(
         else:
             new_params = []
 
+        # Phase 8: only diff types whose phase ran in BOTH scans.
+        if both_ran_secrets:
+            new_secret_findings = [
+                current_secrets[k]
+                for k in sorted(set(current_secrets.keys()) - set(prev_secrets.keys()))
+            ]
+        else:
+            new_secret_findings = []
+
+        if both_ran_buckets:
+            new_buckets = [
+                current_buckets[k]
+                for k in sorted(set(current_buckets.keys()) - set(prev_buckets.keys()))
+            ]
+        else:
+            new_buckets = []
+
+        if both_ran_vuln:
+            new_recon_info = [
+                current_recon_info[k]
+                for k in sorted(set(current_recon_info.keys()) - set(prev_recon_info.keys()))
+            ]
+        else:
+            new_recon_info = []
+
+        changed_screenshots = []
+        if both_ran_screenshots:
+            for shot_url in sorted(set(current_screenshots.keys()) & set(prev_screenshots.keys())):
+                old_hash = prev_screenshots[shot_url].get("page_hash")
+                new_hash = current_screenshots[shot_url].get("page_hash")
+                if old_hash and new_hash and old_hash != new_hash:
+                    changed_screenshots.append({
+                        **current_screenshots[shot_url],
+                        "old_hash": old_hash,
+                        "new_hash": new_hash,
+                    })
+
     diff_data = {
         "new_subdomains": new_subdomains,
         "stale_subdomains": stale_subdomains,
@@ -697,11 +933,16 @@ async def compute_and_save_diff(
         "closed_ports": closed_ports,
         "changed_hosts": changed_hosts,
         "new_js_files": new_js_files,
+        "modified_js_files": modified_js_files,
         "new_findings": new_findings,
         "new_content_paths": new_content_paths,
         "new_api_specs": new_api_specs,
         "new_graphql_endpoints": new_graphql_endpoints,
         "new_params": new_params,
+        "new_secret_findings": new_secret_findings,
+        "new_buckets": new_buckets,
+        "new_recon_info": new_recon_info,
+        "changed_screenshots": changed_screenshots,
     }
 
     summary = {
@@ -712,11 +953,16 @@ async def compute_and_save_diff(
         "closed_ports_count": len(closed_ports),
         "changed_hosts_count": len(changed_hosts),
         "new_js_files_count": len(new_js_files),
+        "modified_js_files_count": len(modified_js_files),
         "new_findings_count": len(new_findings),
         "new_content_paths_count": len(new_content_paths),
         "new_api_specs_count": len(new_api_specs),
         "new_graphql_endpoints_count": len(new_graphql_endpoints),
         "new_params_count": len(new_params),
+        "new_secret_findings_count": len(new_secret_findings),
+        "new_buckets_count": len(new_buckets),
+        "new_recon_info_count": len(new_recon_info),
+        "changed_screenshots_count": len(changed_screenshots),
         "is_initial_scan": prev_job is None,
         "scan_mode": current_scan_mode,
         "is_reliable": is_scan_reliable,
@@ -733,11 +979,16 @@ async def compute_and_save_diff(
         + summary["closed_ports_count"]
         + summary["changed_hosts_count"]
         + summary["new_js_files_count"]
+        + summary["modified_js_files_count"]
         + summary["new_findings_count"]
         + summary["new_content_paths_count"]
         + summary["new_api_specs_count"]
         + summary["new_graphql_endpoints_count"]
         + summary["new_params_count"]
+        + summary["new_secret_findings_count"]
+        + summary["new_buckets_count"]
+        + summary["new_recon_info_count"]
+        + summary["changed_screenshots_count"]
     )
 
     diff_doc = {

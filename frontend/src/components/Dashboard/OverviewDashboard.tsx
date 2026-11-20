@@ -13,7 +13,11 @@ import { HighlightText, ExactMatchBadge, getExactMatchFields } from "../Common/H
 interface DashboardStats {
   total_assets: number;
   total_subdomains: number;
+  resolved_hosts?: number;
+  passive_candidates?: number;
   live_hosts: number;
+  urls_total?: number;
+  urls?: Record<string, number>;
   open_ports_count: number;
   last_scan_time: string | null;
   last_scan_duration?: string;
@@ -418,10 +422,31 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     URL.revokeObjectURL(url);
   };
 
+  // Canonical host definitions: host assets only; live requires an HTTP response.
+  const isHostAsset = (a: Asset) => ["subdomain", "host"].includes((a.type || "").toLowerCase());
+  const isPassiveCandidate = (a: Asset) =>
+    ["candidate", "passive_candidate"].includes((a.status || "").toLowerCase()) ||
+    Boolean((a.metadata as any)?.passive_candidate);
+  const hasHttpResponse = (a: Asset) =>
+    (a.metadata as any)?.status_code !== undefined && (a.metadata as any)?.status_code !== null ||
+    (a as any).status_code !== undefined && (a as any).status_code !== null;
+  const isResolvedHost = (a: Asset) =>
+    isHostAsset(a) && !isPassiveCandidate(a) &&
+    (a.status === "live" || a.status === "resolved" || hasHttpResponse(a) ||
+      Boolean((a as any).resolved_ip) || Boolean((a.metadata as any)?.dnsx));
+  const isLiveHttpHost = (a: Asset) =>
+    isHostAsset(a) && a.status === "live" && hasHttpResponse(a) && !isPassiveCandidate(a);
+
+  const URL_ASSET_TYPES = new Set([
+    "historical_url", "historical_dead", "unprobed_url", "uro_url", "gf_url",
+    "content_path", "js_file", "api_spec", "graphql_endpoint", "param", "screenshot",
+  ]);
+
   // Derive main dashboard stats dynamically from assets
   const derivedTotalAssets = assets.length;
-  const derivedTotalSubdomains = assets.filter((a) => a.type === "subdomain").length;
-  const derivedLiveHosts = assets.filter((a) => a.status === "live").length;
+  const derivedResolvedHosts = assets.filter(isResolvedHost).length;
+  const derivedPassiveCandidates = assets.filter((a) => isHostAsset(a) && isPassiveCandidate(a)).length;
+  const derivedLiveHosts = assets.filter(isLiveHttpHost).length;
 
   // Derive provider counts dynamically from assets array
   const pc = {
@@ -439,18 +464,10 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
     (asset) => (asset.open_ports?.length ?? 0) > 0
   ).length;
 
-  const totalUrlsDiscovered = assets.reduce(
-    (total, asset) => total + (
-      // Flat URL list stored by Katana provider
-      (asset.metadata?.katana?.urls?.length || 0) +
-      // Structured sub-keys stored by some katana versions
-      (asset.metadata?.katana?.endpoints?.length || 0) +
-      (asset.metadata?.katana?.js_files?.length || 0) +
-      (asset.metadata?.katana?.forms?.length || 0) +
-      (asset.metadata?.katana?.third_party_urls?.length || 0)
-    ),
-    0
-  );
+  // URL counts are URL-type assets, kept separate from host counts.
+  const totalUrlsDiscovered = assets.filter(
+    (asset) => URL_ASSET_TYPES.has((asset.type || "").toLowerCase())
+  ).length;
 
   const criticalCount = assets.reduce((t, a) => t + (a.metadata?.nuclei?.findings?.filter(f => (f.severity || "").toLowerCase() === "critical").length || 0), 0);
   const highCount = assets.reduce((t, a) => t + (a.metadata?.nuclei?.findings?.filter(f => (f.severity || "").toLowerCase() === "high").length || 0), 0);
@@ -479,7 +496,7 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
   hostsWithRisk.sort((a, b) => b.priorityScore - a.priorityScore);
   const topRiskAssets = hostsWithRisk.filter(h => h.risk).slice(0, 5);
   const topHuntTargets = assets
-    .filter((a) => (a as any).hunt_priority !== undefined || a.status === "live")
+    .filter(isLiveHttpHost)
     .sort((a, b) => (((b as any).hunt_priority ?? 0) - ((a as any).hunt_priority ?? 0)))
     .slice(0, 5);
 
@@ -934,17 +951,17 @@ export const OverviewDashboard: React.FC<OverviewDashboardProps> = ({
           glowClass="glow-blue"
         />
         <StatCard
-          title="Discovered Subdomains"
-          value={derivedTotalSubdomains > 0 ? derivedTotalSubdomains : "-"}
-          subtext="Target child hosts mapped"
+          title="Resolved Hosts"
+          value={derivedResolvedHosts > 0 ? derivedResolvedHosts : "-"}
+          subtext={`${derivedPassiveCandidates} passive candidate(s)`}
           icon={<Server className="w-6 h-6" />}
           colorClass="text-cyber-accent"
           glowClass="glow-cyan"
         />
         <StatCard
-          title="Live Probed Hosts"
+          title="Live HTTP Hosts"
           value={derivedLiveHosts > 0 ? derivedLiveHosts : "-"}
-          subtext="Hosts responding to requests"
+          subtext="Hosts with an HTTP response"
           icon={<Radio className="w-6 h-6 animate-pulse" />}
           colorClass="text-cyber-success"
           glowClass="glow-cyan"

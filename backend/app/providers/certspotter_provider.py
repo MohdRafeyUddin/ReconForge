@@ -29,10 +29,23 @@ class CertspotterProvider(BaseProvider):
         discovered_count = 0
         seen_hosts: Set[str] = set()
 
+        import os
+        api_key = None
+        try:
+            from app.core.provider_keys import load_provider_keys
+            api_key = load_provider_keys().get("certspotter")
+        except Exception:
+            pass
+        if not api_key:
+            api_key = os.getenv("CERTSPOTTER_API_KEY") or os.getenv("CERTSPOTTER_KEY")
+
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ReconForge/1.0",
             "Accept": "application/json",
         }
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key.strip()}"
+            yield {"type": "log", "message": "[*] CertSpotter: using configured API key."}
 
         async with httpx.AsyncClient(timeout=25.0, headers=headers, follow_redirects=True) as client:
             for domain in seed_domains:
@@ -44,19 +57,64 @@ class CertspotterProvider(BaseProvider):
                 yield {"type": "log", "message": f"[*] CertSpotter: querying {clean_domain}..."}
 
                 data = None
-                try:
-                    resp = await client.get(url)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                    elif resp.status_code == 429:
-                        yield {"type": "log", "message": f"[!] CertSpotter rate limit hit (HTTP 429) for {clean_domain}"}
-                    else:
-                        yield {"type": "log", "message": f"[!] CertSpotter returned HTTP {resp.status_code} for {clean_domain}"}
-                except Exception as exc:
-                    logger.warning(f"CertSpotter request failed for {clean_domain}: {exc}")
-                    yield {"type": "log", "message": f"[-] CertSpotter connection failed for {clean_domain}: {exc}"}
+                last_status = None
+                last_error = None
+                domain_found = 0
 
-                if not data or not isinstance(data, list):
+                for attempt in range(1, 4):
+                    try:
+                        resp = await client.get(url)
+                        last_status = resp.status_code
+                        yield {"type": "log", "message": f"[*] CertSpotter returned HTTP {resp.status_code} for {clean_domain} (attempt {attempt}/3)"}
+
+                        if resp.status_code == 200:
+                            try:
+                                data = resp.json()
+                            except Exception:
+                                data = []
+                            break
+                        elif resp.status_code in (500, 502, 503, 504):
+                            if attempt < 3:
+                                backoff = 2 ** (attempt - 1)
+                                yield {"type": "log", "message": f"[!] CertSpotter returned HTTP {resp.status_code} (attempt {attempt}/3), retrying in {backoff}s..."}
+                                await asyncio.sleep(backoff)
+                        elif resp.status_code == 429:
+                            yield {"type": "log", "message": f"[!] CertSpotter rate limit hit (HTTP 429) for {clean_domain}"}
+                            break
+                        else:
+                            break
+                    except Exception as exc:
+                        last_error = exc
+                        if attempt < 3:
+                            backoff = 2 ** (attempt - 1)
+                            yield {"type": "log", "message": f"[!] CertSpotter connection/timeout on attempt {attempt}/3: {exc}. Retrying in {backoff}s..."}
+                            await asyncio.sleep(backoff)
+                        else:
+                            logger.warning(f"CertSpotter request failed for {clean_domain}: {exc}")
+
+                # Report "request failed (status N)" separately from "0 results"
+                if data is None:
+                    if last_status is not None and last_status != 200:
+                        yield {
+                            "type": "stage_error",
+                            "stage": "certspotter",
+                            "tool": "certspotter",
+                            "error": f"request failed (status {last_status})",
+                            "reason": f"request failed (status {last_status})",
+                        }
+                        yield {"type": "log", "message": f"[-] CertSpotter request failed (status {last_status}) for {clean_domain}"}
+                    elif last_error is not None:
+                        yield {
+                            "type": "stage_error",
+                            "stage": "certspotter",
+                            "tool": "certspotter",
+                            "error": "request failed (timeout/connection error)",
+                            "reason": str(last_error),
+                        }
+                        yield {"type": "log", "message": f"[-] CertSpotter request failed (timeout/connection error) for {clean_domain}: {last_error}"}
+                    continue
+
+                if not isinstance(data, list):
                     continue
 
                 for entry in data:
@@ -75,6 +133,7 @@ class CertspotterProvider(BaseProvider):
 
                         seen_hosts.add(candidate)
                         discovered_count += 1
+                        domain_found += 1
                         yield {
                             "type": "asset",
                             "data": {
@@ -87,6 +146,9 @@ class CertspotterProvider(BaseProvider):
                                 "sources": ["certspotter"],
                             },
                         }
+
+                if domain_found == 0:
+                    yield {"type": "log", "message": f"[*] CertSpotter returned 0 results for {clean_domain}."}
 
         yield {
             "type": "scan_summary",

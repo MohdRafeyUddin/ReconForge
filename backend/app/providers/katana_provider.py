@@ -315,7 +315,7 @@ class KatanaProvider(BaseProvider):
                             continue
 
                         # Extract discovered URL from record["request"]["endpoint"]
-                        url = record.get("request", {}).get("endpoint")
+                        url = (record.get("request") or {}).get("endpoint")
                         if not url:
                             continue
 
@@ -379,7 +379,7 @@ class KatanaProvider(BaseProvider):
                                 crawled_data[matched_host]["classified_endpoints"][category].append(norm_url)
 
                             # Endpoint detection (HTTP Method + Path)
-                            method = record.get("request", {}).get("method") or "GET"
+                            method = (record.get("request") or {}).get("method") or "GET"
                             path = parsed_url.path or "/"
                             if parsed_url.query:
                                 path += f"?{parsed_url.query}"
@@ -400,7 +400,7 @@ class KatanaProvider(BaseProvider):
                             continue
 
                         # Parse HTML response body from record["response"]["body"]
-                        body = record.get("response", {}).get("body") or ""
+                        body = (record.get("response") or {}).get("body") or ""
                         if body:
                             # Extract JavaScript files
                             js_matches = re.findall(r'<script\s+[^>]*src=["\']([^"\']+)["\']', body, re.IGNORECASE)

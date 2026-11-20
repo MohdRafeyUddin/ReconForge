@@ -98,8 +98,8 @@ class TakeoverCrossCheckProvider(BaseProvider):
         yield {"type": "log", "message": "[*] Running Subzy takeover scanner..."}
         async for ev in subzy.discover(subdomains):
             if ev.get("type") == "asset":
-                data = ev.get("data", {})
-                meta = data.get("metadata", {}).get("subzy", {})
+                data = ev.get("data") or {}
+                meta = (data.get("metadata") or {}).get("subzy") or {}
                 host = data.get("domain", "")
                 if meta.get("takeover_status") == "Vulnerable":
                     entry = _get_or_create(host)
@@ -131,6 +131,9 @@ class TakeoverCrossCheckProvider(BaseProvider):
                     nuclei_bin, "-l", wsl_targets,
                     "-tags", "takeover", "-silent", "-jsonl",
                 ]
+                # Tags-only takeover pass: never add -as (no automatic scanning).
+                assert "-as" not in cmd
+                yield {"type": "log", "message": self.format_cmd_log(cmd)}
                 await check_job_status()
                 proc = subprocess.Popen(
                     cmd,
@@ -160,10 +163,10 @@ class TakeoverCrossCheckProvider(BaseProvider):
                             entry = _get_or_create(nuc_host)
                             if "nuclei" not in entry["tools_agreed"]:
                                 entry["tools_agreed"].append("nuclei")
-                            tmpl = nuc.get("template-id") or nuc.get("info", {}).get("name") or "Nuclei takeover"
+                            tmpl = nuc.get("template-id") or (nuc.get("info") or {}).get("name") or "Nuclei takeover"
                             entry["evidence"].append(f"Nuclei takeover template: {tmpl}")
                             if not entry["service"]:
-                                entry["service"] = nuc.get("info", {}).get("name", "Unknown Service")
+                                entry["service"] = (nuc.get("info") or {}).get("name", "Unknown Service")
                     except Exception:
                         continue
             finally:

@@ -44,25 +44,62 @@ class CrtshProvider(BaseProvider):
                 yield {"type": "log", "message": f"[*] crt.sh: querying {clean_domain}..."}
 
                 data = None
-                for attempt in range(1, 3):
+                last_status = None
+                last_error = None
+                domain_found = 0
+
+                for attempt in range(1, 4):
                     try:
                         resp = await client.get(url)
+                        last_status = resp.status_code
+                        yield {"type": "log", "message": f"[*] crt.sh returned HTTP {resp.status_code} for {clean_domain} (attempt {attempt}/3)"}
+
                         if resp.status_code == 200:
-                            data = resp.json()
+                            try:
+                                data = resp.json()
+                            except Exception as json_err:
+                                data = []
                             break
-                        elif resp.status_code in (502, 503, 504):
-                            yield {"type": "log", "message": f"[!] crt.sh returned HTTP {resp.status_code} (attempt {attempt}/2), retrying..."}
-                            await asyncio.sleep(2 * attempt)
+                        elif resp.status_code in (500, 502, 503, 504):
+                            if attempt < 3:
+                                backoff = 2 ** (attempt - 1)
+                                yield {"type": "log", "message": f"[!] crt.sh returned HTTP {resp.status_code} (attempt {attempt}/3), retrying in {backoff}s..."}
+                                await asyncio.sleep(backoff)
                         else:
-                            yield {"type": "log", "message": f"[!] crt.sh returned HTTP {resp.status_code} for {clean_domain}"}
+                            # 4xx or unexpected non-5xx
                             break
                     except Exception as exc:
-                        if attempt == 2:
+                        last_error = exc
+                        if attempt < 3:
+                            backoff = 2 ** (attempt - 1)
+                            yield {"type": "log", "message": f"[!] crt.sh connection/timeout on attempt {attempt}/3: {exc}. Retrying in {backoff}s..."}
+                            await asyncio.sleep(backoff)
+                        else:
                             logger.warning(f"crt.sh request failed for {clean_domain}: {exc}")
-                            yield {"type": "log", "message": f"[-] crt.sh connection failed for {clean_domain}: {exc}"}
-                        await asyncio.sleep(1.5)
 
-                if not data or not isinstance(data, list):
+                # Report "request failed (status N)" separately from "0 results"
+                if data is None:
+                    if last_status is not None and last_status != 200:
+                        yield {
+                            "type": "stage_error",
+                            "stage": "crtsh",
+                            "tool": "crtsh",
+                            "error": f"request failed (status {last_status})",
+                            "reason": f"request failed (status {last_status})",
+                        }
+                        yield {"type": "log", "message": f"[-] crt.sh request failed (status {last_status}) for {clean_domain}"}
+                    elif last_error is not None:
+                        yield {
+                            "type": "stage_error",
+                            "stage": "crtsh",
+                            "tool": "crtsh",
+                            "error": "request failed (timeout/connection error)",
+                            "reason": str(last_error),
+                        }
+                        yield {"type": "log", "message": f"[-] crt.sh request failed (timeout/connection error) for {clean_domain}: {last_error}"}
+                    continue
+
+                if not isinstance(data, list):
                     continue
 
                 for entry in data:
@@ -82,6 +119,7 @@ class CrtshProvider(BaseProvider):
 
                         seen_hosts.add(candidate)
                         discovered_count += 1
+                        domain_found += 1
                         yield {
                             "type": "asset",
                             "data": {
@@ -94,6 +132,9 @@ class CrtshProvider(BaseProvider):
                                 "sources": ["crtsh"],
                             },
                         }
+
+                if domain_found == 0:
+                    yield {"type": "log", "message": f"[*] crt.sh returned 0 results for {clean_domain}."}
 
         yield {
             "type": "scan_summary",

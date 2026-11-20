@@ -10,6 +10,8 @@
     "no_waf_or_cdn": 10,
     "high_value_technology": 20,
     "has_js_endpoints": 10,
+    "has_exposed_secrets": 25,
+    "has_open_bucket": 20,
     "many_historical_urls": 10
   },
   "caps": {
@@ -23,6 +25,8 @@
     "no_waf_or_cdn": 10,
     "high_value_technology": 25,
     "has_js_endpoints": 10,
+    "has_exposed_secrets": 25,
+    "has_open_bucket": 25,
     "many_historical_urls": 10
   },
   "sensitive_keywords": [

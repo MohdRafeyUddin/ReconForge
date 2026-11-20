@@ -6,6 +6,7 @@ import subprocess
 import time
 from typing import AsyncGenerator, Dict, Any, List
 from urllib.parse import urlparse
+from app.core.redaction import redact_text
 from app.providers.base import BaseProvider
 
 logger = logging.getLogger("reconforge.providers.linkfinder")
@@ -63,11 +64,12 @@ class LinkfinderProvider(BaseProvider):
             yield {"type": "log", "message": "[!] Provider linkfinder skipped: tool_not_found"}
             return
 
-        yield {"type": "log", "message": f"[*] Analysing {len(js_urls)} JavaScript files..."}
+        yield {"type": "log", "message": f"[*] LinkFinder: analysing {len(js_urls)} JavaScript file(s)..."}
         
         start_ts = time.time()
         endpoints_found = set()
         total_endpoints_count = 0
+        has_failed_exit = False
         
         # Define secret detection keywords
         secret_keywords = {"api_key", "secret", "token", "password", "aws_access_key", "passwd", "auth_token", "jwt", "bearer", "apikey", "credential"}
@@ -85,6 +87,7 @@ class LinkfinderProvider(BaseProvider):
             else:
                 cmd = ["python3", tool_path, "-i", js_url, "-o", "cli"]
                 
+            yield {"type": "log", "message": self.format_cmd_log(cmd)}
             logger.debug(f"Running LinkFinder on {js_url}")
             
             try:
@@ -102,6 +105,7 @@ class LinkfinderProvider(BaseProvider):
                 )
                 register_process(process)
                 
+                url_endpoints_found = 0
                 try:
                     # Give it up to 30s per URL, or overall timeout check
                     loop = asyncio.get_event_loop()
@@ -127,7 +131,9 @@ class LinkfinderProvider(BaseProvider):
                             secret_cand = None
                             line_lower = clean_line.lower()
                             if any(kw in line_lower for kw in secret_keywords) and ("=" in clean_line or ":" in clean_line):
-                                secret_cand = clean_line
+                                # Never propagate raw candidate values to logs,
+                                # WebSocket events or stored URL metadata.
+                                secret_cand = redact_text(clean_line)
                                 
                             yield endpoint_candidate, secret_cand
                             
@@ -138,6 +144,7 @@ class LinkfinderProvider(BaseProvider):
                         ep_key = (endpoint, js_url)
                         if ep_key not in endpoints_found:
                             endpoints_found.add(ep_key)
+                            url_endpoints_found += 1
                             
                             # Yield url_event for the merge engine
                             yield {
@@ -165,6 +172,33 @@ class LinkfinderProvider(BaseProvider):
                     if process.poll() is None:
                         process.terminate()
                         process.wait()
+
+                # If it produces no output and exit code != 0, emit stage_error
+                ret = getattr(process, "returncode", 0)
+                if ret is None:
+                    ret = process.poll() or 0
+                if url_endpoints_found == 0 and ret != 0:
+                    has_failed_exit = True
+                    stderr_val = ""
+                    try:
+                        if process.stderr:
+                            stderr_val = process.stderr.read() or ""
+                    except Exception:
+                        pass
+                    err_snippet = stderr_val.strip()[:500] if stderr_val else f"exit code {ret}"
+                    logger.error(f"[linkfinder] LinkFinder exited with code {ret} on {js_url}: {err_snippet}")
+                    yield {
+                        "type": "stage_error",
+                        "stage": "linkfinder",
+                        "tool": "linkfinder",
+                        "returncode": ret,
+                        "error": f"LinkFinder exited with code {ret}: {err_snippet}",
+                        "reason": f"LinkFinder exited with code {ret} and produced no output: {err_snippet}",
+                    }
+                    yield {
+                        "type": "log",
+                        "message": f"[-] Stage error: LinkFinder exited with code {ret} on {js_url}: {err_snippet}",
+                    }
                         
             except Exception as e:
                 if "not found" in str(e).lower() or isinstance(e, FileNotFoundError):
@@ -194,7 +228,7 @@ class LinkfinderProvider(BaseProvider):
         yield {
             "type": "scan_summary",
             "provider": "linkfinder",
-            "status": "completed",
+            "status": "failed" if (len(endpoints_found) == 0 and has_failed_exit) else "completed",
             "count": len(endpoints_found)
         }
         yield {"type": "log", "message": "[√] Provider linkfinder completed"}

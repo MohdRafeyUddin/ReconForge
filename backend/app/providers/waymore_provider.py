@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import platform
+import re
 import subprocess
 import tempfile
 import time
@@ -64,11 +65,15 @@ class WaymoreProvider(BaseProvider):
         domains: List[str],
         scope: Optional[Dict[str, List[str]]] = None,
         timeout: int = 180,
+        previous_count: Optional[int] = None,
+        **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Runs Waymore across target domains to extract historical URLs.
         Applies a hard global timeout across all domains; on timeout,
         emits a stage_timeout event and ends gracefully.
+        Logs per-source results and first 500 chars of stderr.
+        Warns of possible rate-limit if output is far below previous run for the same domain.
         """
         if not domains:
             yield {
@@ -106,12 +111,37 @@ class WaymoreProvider(BaseProvider):
 
         from app.core.scope import get_root_domain
         # Run once on apex domain or raise global timeout to scale with host count
-        apex_targets = list(dict.fromkeys(get_root_domain(d) for d in domains if get_root_domain(d)))
+        apex_targets = list(dict.fromkeys(
+            get_root_domain(d).strip().lower() for d in domains if get_root_domain(d)
+        ))
         if not apex_targets:
             apex_targets = list(dict.fromkeys(d.strip().lower() for d in domains if d and d.strip()))
 
         # Scale global timeout with host count (at least 120s per domain)
         global_timeout = max(timeout, len(apex_targets) * 120)
+
+        # Per-domain baseline for the "possible rate-limit" warning. Captured
+        # before any URL event for this run is emitted, so the current run's
+        # assets cannot inflate the previous count.
+        project_id = str(kwargs.get("project_id") or "").strip()
+        explicit_previous = previous_count if previous_count is not None else kwargs.get("previous_count")
+        baseline_counts: Dict[str, int] = {}
+        if explicit_previous is None and project_id:
+            try:
+                from app.database import get_database
+                db = get_database()
+                for d in apex_targets:
+                    domain_rx = re.compile(
+                        rf"^https?://(?:[^/]+\.)?{re.escape(d)}(?::\d+)?(?:/|$)",
+                        re.IGNORECASE,
+                    )
+                    baseline_counts[d] = await db.assets.count_documents({
+                        "project_id": project_id,
+                        "sources": "waymore",
+                        "metadata.url": {"$regex": domain_rx},
+                    })
+            except Exception as exc:
+                logger.debug("[waymore] Could not load previous URL counts: %s", exc)
 
         yield {
             "type": "log",
@@ -127,16 +157,17 @@ class WaymoreProvider(BaseProvider):
             remaining_time = global_timeout - elapsed
             if remaining_time <= 0:
                 unprocessed = [d for d in apex_targets if d not in processed_domains]
-                warn_msg = f"[!] Waymore global timeout ({global_timeout}s) exceeded: {len(unprocessed)} unprocessed host(s): {', '.join(unprocessed)}"
-                logger.warning(warn_msg)
-                yield {
-                    "type": "stage_timeout",
-                    "stage": "historical_urls",
-                    "tool": "waymore",
-                    "reason": f"waymore global timeout ({global_timeout}s) exceeded",
-                    "unprocessed_hosts": unprocessed,
-                }
-                yield {"type": "log", "message": warn_msg}
+                if unprocessed:
+                    warn_msg = f"[!] Waymore global timeout ({global_timeout}s) exceeded: {len(unprocessed)} unprocessed host(s): {', '.join(unprocessed)}"
+                    logger.warning(warn_msg)
+                    yield {
+                        "type": "stage_timeout",
+                        "stage": "historical_urls",
+                        "tool": "waymore",
+                        "reason": f"waymore global timeout ({global_timeout}s) exceeded",
+                        "unprocessed_hosts": unprocessed,
+                    }
+                    yield {"type": "log", "message": warn_msg}
                 break
 
             domain = domain.strip().lower()
@@ -166,9 +197,36 @@ class WaymoreProvider(BaseProvider):
             register_process(proc)
 
             timed_out = False
+            stdout_text = ""
+            stderr_text = ""
             try:
                 loop = asyncio.get_event_loop()
-                await asyncio.wait_for(loop.run_in_executor(None, proc.wait), timeout=remaining_time)
+                if hasattr(proc, "communicate"):
+                    res = await asyncio.wait_for(
+                        loop.run_in_executor(None, proc.communicate),
+                        timeout=remaining_time,
+                    )
+                    if res and isinstance(res, tuple) and len(res) == 2:
+                        stdout_text, stderr_text = res[0] or "", res[1] or ""
+                else:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, proc.wait),
+                        timeout=remaining_time,
+                    )
+                    if hasattr(proc, "stdout") and proc.stdout:
+                        try:
+                            if isinstance(proc.stdout, list):
+                                stdout_text = "".join(proc.stdout)
+                            elif hasattr(proc.stdout, "read"):
+                                stdout_text = proc.stdout.read() or ""
+                        except Exception:
+                            pass
+                    if hasattr(proc, "stderr") and proc.stderr:
+                        try:
+                            if hasattr(proc.stderr, "read"):
+                                stderr_text = proc.stderr.read() or ""
+                        except Exception:
+                            pass
             except asyncio.TimeoutError:
                 timed_out = True
                 kill_process_tree(proc, "waymore")
@@ -188,6 +246,21 @@ class WaymoreProvider(BaseProvider):
                 unregister_process(proc)
 
             processed_domains.add(domain)
+
+            # Log per-source results from Waymore stdout
+            if stdout_text:
+                for line in stdout_text.splitlines():
+                    clean_l = line.strip()
+                    if not clean_l:
+                        continue
+                    l_lower = clean_l.lower()
+                    if any(k in l_lower for k in ["links found", "urls found", "wayback", "common crawl", "alienvault", "urlscan", "virustotal", "intelx", "ghostarchive", "total unique"]):
+                        yield {"type": "log", "message": f"[+] [Waymore] {clean_l}"}
+
+            # Log first 500 chars of stderr
+            if stderr_text and stderr_text.strip():
+                stderr_snippet = stderr_text.strip()[:500]
+                yield {"type": "log", "message": f"[*] [Waymore stderr] {stderr_snippet}"}
 
             domain_urls = []
             if os.path.exists(out_tmp.name) and os.path.getsize(out_tmp.name) > 0:
@@ -218,6 +291,16 @@ class WaymoreProvider(BaseProvider):
                         "sources": ["waymore"],
                     },
                 }
+
+            # Rate limit check: if output is far below previous run for the same domain
+            prev_run_count = explicit_previous if explicit_previous is not None else baseline_counts.get(domain)
+            if prev_run_count and prev_run_count >= 20 and len(domain_urls) < (prev_run_count * 0.2):
+                warn_rl = (
+                    f"[!] Warning: Waymore output ({len(domain_urls)}) is far below the previous run "
+                    f"({prev_run_count}) for {domain}. Possible rate-limit."
+                )
+                logger.warning(warn_rl)
+                yield {"type": "log", "message": warn_rl}
 
             if timed_out:
                 break

@@ -3,6 +3,8 @@ from bson import ObjectId
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional, List, Dict, Any
 
+from app.core.scan_options import default_phase_switches
+
 def serialize_doc(doc: Any) -> Any:
     """Recursively serializes MongoDB documents (like converting ObjectId to str)."""
     if doc is None:
@@ -60,11 +62,13 @@ class ProjectBase(BaseModel):
         default_factory=lambda: {
             "enabled": False,
             "interval_hours": 24,
-            "scan_mode": "fast",
             "last_run": None,
             "next_run": None,
         }
     )
+    # Stage 1 — per-phase switches, all default OFF. Legacy projects without
+    # this field are treated as all-OFF by normalize_phase_switches().
+    phase_switches: Optional[Dict[str, Any]] = Field(default_factory=default_phase_switches)
     alerts: Optional[Dict[str, Any]] = Field(
         default_factory=lambda: {
             "enabled": False,
@@ -95,6 +99,60 @@ class ProjectBase(BaseModel):
     enable_root_expansion: Optional[bool] = False
     max_permutations: Optional[int] = 50000
 
+    # Phase 8 — JS analysis, secrets, cloud buckets, OAST, Nuclei, tech routing
+    js_analysis: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {
+            "enabled": True,
+            "max_files_fast": 25,
+            "max_files_deep": 100,
+            "max_file_kb": 500,
+            "timeout_seconds": 15,
+            "sourcemaps_deep_only": True,
+            "sourcemap_max_files": 10,
+        }
+    )
+    secrets_scan: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {"enabled": True, "max_files": 500, "timeout_seconds": 180}
+    )
+    cloud_enum: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {"enabled": False, "max_keywords": 10, "timeout_seconds": 180}
+    )
+    oast: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {"enabled": False, "server": "", "token": "", "startup_timeout_seconds": 20}
+    )
+    nuclei_options: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {"auto_scan": False, "update_templates": False, "custom_templates_dir": ""}
+    )
+    tech_routing: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {"enabled": True, "max_hosts_per_tech": 25}
+    )
+    nmap_options: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {
+            "enabled": True,
+            "scan_modes": ["deep"],
+            "max_hosts": 25,
+            "concurrency": 5,
+            "timeout_seconds": 15,
+            "version_light": True,
+            "priority": "interesting",
+        }
+    )
+    ffuf_options: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {
+            "enabled": True,
+            "concurrency": 3,
+            "rate_strategy": "split",
+        }
+    )
+    screenshot_options: Optional[Dict[str, Any]] = Field(
+        default_factory=lambda: {
+            "per_url_timeout_seconds": 60,
+            "concurrency": 3,
+            "max_urls": 50,
+            "max_urls_per_host": 5,
+        }
+    )
+
 class ProjectCreate(ProjectBase):
     pass
 
@@ -107,6 +165,7 @@ class ProjectUpdate(BaseModel):
     rate_limits: Optional[Dict[str, Any]] = None
     custom_headers: Optional[Dict[str, str]] = None
     schedule: Optional[Dict[str, Any]] = None
+    phase_switches: Optional[Dict[str, Any]] = None
     alerts: Optional[Dict[str, Any]] = None
     clustering: Optional[Dict[str, Any]] = None
     port_range: Optional[str] = None
@@ -117,6 +176,15 @@ class ProjectUpdate(BaseModel):
     assume_tools_installed: Optional[bool] = None
     enable_root_expansion: Optional[bool] = None
     max_permutations: Optional[int] = None
+    js_analysis: Optional[Dict[str, Any]] = None
+    secrets_scan: Optional[Dict[str, Any]] = None
+    cloud_enum: Optional[Dict[str, Any]] = None
+    oast: Optional[Dict[str, Any]] = None
+    nuclei_options: Optional[Dict[str, Any]] = None
+    tech_routing: Optional[Dict[str, Any]] = None
+    nmap_options: Optional[Dict[str, Any]] = None
+    ffuf_options: Optional[Dict[str, Any]] = None
+    screenshot_options: Optional[Dict[str, Any]] = None
 
 class ProjectResponse(ProjectBase):
     id: str
@@ -173,6 +241,13 @@ class JobResponse(JobBase):
     id: str
     started_at: datetime
     finished_at: Optional[datetime] = None
+    # Stage 1 additive fields (old jobs simply omit them)
+    scan_mode: Optional[str] = None
+    job_kind: Optional[str] = None
+    targeted: Optional[Dict[str, Any]] = None
+    executed_phases: Optional[List[str]] = None
+    skipped_phases: Optional[List[Dict[str, Any]]] = None
+    phase_durations: Optional[List[Dict[str, Any]]] = None
 
     class Config:
         from_attributes = True

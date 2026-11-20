@@ -30,6 +30,9 @@ Phase 6 – Web Crawling
 Phase 7 – URL Deduplication
     Uro
 
+Phase 7D – Visual Verification
+    GoWitness (host roots + prioritized live URLs)
+
 Phase 8 – URL Classification
     GF
 
@@ -52,9 +55,18 @@ Design goals
 
 import asyncio
 import logging
+import platform
 import re
+import time
 from collections import defaultdict
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
+from app.core.scan_options import (
+    normalize_phase_switches,
+    phase_switch_enabled,
+    phase_time_cap,
+)
 
 from app.providers.base import BaseProvider
 from app.providers.subfinder_provider import SubfinderProvider
@@ -79,17 +91,45 @@ from app.providers.ffuf_provider import FfufProvider
 from app.providers.api_surface_provider import ApiSurfaceProvider
 from app.providers.param_discovery_provider import ParamDiscoveryProvider
 from app.providers.waymore_provider import WaymoreProvider
+from app.providers.url_merge import select_screenshot_targets
 from app.providers.crtsh_provider import CrtshProvider
 from app.providers.certspotter_provider import CertspotterProvider
 from app.providers.dns_bruteforce_provider import DnsBruteforceProvider
 from app.providers.root_expansion_provider import RootExpansionProvider
 from app.providers.takeover_crosscheck_provider import TakeoverCrossCheckProvider
+from app.providers.js_analysis_provider import JsAnalysisProvider
+from app.providers.secrets_provider import SecretsProvider
+from app.providers.cloud_enum_provider import CloudEnumProvider
+from app.providers.wpscan_provider import WpscanProvider
+from app.services.oast import OASTSession
+from app.core.phase8_config import get_phase8_config
 from app.core.provider_keys import sync_subfinder_config_to_wsl
 from app.providers.url_merge import merge_urls
 from app.core.scope import filter_scope, is_in_scope, is_ip_in_scope, validate_hostname, is_disallowed_ip, get_root_domain
 from app.core.tools import is_tool_available, get_tool_status
 
 logger = logging.getLogger("reconforge.providers.unified")
+
+# Phase 8.6 — detected technology → targeted Nuclei tag
+TECH_TAG_MAP: Dict[str, str] = {
+    "jenkins": "jenkins",
+    "grafana": "grafana",
+    "kibana": "kibana",
+    "elasticsearch": "elasticsearch",
+    "gitlab": "gitlab",
+    "jira": "jira",
+    "confluence": "confluence",
+    "wordpress": "wordpress",
+    "tomcat": "tomcat",
+    "phpmyadmin": "phpmyadmin",
+    "drupal": "drupal",
+    "joomla": "joomla",
+    "spring": "springboot",
+    "laravel": "laravel",
+    "graphql": "graphql",
+    "swagger": "swagger",
+    "openapi": "swagger",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -185,11 +225,74 @@ class UnifiedDiscoveryProvider(BaseProvider):
     # Generic phase runner — makes future extensions trivial
     # ------------------------------------------------------------------
 
+    async def _capped_events(
+        self,
+        factory: Callable[[], AsyncGenerator[Dict[str, Any], None]],
+        phase: str,
+        tool: str,
+        cap_seconds: int,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Streams a phase while enforcing a hard time cap.
+
+        The provider runs in its own task so the cap can cancel it and
+        hard-kill only subprocesses started while this phase was active.
+        """
+        from app.job_control import current_phase, kill_phase_processes
+
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def producer() -> None:
+            token = current_phase.set(phase)
+            try:
+                async for ev in factory():
+                    if ev and isinstance(ev, dict):
+                        await queue.put(("event", ev))
+            except Exception as exc:  # provider failures are non-fatal
+                await queue.put(("error", exc))
+            finally:
+                current_phase.reset(token)
+                await queue.put(("done", None))
+
+        task = asyncio.create_task(producer())
+        deadline = time.monotonic() + max(1, int(cap_seconds))
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    killed = kill_phase_processes(phase)
+                    reason = f"time cap ({cap_seconds}s) exceeded; killed {killed} process(es)"
+                    yield {"type": "stage_timeout", "stage": phase, "tool": tool, "reason": reason}
+                    yield {"type": "log", "message": f"[-] {phase} {reason}. Partial results kept."}
+                    break
+                try:
+                    kind, payload = await asyncio.wait_for(queue.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    continue
+                if kind == "done":
+                    break
+                if kind == "error":
+                    yield {
+                        "type": "stage_error",
+                        "stage": phase,
+                        "tool": tool,
+                        "reason": str(payload),
+                        "error": str(payload),
+                    }
+                    yield {"type": "log", "message": f"[-] {phase} failed: {payload} (non-fatal)"}
+                    continue
+                yield payload
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _run_phase(
         self,
         provider: BaseProvider,
         targets: List[str],
         phase_label: str,
+        time_cap_seconds: Optional[int] = None,
+        tool_name: Optional[str] = None,
         **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
@@ -207,8 +310,18 @@ class UnifiedDiscoveryProvider(BaseProvider):
         yield {"type": "log", "message": phase_start_msg}
 
         try:
-            async for event in provider.discover(targets, **kwargs):
-                yield event
+            if time_cap_seconds:
+                async for event in self._capped_events(
+                    lambda: provider.discover(targets, **kwargs),
+                    phase_label,
+                    tool_name or provider.name,
+                    time_cap_seconds,
+                ):
+                    yield event
+            else:
+                async for event in provider.discover(targets, **kwargs):
+                    if event and isinstance(event, dict):
+                        yield event
         except Exception as exc:
             err_msg = f"[-] {phase_label} failed: {exc}"
             logger.error(err_msg)
@@ -244,11 +357,32 @@ class UnifiedDiscoveryProvider(BaseProvider):
 
         yield {"type": "log", "message": f"Detected target type: {target_type}"}
 
+        # Stage 1 — one full scan, expensive phases gated per project.
+        project_config = project_config or {}
+        phase_switches = normalize_phase_switches(project_config.get("phase_switches"))
+        dns_bruteforce_enabled = phase_switch_enabled(phase_switches, "dns_bruteforce")
+        # Automatic content/param/port/screenshot phases: no per-run selection.
+        # Time caps and project rate limits still apply.
+        waymore_enabled = True
+        ffuf_enabled = True
+        param_discovery_enabled = True
+        wide_port_scan_enabled = True
+        active_scanners_enabled = phase_switch_enabled(phase_switches, "active_scanners")
+        screenshots_enabled = True
+
+        def timing(phase: str, started: float) -> Dict[str, Any]:
+            return {
+                "type": "phase_timing",
+                "phase": phase,
+                "duration_seconds": round(time.monotonic() - started, 2),
+            }
+
         # Scope, Rate Limits, and Custom Headers Configuration
-        scope_config = (project_config or {}).get("scope") or {"in_scope": [], "out_of_scope": []}
-        rate_limits_cfg = (project_config or {}).get("rate_limits") or {}
-        custom_headers_cfg = (project_config or {}).get("custom_headers") or {}
-        scan_profile = (project_config or {}).get("scan_profile", "recon") or "recon"
+        scope_config = project_config.get("scope") or {"in_scope": [], "out_of_scope": []}
+        rate_limits_cfg = project_config.get("rate_limits") or {}
+        custom_headers_cfg = project_config.get("custom_headers") or {}
+        scan_profile = project_config.get("scan_profile", "recon") or "recon"
+        phase8_cfg = get_phase8_config(project_config)
 
         # Requirement 4: Setting assume_tools_installed (default true)
         from app.config import settings
@@ -323,6 +457,16 @@ class UnifiedDiscoveryProvider(BaseProvider):
         dnsx_nxdomain = 0
         dnsx_wildcards = 0
 
+        # Phase 8 counters (initialised for every target type)
+        cloud_buckets_found = 0
+        js_analysis_endpoints = 0
+        secrets_found = 0
+        oast_interactions = 0
+        tech_routing_findings = 0
+        wpscan_findings = 0
+        js_analysis_files: List[Dict[str, Any]] = []
+        graphql_urls: List[str] = []
+
         if is_new_path:
             yield {"type": "log", "message": "Skipping Passive Discovery"}
             yield {"type": "log", "message": "Skipping DNS Resolution"}
@@ -362,7 +506,7 @@ class UnifiedDiscoveryProvider(BaseProvider):
             # ================================================================
             # PHASE 1: Concurrent passive discovery
             # ================================================================
-
+            phase1_started = time.monotonic()
             discovered_subdomains: List[str] = []
             event_queue: asyncio.Queue = asyncio.Queue()
 
@@ -566,6 +710,7 @@ class UnifiedDiscoveryProvider(BaseProvider):
             )
             logger.info(phase1_summary)
             yield {"type": "log", "message": phase1_summary}
+            yield timing("passive_discovery", phase1_started)
 
             if not unique_subdomains:
                 yield {"type": "log", "message": "[*] No subdomains discovered. Aborting pipeline."}
@@ -592,28 +737,34 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 return
 
             # ================================================================
-            # PHASE 1.5: DNS Brute Force + Permutations (Deep mode only)
+            # PHASE 1.5: DNS Brute Force + Permutations (switch-gated)
             # ================================================================
-            if scan_mode == "fast":
+            if not dns_bruteforce_enabled:
                 yield {
                     "type": "stage_skipped",
                     "stage": "DNS Brute Force & Permutations",
                     "tool": "puredns",
-                    "reason": "deep mode only",
+                    "reason": "switch: dns_bruteforce disabled",
                 }
-                yield {"type": "log", "message": "[!] DNS Brute Force & Permutations skipped (deep mode only)."}
+                yield {"type": "log", "message": "[!] DNS Brute Force & Permutations disabled by project switch."}
             else:
-                yield {"type": "log", "message": "========== DNS Brute Force & Permutations (Deep Mode) =========="}
+                dns_bf_started = time.monotonic()
+                yield {"type": "log", "message": "========== DNS Brute Force & Permutations =========="}
                 dns_bf_provider = DnsBruteforceProvider(
-                    wordlist_path=((project_config or {}).get("wordlists") or {}).get("dns_bruteforce"),
-                    resolvers_path=((project_config or {}).get("wordlists") or {}).get("resolvers"),
-                    max_permutations=int((project_config or {}).get("max_permutations") or 50000),
+                    wordlist_path=(project_config.get("wordlists") or {}).get("dns_bruteforce"),
+                    resolvers_path=(project_config.get("wordlists") or {}).get("resolvers"),
+                    max_permutations=int(project_config.get("max_permutations") or 50000),
                     rate_limit=get_tool_rl("dns_bruteforce"),
                     scope_config=scope_config,
                 )
-                async for event in dns_bf_provider.run_bruteforce(seed_domains, unique_subdomains):
+                async for event in self._capped_events(
+                    lambda: dns_bf_provider.run_bruteforce(seed_domains, unique_subdomains),
+                    "dns_bruteforce",
+                    "dns_bruteforce",
+                    phase_time_cap(phase_switches, "dns_bruteforce"),
+                ):
                     if event.get("type") == "asset":
-                        cand_d = event.get("data", {}).get("domain")
+                        cand_d = (event.get("data") or {}).get("domain")
                         if cand_d and cand_d not in unique_subdomains:
                             unique_subdomains.append(cand_d)
                     yield event
@@ -622,10 +773,13 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 unique_subdomains, bf_scope_events = check_and_filter_scope(unique_subdomains, "Phase 1.5: DNS Brute Force Merge")
                 for ev in bf_scope_events:
                     yield ev
+                yield timing("dns_bruteforce", dns_bf_started)
 
             # ================================================================
             # PHASE 2: DNS Resolution (DNSx)
             # ================================================================
+            dns_resolution_started = time.monotonic()
+            dns_resolution_executed = False
 
             # Requirement 4: Validate hostnames before DNS
             valid_subdomains_before_dns = []
@@ -656,13 +810,14 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 }
                 resolved_subdomains = list(unique_subdomains)
             else:
+                dns_resolution_executed = True
                 dnsx_provider = DnsxProvider()
                 async for event in self._run_phase(dnsx_provider, unique_subdomains, "DNSx Resolution"):
                     if event.get("type") == "asset":
-                        asset = event.get("data", {})
+                        asset = event.get("data") or {}
                         if asset.get("status") in ("resolved", "live"):
                             domain_norm = _normalise(asset.get("domain", ""))
-                            cnames = (asset.get("metadata", {}).get("dns") or {}).get("cname", [])
+                            cnames = ((asset.get("metadata") or {}).get("dns") or {}).get("cname", [])
                             if cnames:
                                 dns_cnames[domain_norm] = cnames
 
@@ -728,6 +883,8 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 "type": "log",
                 "message": f"[√] DNSx: {len(unique_resolved)} resolved subdomains ready.",
             }
+            if dns_resolution_executed:
+                yield timing("dns_resolution", dns_resolution_started)
 
             # ================================================================
             # OPT-IN: Root Domain Expansion (Suggestions only)
@@ -749,25 +906,52 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 }
 
             # ================================================================
-            # PHASE 3: Subdomain Takeover Cross-Check (Subzy + Nuclei + dnsReaper)
+            # SUB-PHASE 2B: Cloud Bucket Enumeration (Phase 8.3, opt-in, deep only)
             # ================================================================
-            takeover_checker = TakeoverCrossCheckProvider(cnames_map=dns_cnames)
-            async for event in takeover_checker.check_takeovers(unique_resolved):
-                if event.get("type") == "scan_summary" and event.get("provider") == "takeover_crosscheck":
-                    subzy_vulnerable = event.get("vulnerable", 0)
+            cloud_provider = CloudEnumProvider()
+            async for event in cloud_provider.enumerate(
+                seed_domains,
+                scan_mode=scan_mode,
+                project_config=project_config,
+                scope=scope_config,
+            ):
+                if event.get("type") == "scan_summary" and event.get("provider") == "cloud_enum":
+                    cloud_buckets_found = event.get("count", 0)
                 yield event
 
-            yield {
-                "type": "scan_summary",
-                "provider": "subzy",
-                "status": "completed",
-                "count": subzy_vulnerable,
-            }
-            yield {"type": "log", "message": "[√] Provider subzy completed"}
+            # ================================================================
+            # PHASE 3: Subdomain Takeover Cross-Check (Subzy + Nuclei + dnsReaper)
+            # ================================================================
+            takeover_started = time.monotonic()
+            if unique_resolved:
+                takeover_checker = TakeoverCrossCheckProvider(cnames_map=dns_cnames)
+                async for event in takeover_checker.check_takeovers(unique_resolved):
+                    if event.get("type") == "scan_summary" and event.get("provider") == "takeover_crosscheck":
+                        subzy_vulnerable = event.get("vulnerable", 0)
+                    yield event
+
+                yield {
+                    "type": "scan_summary",
+                    "provider": "subzy",
+                    "status": "completed",
+                    "count": subzy_vulnerable,
+                }
+                yield {"type": "log", "message": "[√] Provider subzy completed"}
+                yield timing("takeover_crosscheck", takeover_started)
+            else:
+                yield {
+                    "type": "stage_skipped",
+                    "stage": "Subdomain Takeover Cross-Check",
+                    "tool": "subzy",
+                    "reason": "no_eligible_hosts",
+                }
+                yield {"type": "scan_summary", "provider": "subzy", "status": "SKIPPED", "count": 0, "reason": "no_eligible_hosts"}
 
         # ================================================================
         # PHASE 4: Port Scanning (Naabu)
+        #   Baseline is always top-1000; the wide switch upgrades to port_range.
         # ================================================================
+        port_scan_started = time.monotonic()
 
         naabu_hosts_with_ports = 0
         naabu_open_ports = 0
@@ -777,9 +961,16 @@ class UnifiedDiscoveryProvider(BaseProvider):
         if skip_naabu:
             yield {"type": "log", "message": "Skipping Port Scanning (Naabu)"}
             yield {
+                "type": "stage_skipped",
+                "stage": "Port Scanning (naabu)",
+                "tool": "naabu",
+                "reason": "no_eligible_targets",
+            }
+            yield {
                 "type": "scan_summary",
                 "provider": "naabu",
-                "status": "SKIPPED"
+                "status": "SKIPPED",
+                "reason": "no_eligible_targets",
             }
             yield {"type": "log", "message": "[!] Provider naabu skipped"}
         elif not is_available("naabu"):
@@ -795,6 +986,7 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 "provider": "naabu",
                 "status": "SKIPPED",
                 "count": 0,
+                "reason": "tool_missing: naabu",
             }
             yield {"type": "log", "message": "[!] Provider naabu skipped"}
         else:
@@ -803,9 +995,9 @@ class UnifiedDiscoveryProvider(BaseProvider):
             for ev in scope_events:
                 yield ev
 
-            # Identify hosts behind CDNs to exclude from wide port scans in deep mode
+            # Identify hosts behind CDNs to exclude from wide port scans
             cdn_excluded_hosts = {}
-            if scan_mode == "deep":
+            if wide_port_scan_enabled:
                 for h, cnames in dns_cnames.items():
                     cname_str = " ".join(cnames).lower()
                     for cdn_name, pattern in [
@@ -826,10 +1018,13 @@ class UnifiedDiscoveryProvider(BaseProvider):
                     naabu_provider,
                     unique_resolved,
                     "Naabu Port Scan",
+                    time_cap_seconds=phase_time_cap(phase_switches, "wide_port_scan") if wide_port_scan_enabled else None,
+                    tool_name="naabu",
                     rate_limit=get_tool_rl("naabu"),
-                    scan_mode=scan_mode,
-                    port_range=(project_config or {}).get("port_range"),
+                    scan_mode="deep" if wide_port_scan_enabled else "fast",
+                    port_range=project_config.get("port_range") if wide_port_scan_enabled else None,
                     cdn_excluded_hosts=cdn_excluded_hosts,
+                    nmap_options=project_config.get("nmap_options"),
                 ):
                     if event.get("type") == "scan_summary":
                         naabu_hosts_with_ports = event.get("hosts_with_open_ports", 0)
@@ -843,13 +1038,21 @@ class UnifiedDiscoveryProvider(BaseProvider):
                     "count": naabu_open_ports
                 }
                 yield {"type": "log", "message": "[√] Provider naabu completed"}
+                yield timing("port_scanning", port_scan_started)
             else:
                 yield {"type": "log", "message": "[*] No targets in scope for Naabu."}
-                yield {"type": "scan_summary", "provider": "naabu", "status": "completed", "count": 0}
+                yield {
+                    "type": "stage_skipped",
+                    "stage": "Port Scanning (naabu)",
+                    "tool": "naabu",
+                    "reason": "no_eligible_targets",
+                }
+                yield {"type": "scan_summary", "provider": "naabu", "status": "SKIPPED", "count": 0, "reason": "no_eligible_targets"}
 
         # ================================================================
         # PHASE 5: HTTP Probing (HTTPX)
         # ================================================================
+        http_probing_started = time.monotonic()
 
         live_hosts = 0
         live_host_targets: List[str] = []
@@ -874,7 +1077,24 @@ class UnifiedDiscoveryProvider(BaseProvider):
         from app.job_control import check_job_status
         await check_job_status()
 
-        if not is_available("httpx"):
+        http_probing_executed = False
+        if not unique_resolved:
+            yield {"type": "log", "message": "[*] No in-scope targets for HTTP probing."}
+            yield {
+                "type": "stage_skipped",
+                "stage": "HTTP Probing (httpx)",
+                "tool": "httpx",
+                "reason": "no_eligible_targets",
+            }
+            yield {
+                "type": "scan_summary",
+                "provider": "httpx",
+                "status": "SKIPPED",
+                "count": 0,
+                "reason": "no_eligible_targets",
+            }
+            yield {"type": "log", "message": "[!] Provider httpx skipped"}
+        elif not is_available("httpx"):
             yield {"type": "log", "message": "[!] Tool 'httpx' is not installed in WSL. Skipping HTTP probing."}
             yield {
                 "type": "stage_skipped",
@@ -887,9 +1107,11 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 "provider": "httpx",
                 "status": "SKIPPED",
                 "count": 0,
+                "reason": "tool_missing: httpx",
             }
             yield {"type": "log", "message": "[!] Provider httpx skipped"}
         else:
+            http_probing_executed = True
             httpx_provider = HttpxProvider()
             try:
                 async for event in httpx_provider.discover(
@@ -902,9 +1124,10 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 ):
                     event_type = event.get("type")
                     if event_type == "asset":
-                        asset = event.get("data", {})
-                        final_url = asset.get("metadata", {}).get("url")
-                        redirect_target = asset.get("metadata", {}).get("redirect_location")
+                        asset = event.get("data") or {}
+                        meta = asset.get("metadata") or {}
+                        final_url = meta.get("url")
+                        redirect_target = meta.get("redirect_location")
                         domain_raw = asset.get("domain", "")
                         if scope_config and (
                             (final_url and not is_in_scope(final_url, scope_config))
@@ -937,6 +1160,9 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 "count": live_hosts
             }
             yield {"type": "log", "message": "[√] Provider httpx completed"}
+
+        if http_probing_executed:
+            yield timing("http_probing", http_probing_started)
 
         # ================================================================
         # PHASE 5B: Host Clustering & WAF Detection
@@ -983,16 +1209,21 @@ class UnifiedDiscoveryProvider(BaseProvider):
         # WAF Detection & Rate reduction tracking
         waf_detected_hosts = set()
         for a in all_live_assets:
+            if not a:
+                continue
             if (a.get("cdn_waf") or {}).get("is_waf"):
-                waf_detected_hosts.add(a.get("domain"))
+                if a.get("domain"):
+                    waf_detected_hosts.add(a.get("domain"))
 
         if is_available("wafw00f"):
             wafw00f_targets = [u for u in live_host_urls if any(d in u for d in rep_domains)][:15]
             if wafw00f_targets:
                 waf_provider = Wafw00fProvider()
                 async for event in self._run_phase(waf_provider, wafw00f_targets, "WAF Detection (wafw00f)"):
+                    if not event or not isinstance(event, dict):
+                        continue
                     if event.get("type") == "asset":
-                        waf_data = event.get("data", {})
+                        waf_data = event.get("data") or {}
                         if waf_data.get("domain"):
                             waf_detected_hosts.add(waf_data["domain"])
                     yield event
@@ -1000,11 +1231,10 @@ class UnifiedDiscoveryProvider(BaseProvider):
             yield {"type": "stage_skipped", "stage": "WAF Detection (wafw00f)", "tool": "wafw00f", "reason": "tool_missing: wafw00f"}
             yield {"type": "log", "message": "[!] Tool 'wafw00f' is not installed in WSL. Skipping WAF fingerprinting."}
 
-        # Setup targets: if scan_all_members is False, filter downstream targets to representative hosts
-        if scan_all_members:
-            active_candidate_hosts = live_host_targets
-        else:
-            active_candidate_hosts = [h for h in live_host_targets if h in rep_domains] if rep_domains else live_host_targets
+        # All in-scope live hosts are used automatically for crawling, content,
+        # parameter, port and screenshot phases. Clustering still provides
+        # metadata, but no longer restricts tool targets.
+        active_candidate_hosts = live_host_targets
 
         unique_live_hosts = sorted({h for h in active_candidate_hosts if _is_valid(h)})
         unique_live_urls = sorted({host_to_live_url[h] for h in unique_live_hosts if h in host_to_live_url})
@@ -1018,52 +1248,67 @@ class UnifiedDiscoveryProvider(BaseProvider):
         api_specs_discovered = 0
         graphql_endpoints_discovered = 0
 
-        # ffuf/feroxbuster and API probes run ONLY on priority hosts:
-        # (representatives from clustering, plus interesting 401/403 hosts)
-        priority_hosts_set = set(rep_domains)
-        for a in all_live_assets:
-            m = a.get("metadata") or {}
-            sc = a.get("status_code") or m.get("status_code")
-            if a.get("is_interesting") or sc in (401, 403):
-                priority_hosts_set.add(a.get("domain"))
-
-        priority_targets = [host_to_live_url[h] for h in priority_hosts_set if h in host_to_live_url]
-        priority_targets, scope_ev_p = check_and_filter_scope(priority_targets, "Sub-phase 5B: Priority Hosts (FFUF/API)")
+        # FFUF and API probes run automatically on every in-scope live host.
+        priority_targets = [
+            host_to_live_url[h]
+            for h in sorted(set(live_host_targets))
+            if h in host_to_live_url
+        ]
+        priority_targets, scope_ev_p = check_and_filter_scope(priority_targets, "Sub-phase 5B: Content/API Discovery")
         for ev in scope_ev_p:
             yield ev
 
         if priority_targets:
-            # 1. FFUF Content Discovery
-            if not is_available("ffuf") and not is_available("feroxbuster"):
+            # 1. FFUF Content Discovery (switch-gated)
+            if not ffuf_enabled:
+                yield {
+                    "type": "stage_skipped",
+                    "stage": "Content Discovery (ffuf)",
+                    "tool": "ffuf",
+                    "reason": "switch: ffuf disabled",
+                }
+                yield {"type": "log", "message": "[!] FFUF content discovery disabled by project switch."}
+                yield {"type": "scan_summary", "provider": "ffuf", "status": "SKIPPED", "count": 0}
+            elif not is_available("ffuf") and not is_available("feroxbuster"):
                 yield {"type": "log", "message": "[!] Tool 'ffuf' / 'feroxbuster' is not installed in WSL. Skipping content discovery."}
                 yield {"type": "stage_skipped", "stage": "Content Discovery (ffuf)", "tool": "ffuf", "reason": "tool_missing: ffuf"}
                 yield {"type": "scan_summary", "provider": "ffuf", "status": "SKIPPED", "count": 0}
             else:
+                content_discovery_started = time.monotonic()
                 ffuf_prov = FfufProvider()
                 detected_tech_map = {
-                    a.get("domain"): (a.get("metadata") or {}).get("technologies") or (a.get("metadata") or {}).get("tech") or []
-                    for a in all_live_assets
+                    (a or {}).get("domain"): ((a or {}).get("metadata") or {}).get("technologies") or ((a or {}).get("metadata") or {}).get("tech") or []
+                    for a in all_live_assets if a
                 }
-                custom_wl = (project_config or {}).get("wordlists", {}).get("content") or (project_config or {}).get("wordlists", {}).get("ffuf")
+                wl_cfg = project_config.get("wordlists") or {}
+                custom_wl = wl_cfg.get("content") or wl_cfg.get("ffuf")
+                ffuf_options = dict(project_config.get("ffuf_options") or {})
+                ffuf_options["enabled"] = True
                 async for event in self._run_phase(
                     ffuf_prov,
                     priority_targets,
                     "FFUF Content Discovery",
-                    scan_mode=scan_mode,
+                    time_cap_seconds=phase_time_cap(phase_switches, "ffuf"),
+                    tool_name="ffuf",
+                    scan_mode="fast",
                     rate_limit=get_tool_rl("ffuf"),
                     custom_headers=custom_headers_cfg,
                     scope=scope_config,
                     wordlist_path=custom_wl,
                     waf_detected_hosts=waf_detected_hosts,
                     detected_tech_per_host=detected_tech_map,
+                    ffuf_options=ffuf_options,
                 ):
+                    if not event or not isinstance(event, dict):
+                        continue
                     if event.get("type") == "content_path_event":
-                        u = event.get("data", {}).get("url")
+                        u = (event.get("data") or {}).get("url")
                         if u:
                             all_ffuf_urls.append(u)
                     elif event.get("type") == "scan_summary" and event.get("provider") == "ffuf":
                         ffuf_paths_discovered = event.get("count", 0)
                     yield event
+                yield timing("content_discovery", content_discovery_started)
 
             # 2. API Surface & GraphQL Probing
             api_prov = ApiSurfaceProvider()
@@ -1074,19 +1319,62 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 custom_headers=custom_headers_cfg,
                 scope=scope_config,
             ):
-                if event.get("type") == "url_event" and event.get("data", {}).get("source") == "api_spec":
-                    u = event.get("data", {}).get("url")
+                if not event or not isinstance(event, dict):
+                    continue
+                if event.get("type") == "url_event" and (event.get("data") or {}).get("source") == "api_spec":
+                    u = (event.get("data") or {}).get("url")
                     if u:
                         all_api_spec_urls.append(u)
                 elif event.get("type") == "api_spec_event":
                     api_specs_discovered += 1
                 elif event.get("type") == "graphql_event":
                     graphql_endpoints_discovered += 1
+                    gql_url = (event.get("data") or {}).get("url")
+                    if gql_url:
+                        graphql_urls.append(gql_url)
                 yield event
         else:
             yield {"type": "log", "message": "[*] No priority targets for FFUF / API surface probing."}
-            yield {"type": "scan_summary", "provider": "ffuf", "status": "SKIPPED", "count": 0}
-            yield {"type": "scan_summary", "provider": "api_surface", "status": "SKIPPED", "count": 0}
+            yield {"type": "scan_summary", "provider": "ffuf", "status": "SKIPPED", "count": 0, "reason": "no_priority_targets"}
+            yield {"type": "scan_summary", "provider": "api_surface", "status": "SKIPPED", "count": 0, "reason": "no_priority_targets"}
+
+        # Store response bodies for the live content/API hits we just found.
+        # Bounded and filtered by status/content type; failures are non-fatal.
+        if (all_ffuf_urls or all_api_spec_urls) and project_config.get("project_id"):
+            body_urls = list(dict.fromkeys([*all_ffuf_urls, *all_api_spec_urls]))
+            if body_urls:
+                auto_limit = max(1, min(int(project_config.get("body_storage_auto_limit") or 30), 100))
+                yield {
+                    "type": "log",
+                    "message": f"[*] Fetching response bodies for up to {auto_limit} discovered content/API URL(s)...",
+                }
+                try:
+                    from app.services.body_fetch import auto_store_bodies
+
+                    store_res = await auto_store_bodies(
+                        str(project_config.get("project_id")),
+                        body_urls,
+                        scope=scope_config,
+                        max_kb=int(project_config.get("response_body_max_kb") or 500),
+                        limit=auto_limit,
+                        concurrency=3,
+                        timeout=12,
+                    )
+                    yield {
+                        "type": "log",
+                        "message": (
+                            f"[+] Body storage: {store_res.get('stored', 0)} stored, "
+                            f"{store_res.get('skipped', 0)} skipped, "
+                            f"{store_res.get('failed', 0)} failed "
+                            f"(of {store_res.get('requested', 0)})."
+                        ),
+                    }
+                except Exception as body_exc:
+                    logger.error("[-] Automatic body storage failed: %s", body_exc)
+                    yield {
+                        "type": "log",
+                        "message": f"[!] Automatic body storage failed: {body_exc} (non-fatal)",
+                    }
 
         # Scope filter before crawlers
         unique_live_hosts, scope_ev_h = check_and_filter_scope(unique_live_hosts, "Phase 6: Crawlers (Hosts)")
@@ -1106,15 +1394,32 @@ class UnifiedDiscoveryProvider(BaseProvider):
         katana_urls_discovered = 0
         gowitness_screenshots = 0
 
-        async def run_worker(provider: BaseProvider, target_list: List[str], label: str, **kwargs: Any) -> None:
+        async def run_worker(
+            provider: BaseProvider,
+            target_list: List[str],
+            label: str,
+            time_cap_seconds: Optional[int] = None,
+            **kwargs: Any,
+        ) -> None:
             try:
-                async for ev in provider.discover(target_list, **kwargs):
-                    await event_queue.put((label, ev))
+                if time_cap_seconds:
+                    async for ev in self._capped_events(
+                        lambda: provider.discover(target_list, **kwargs),
+                        label,
+                        label,
+                        time_cap_seconds,
+                    ):
+                        await event_queue.put((label, ev))
+                else:
+                    async for ev in provider.discover(target_list, **kwargs):
+                        await event_queue.put((label, ev))
             except Exception as exc:
                 logger.error(f"[-] {label} worker failed: {exc}")
                 await event_queue.put((label, {"type": "log", "message": f"[-] {label} worker failed: {exc}"}))
             finally:
                 await event_queue.put((label, "__done__"))
+
+        crawlers_started = time.monotonic()
 
         if unique_live_urls:
             # Katana
@@ -1140,13 +1445,24 @@ class UnifiedDiscoveryProvider(BaseProvider):
             else:
                 tasks.append(asyncio.create_task(run_worker(GauProvider(), unique_live_hosts, "gau")))
 
-            # Waymore (optional historical supplement to GAU)
-            if not is_available("waymore"):
+            # Waymore (optional historical supplement to GAU, switch-gated)
+            if not waymore_enabled:
+                yield {"type": "log", "message": "[!] Waymore supplement disabled by project switch."}
+                yield {"type": "stage_skipped", "stage": "Historical URLs (waymore)", "tool": "waymore", "reason": "switch: waymore disabled"}
+                yield {"type": "scan_summary", "provider": "waymore", "status": "SKIPPED", "count": 0}
+            elif not is_available("waymore"):
                 yield {"type": "log", "message": "[!] Tool 'waymore' is not installed in WSL. Skipping Waymore supplement."}
                 yield {"type": "stage_skipped", "stage": "Historical URLs (waymore)", "tool": "waymore", "reason": "tool_missing: waymore"}
                 yield {"type": "scan_summary", "provider": "waymore", "status": "SKIPPED", "count": 0}
             else:
-                tasks.append(asyncio.create_task(run_worker(WaymoreProvider(), unique_live_hosts, "waymore", scope=scope_config)))
+                tasks.append(asyncio.create_task(run_worker(
+                    WaymoreProvider(),
+                    unique_live_hosts,
+                    "waymore",
+                    time_cap_seconds=phase_time_cap(phase_switches, "waymore"),
+                    scope=scope_config,
+                    project_id=project_config.get("project_id"),
+                )))
 
             # SubJS
             if not is_available("subjs"):
@@ -1155,24 +1471,13 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 yield {"type": "scan_summary", "provider": "subjs", "status": "SKIPPED", "count": 0}
             else:
                 tasks.append(asyncio.create_task(run_worker(SubjsProvider(), unique_live_urls, "subjs")))
-
-            # GoWitness (deep mode)
-            if scan_mode == "deep":
-                if not is_available("gowitness"):
-                    yield {"type": "log", "message": "[!] Tool 'gowitness' is not installed in WSL. Skipping screenshots."}
-                    yield {"type": "stage_skipped", "stage": "Screenshots (gowitness)", "tool": "gowitness", "reason": "tool_missing: gowitness"}
-                    yield {"type": "scan_summary", "provider": "gowitness", "status": "SKIPPED", "count": 0}
-                else:
-                    tasks.append(asyncio.create_task(run_worker(GowitnessProvider(), unique_live_urls, "gowitness")))
         else:
             yield {"type": "log", "message": "[*] No live HTTPX targets; skipping concurrent crawlers."}
             for p in ("katana", "gau", "waymore", "subjs"):
-                yield {"type": "scan_summary", "provider": p, "status": "SKIPPED"}
+                yield {"type": "scan_summary", "provider": p, "status": "SKIPPED", "reason": "no_live_hosts"}
                 yield {"type": "log", "message": f"[!] Provider {p} skipped"}
-            if scan_mode == "deep":
-                yield {"type": "scan_summary", "provider": "gowitness", "status": "SKIPPED"}
-                yield {"type": "log", "message": "[!] Provider gowitness skipped"}
 
+        crawlers_executed = len(tasks) > 0
         active_tasks = len(tasks)
 
         while active_tasks > 0 or not event_queue.empty():
@@ -1216,84 +1521,115 @@ class UnifiedDiscoveryProvider(BaseProvider):
                         "count": len(all_js_files)
                     }
                     yield {"type": "log", "message": "[√] Provider subjs completed"}
-                elif label == "gowitness":
-                    yield {
-                        "type": "scan_summary",
-                        "provider": "gowitness",
-                        "status": "completed",
-                        "count": gowitness_screenshots
-                    }
-                    yield {"type": "log", "message": "[√] Provider gowitness completed"}
                 continue
 
             # Store result lists and pass-through standard events
             if event.get("type") == "asset" and label == "katana":
-                asset_data = event.get("data", {})
-                k_meta = asset_data.get("metadata", {}).get("katana", {})
+                asset_data = event.get("data") or {}
+                k_meta = (asset_data.get("metadata") or {}).get("katana") or {}
                 k_urls = k_meta.get("urls", [])
                 all_katana_urls.extend(k_urls)
                 k_js = k_meta.get("js_files", [])
                 all_js_files.extend(k_js)
             elif event.get("type") == "url_event" and label == "gau":
-                all_gau_urls.append(event.get("data", {}).get("url"))
+                u = (event.get("data") or {}).get("url")
+                if u:
+                    all_gau_urls.append(u)
             elif event.get("type") == "url_event" and label == "waymore":
-                all_waymore_urls.append(event.get("data", {}).get("url"))
+                u = (event.get("data") or {}).get("url")
+                if u:
+                    all_waymore_urls.append(u)
             elif event.get("type") == "js_event" and label == "subjs":
-                all_js_files.append(event.get("data", {}).get("url"))
+                u = (event.get("data") or {}).get("url")
+                if u:
+                    all_js_files.append(u)
 
             if event.get("type") == "scan_summary":
                 if label == "katana":
                     katana_hosts_scanned = event.get("hosts_scanned", 0)
                     katana_urls_discovered = event.get("urls_discovered", 0)
-                elif label == "gowitness":
-                    gowitness_screenshots = event.get("screenshots", 0)
 
             yield event
 
         await asyncio.gather(*tasks, return_exceptions=True)
+        if crawlers_executed:
+            yield timing("crawlers", crawlers_started)
 
         # ================================================================
-        # PHASE 6B: JS Endpoint Extraction (LinkFinder)
+        # PHASE 6B: JS Analysis (Phase 8.1)
+        #   SHA-256 hashing + source maps + jsluice/xnLinkFinder (LinkFinder fallback)
         # ================================================================
         all_linkfinder_urls: List[str] = []
+        js_endpoint_parents: List[Tuple[str, str]] = []
         linkfinder_endpoints = 0
-        
-        # Deduplicate and filter all JS files (from Katana and SubJS) through is_in_scope BEFORE LinkFinder runs
+        js_analysis_started = time.monotonic()
+
+        # Deduplicate and scope-filter JavaScript URLs before analysis.
         all_js_files = list(dict.fromkeys(u.strip() for u in all_js_files if u and u.strip()))
-        all_js_files, scope_ev_js = check_and_filter_scope(all_js_files, "Phase 6B: JS Endpoint Extraction (LinkFinder)")
+        all_js_files, scope_ev_js = check_and_filter_scope(all_js_files, "Phase 6B: JS Analysis")
         for ev in scope_ev_js:
             yield ev
 
-        if all_js_files:
-            if not is_available("linkfinder"):
-                yield {"type": "log", "message": "[!] Tool 'linkfinder' is not installed in WSL. Skipping JS endpoint extraction."}
-                yield {"type": "stage_skipped", "stage": "JS Endpoint Extraction (linkfinder)", "tool": "linkfinder", "reason": "tool_missing: linkfinder"}
-                yield {"type": "scan_summary", "provider": "linkfinder", "status": "SKIPPED", "count": 0}
-                yield {"type": "log", "message": "[!] Provider linkfinder skipped"}
-            else:
-                linkfinder_provider = LinkfinderProvider()
-                async for event in self._run_phase(linkfinder_provider, all_js_files, "LinkFinder Endpoint Extraction"):
-                    if event.get("type") == "url_event" and event.get("data", {}).get("source") == "linkfinder":
-                        all_linkfinder_urls.append(event.get("data", {}).get("url"))
-                    elif event.get("type") == "scan_summary" and event.get("provider") == "LinkFinder":
-                        linkfinder_endpoints = event.get("extracted_endpoints", 0)
-                    yield event
+        js_analysis_executed = bool(all_js_files) and bool(
+            (phase8_cfg.get("js_analysis") or {}).get("enabled", True)
+        )
 
-                yield {
-                    "type": "scan_summary",
-                    "provider": "linkfinder",
-                    "status": "completed",
-                    "count": linkfinder_endpoints
-                }
-                yield {"type": "log", "message": "[√] Provider linkfinder completed"}
+        if all_js_files:
+            js_provider = JsAnalysisProvider()
+            async for event in js_provider.analyze(
+                all_js_files,
+                scan_mode=scan_mode,
+                rate_limit=get_tool_rl("httpx"),
+                custom_headers=custom_headers_cfg,
+                project_config=project_config,
+                scope=scope_config,
+            ):
+                if not event or not isinstance(event, dict):
+                    continue
+                etype = event.get("type")
+                if etype == "url_event":
+                    e_data = event.get("data") or {}
+                    endpoint_url = e_data.get("url")
+                    source = e_data.get("source")
+                    if endpoint_url and source in ("js_analysis", "linkfinder", "jsluice", "xnlinkfinder"):
+                        all_linkfinder_urls.append(endpoint_url)
+                        try:
+                            js_source_host = (
+                                urlparse(str(e_data.get("js_file") or "")).hostname or ""
+                            ).lower()
+                        except Exception:
+                            js_source_host = ""
+                        if js_source_host:
+                            js_endpoint_parents.append((endpoint_url, js_source_host))
+                    yield event
+                elif etype == "js_event":
+                    jd = event.get("data") or {}
+                    if jd.get("body_path"):
+                        js_analysis_files.append({
+                            "path": jd.get("body_path"),
+                            "url": jd.get("url") or "",
+                            "host": jd.get("host") or "",
+                            "source": jd.get("kind") or "js",
+                        })
+                    yield event
+                elif etype == "scan_summary" and event.get("provider") == "js_analysis":
+                    js_analysis_endpoints = event.get("endpoints_extracted", js_analysis_endpoints)
+                    yield event
+                else:
+                    yield event
+            linkfinder_endpoints = js_analysis_endpoints
         else:
-            yield {"type": "log", "message": "[*] No JS files discovered; skipping LinkFinder."}
-            yield {"type": "scan_summary", "provider": "linkfinder", "status": "SKIPPED"}
-            yield {"type": "log", "message": "[!] Provider linkfinder skipped"}
+            yield {"type": "log", "message": "[*] No JS files discovered; skipping JS analysis."}
+            yield {"type": "scan_summary", "provider": "js_analysis", "status": "SKIPPED", "count": 0, "reason": "no_js_urls"}
+            yield {"type": "scan_summary", "provider": "linkfinder", "status": "SKIPPED", "count": 0, "extracted_endpoints": 0}
+            yield {"type": "log", "message": "[!] Provider js_analysis skipped"}
+        if js_analysis_executed:
+            yield timing("js_analysis", js_analysis_started)
 
         # ================================================================
         # PHASE 7: URL Merge Engine & Normalisation
         # ================================================================
+        url_merge_started = time.monotonic()
         yield {"type": "log", "message": "\n========== URL Merge Engine =========="}
         
         merged_urls = merge_urls(
@@ -1357,11 +1693,13 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 yield {"type": "log", "message": "[√] Provider uro completed"}
         else:
             yield {"type": "log", "message": "[*] No merged URLs; skipping Uro."}
-            yield {"type": "scan_summary", "provider": "uro", "status": "SKIPPED"}
+            yield {"type": "scan_summary", "provider": "uro", "status": "SKIPPED", "reason": "no_urls"}
             yield {"type": "log", "message": "[!] Provider uro skipped"}
 
         if not uro_normalised_urls and merged_raw_list:
             uro_normalised_urls = list(dict.fromkeys(merged_raw_list))
+        if merged_raw_list:
+            yield timing("url_merge", url_merge_started)
 
         # ================================================================
         # HISTORICAL URL PROBING (HTTPX -mc 200,301,302,401,403)
@@ -1376,6 +1714,7 @@ class UnifiedDiscoveryProvider(BaseProvider):
             try:
                 async for ev in httpx_probe_prov.probe_historical_urls(
                     historical_to_probe,
+                    live_hosts=set(live_host_targets),
                     rate_limit=get_tool_rl("httpx"),
                     custom_headers=custom_headers_cfg,
                 ):
@@ -1392,11 +1731,231 @@ class UnifiedDiscoveryProvider(BaseProvider):
             uro_normalised_urls = [u for u in uro_normalised_urls if u not in dead_historical_urls]
 
         # ================================================================
-        # SUB-PHASE 6C: Parameter Discovery (Arjun / x8 - DEEP MODE ONLY)
+        # CLOUD URL CLASSIFICATION
+        #   Detects S3/R2/GCS/Azure storage, CloudFront, EC2, App Engine,
+        #   Cloud Run, Azure App Service, etc. in the discovered URL set.
+        # ================================================================
+        cloud_screenshot_urls: List[str] = []
+        project_id_value = str(project_config.get("project_id") or "")
+        if project_id_value:
+            cloud_parents: Dict[str, set] = {}
+
+            def note_cloud_url(candidate_url: Any, parent_host: str = "") -> None:
+                url = str(candidate_url or "").strip()
+                if not url:
+                    return
+                cloud_parents.setdefault(url, set())
+                if parent_host:
+                    cloud_parents[url].add(parent_host.lower())
+
+            for live_asset in all_live_assets:
+                if not live_asset:
+                    continue
+                live_host = str(live_asset.get("domain") or "").lower()
+                katana_meta = (live_asset.get("metadata") or {}).get("katana") or {}
+                for key in ("urls", "endpoints", "js_files"):
+                    for candidate in katana_meta.get(key) or []:
+                        note_cloud_url(candidate, live_host)
+            for endpoint_url, parent_host in js_endpoint_parents:
+                note_cloud_url(endpoint_url, parent_host)
+            for candidate in uro_normalised_urls:
+                note_cloud_url(candidate)
+
+            try:
+                from app.services.cloud_classify import classify_and_store
+
+                cloud_res = await classify_and_store(
+                    project_id_value,
+                    cloud_parents,
+                    limit=1000,
+                )
+                if cloud_res.get("total"):
+                    provider_str = ", ".join(
+                        f"{provider}:{count}"
+                        for provider, count in sorted(
+                            (cloud_res.get("by_provider") or {}).items()
+                        )
+                    )
+                    yield {
+                        "type": "log",
+                        "message": (
+                            f"[+] Cloud URL classification: {cloud_res.get('total')} "
+                            f"cloud resource URL(s) detected"
+                            + (f" ({provider_str})" if provider_str else "")
+                            + "."
+                        ),
+                    }
+                    import os as _os
+                    from app.providers.url_merge import SCREENSHOT_SKIP_EXTENSIONS
+
+                    cloud_screenshot_urls = [
+                        url
+                        for url in cloud_res.get("urls") or []
+                        if _os.path.splitext(urlparse(url).path.lower())[1]
+                        not in SCREENSHOT_SKIP_EXTENSIONS
+                    ][:25]
+            except Exception as cloud_exc:
+                logger.error("[-] Cloud URL classification failed: %s", cloud_exc)
+                yield {
+                    "type": "log",
+                    "message": f"[!] Cloud URL classification failed: {cloud_exc} (non-fatal)",
+                }
+
+            try:
+                from app.services.api_classify import classify_api_and_store
+
+                api_res = await classify_api_and_store(
+                    project_id_value,
+                    cloud_parents,
+                    limit=2000,
+                )
+                if api_res.get("total"):
+                    type_str = ", ".join(
+                        f"{api_type}:{count}"
+                        for api_type, count in sorted(
+                            (api_res.get("by_type") or {}).items()
+                        )
+                    )
+                    yield {
+                        "type": "log",
+                        "message": (
+                            f"[+] API endpoint classification: {api_res.get('total')} "
+                            f"API URL(s) detected"
+                            + (f" ({type_str})" if type_str else "")
+                            + "."
+                        ),
+                    }
+            except Exception as api_exc:
+                logger.error("[-] API URL classification failed: %s", api_exc)
+                yield {
+                    "type": "log",
+                    "message": f"[!] API URL classification failed: {api_exc} (non-fatal)",
+                }
+
+        # ================================================================
+        # PHASE 7D: Visual Verification (GoWitness)
+        #   Runs after URL merge/uro so screenshots cover the highest-value
+        #   live URLs, not only the live host roots captured by HTTPX.
+        # ================================================================
+        screenshot_started = time.monotonic()
+        screenshot_executed = False
+        if not screenshots_enabled:
+            yield {"type": "log", "message": "[!] GoWitness screenshots disabled by project switch."}
+            yield {"type": "stage_skipped", "stage": "Screenshots (gowitness)", "tool": "gowitness", "reason": "switch: screenshots disabled"}
+            yield {"type": "scan_summary", "provider": "gowitness", "status": "SKIPPED", "count": 0}
+        elif not is_available("gowitness"):
+            yield {"type": "log", "message": "[!] Tool 'gowitness' is not installed in WSL. Skipping screenshots."}
+            yield {"type": "stage_skipped", "stage": "Screenshots (gowitness)", "tool": "gowitness", "reason": "tool_missing: gowitness"}
+            yield {"type": "scan_summary", "provider": "gowitness", "status": "SKIPPED", "count": 0}
+        else:
+            screenshot_cfg = project_config.get("screenshot_options") or {}
+            try:
+                screenshot_max_urls = max(1, min(int(screenshot_cfg.get("max_urls", 50) or 50), 500))
+            except (TypeError, ValueError):
+                screenshot_max_urls = 50
+            try:
+                screenshot_max_per_host = max(0, min(int(screenshot_cfg.get("max_urls_per_host", 5)), 50))
+            except (TypeError, ValueError):
+                screenshot_max_per_host = 5
+
+            # Cloud service URLs are treated as guaranteed roots so their
+            # screenshots are captured even when the normal per-host cap
+            # would otherwise drop them.
+            screenshot_roots = list(dict.fromkeys(
+                [*unique_live_urls, *cloud_screenshot_urls]
+            ))
+            screenshot_targets = select_screenshot_targets(
+                screenshot_roots,
+                uro_normalised_urls,
+                max_urls=screenshot_max_urls,
+                max_per_host_extras=screenshot_max_per_host,
+            )
+            screenshot_targets, scope_ev_shot = check_and_filter_scope(
+                screenshot_targets, "Phase 7D: Screenshots"
+            )
+            for ev in scope_ev_shot:
+                yield ev
+
+            if not screenshot_targets:
+                yield {"type": "log", "message": "[*] No live URLs available; skipping screenshots."}
+                yield {
+                    "type": "scan_summary",
+                    "provider": "gowitness",
+                    "status": "SKIPPED",
+                    "reason": "no_live_hosts_upstream",
+                    "count": 0,
+                }
+            else:
+                screenshot_executed = True
+                live_url_set = set(unique_live_urls)
+                root_count = sum(1 for u in screenshot_targets if u in live_url_set)
+                yield {
+                    "type": "log",
+                    "message": (
+                        f"[*] Screenshot scope: {len(screenshot_targets)} URL(s) "
+                        f"({root_count} live host root(s), "
+                        f"{len(screenshot_targets) - root_count} prioritized URL(s))."
+                    ),
+                }
+                page_hashes: Dict[str, str] = {}
+                for live_asset in all_live_assets:
+                    if not live_asset:
+                        continue
+                    live_meta = live_asset.get("metadata") or {}
+                    live_hash = live_meta.get("body_hash") or (live_asset.get("fingerprint") or {}).get("body_hash")
+                    if not live_hash:
+                        continue
+                    live_host = str(live_asset.get("domain") or "").lower()
+                    live_url = str(live_meta.get("url") or "")
+                    if live_host:
+                        page_hashes[live_host] = live_hash
+                    if live_url:
+                        page_hashes[live_url] = live_hash
+                async for event in self._run_phase(
+                    GowitnessProvider(),
+                    screenshot_targets,
+                    "Screenshots (GoWitness)",
+                    time_cap_seconds=phase_time_cap(phase_switches, "screenshots"),
+                    tool_name="gowitness",
+                    project_id=project_config.get("project_id"),
+                    rate_limit=get_tool_rl("gowitness"),
+                    per_url_timeout=int(screenshot_cfg.get("per_url_timeout_seconds", 60) or 60),
+                    concurrency=int(screenshot_cfg.get("concurrency", 3) or 3),
+                    page_hashes=page_hashes,
+                ):
+                    if event.get("type") == "scan_summary" and event.get("provider") == "gowitness":
+                        gowitness_screenshots = event.get("screenshots", event.get("count", 0)) or 0
+                    yield event
+        if screenshot_executed:
+            yield timing("screenshots", screenshot_started)
+
+        # ================================================================
+        # PHASE 7C: Secret Scanning (Phase 8.2)
+        #   Scans only stored in-scope response/JS bodies; values are masked.
+        # ================================================================
+        secrets_provider = SecretsProvider()
+        async for event in secrets_provider.scan(
+            seed_domains,
+            scan_mode=scan_mode,
+            project_config=project_config,
+            extra_files=js_analysis_files,
+            scope=scope_config,
+        ):
+            if event.get("type") == "scan_summary" and event.get("provider") == "secrets":
+                secrets_found = event.get("count", 0)
+            yield event
+
+        # ================================================================
+        # SUB-PHASE 6C: Parameter Discovery (Arjun / x8 - switch-gated)
         # ================================================================
         all_param_urls: List[str] = []
         params_discovered = 0
-        if scan_mode == "deep" and uro_normalised_urls:
+        if not param_discovery_enabled:
+            yield {"type": "log", "message": "[!] Parameter discovery disabled by project switch."}
+            yield {"type": "stage_skipped", "stage": "Parameter Discovery (arjun)", "tool": "arjun", "reason": "switch: param_discovery disabled"}
+            yield {"type": "scan_summary", "provider": "arjun", "status": "SKIPPED", "count": 0}
+        elif uro_normalised_urls:
+            param_discovery_started = time.monotonic()
             from app.providers.url_merge import get_url_priority
             sorted_candidates = sorted(
                 uro_normalised_urls,
@@ -1407,18 +1966,24 @@ class UnifiedDiscoveryProvider(BaseProvider):
             for ev in scope_ev_param:
                 yield ev
 
+            param_executed = False
             if is_available("arjun") or is_available("x8"):
+                param_executed = True
                 param_provider = ParamDiscoveryProvider()
                 async for event in self._run_phase(
                     param_provider,
                     param_targets,
-                    "Parameter Discovery (Deep Mode)",
+                    "Parameter Discovery",
+                    time_cap_seconds=phase_time_cap(phase_switches, "param_discovery"),
+                    tool_name="arjun",
                     rate_limit=get_tool_rl("arjun"),
                     custom_headers=custom_headers_cfg,
                     scope=scope_config,
                 ):
-                    if event.get("type") == "url_event" and event.get("data", {}).get("source") == "param_discovery":
-                        param_u = event.get("data", {}).get("url")
+                    if not event or not isinstance(event, dict):
+                        continue
+                    if event.get("type") == "url_event" and (event.get("data") or {}).get("source") == "param_discovery":
+                        param_u = (event.get("data") or {}).get("url")
                         if param_u:
                             all_param_urls.append(param_u)
                     elif event.get("type") == "scan_summary" and event.get("provider") in ("arjun", "x8"):
@@ -1433,10 +1998,22 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 yield {"type": "log", "message": "[!] Tool 'arjun' / 'x8' is not installed in WSL. Skipping parameter discovery."}
                 yield {"type": "stage_skipped", "stage": "Parameter Discovery (arjun)", "tool": "arjun", "reason": "tool_missing: arjun"}
                 yield {"type": "scan_summary", "provider": "arjun", "status": "SKIPPED", "count": 0}
+            if param_executed:
+                yield timing("param_discovery", param_discovery_started)
+        else:
+            yield {
+                "type": "stage_skipped",
+                "stage": "Parameter Discovery (arjun)",
+                "tool": "arjun",
+                "reason": "no_eligible_urls",
+            }
+            yield {"type": "scan_summary", "provider": "arjun", "status": "SKIPPED", "count": 0, "reason": "no_eligible_urls"}
 
         # ================================================================
         # PHASE 8: URL Classification (GF)
         # ================================================================
+        gf_started = time.monotonic()
+        gf_executed = False
         gf_classified = 0
         ENDPOINT_SCAN_CATEGORIES = {"xss", "sqli", "ssrf", "lfi", "ssti", "idor", "redirect", "rce"}
         gf_endpoint_urls: List[str] = []
@@ -1453,6 +2030,7 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 yield {"type": "log", "message": "[!] Provider gf skipped"}
                 gf_endpoint_urls = list(uro_normalised_urls)
             else:
+                gf_executed = True
                 gf_provider = GfProvider()
                 async for event in self._run_phase(gf_provider, uro_normalised_urls, "GF Classification"):
                     if event.get("type") == "scan_summary" and event.get("provider") == "GF":
@@ -1480,13 +2058,16 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 yield {"type": "log", "message": "[√] Provider gf completed"}
         else:
             yield {"type": "log", "message": "[*] No normalised URLs; skipping GF."}
-            yield {"type": "scan_summary", "provider": "gf", "status": "SKIPPED"}
+            yield {"type": "scan_summary", "provider": "gf", "status": "SKIPPED", "reason": "no_urls"}
             yield {"type": "log", "message": "[!] Provider gf skipped"}
+        if gf_executed:
+            yield timing("gf", gf_started)
 
         # ================================================================
         # PHASE 9: Concurrent Vulnerability Scans (Nuclei, Dalfox, OpenRedirex)
         # ================================================================
-        yield {"type": "log", "message": f"\n========== Vulnerability Scanning ({scan_mode.upper()} MODE) =========="}
+        vuln_scan_started = time.monotonic()
+        yield {"type": "log", "message": "\n========== Vulnerability Scanning =========="}
         
         nuclei_host_findings = 0
         nuclei_endpoint_findings = 0
@@ -1509,22 +2090,151 @@ class UnifiedDiscoveryProvider(BaseProvider):
         for ev in scope_ev_r:
             yield ev
 
+        # ================================================================
+        # PHASE 9A: Nuclei options, template maintenance & optional OAST
+        # ================================================================
+        nuclei_options = phase8_cfg.get("nuclei_options") or {}
+        auto_scan_enabled = bool(nuclei_options.get("auto_scan", False))
+        template_dir = str(nuclei_options.get("custom_templates_dir") or "").strip()
+        if template_dir and platform.system().lower() == "windows" and re.match(r"^[A-Za-z]:[\\/]", template_dir):
+            try:
+                template_dir = BaseProvider.wsl_path_convert(template_dir)
+            except Exception:
+                pass
+
+        oast_cfg = phase8_cfg.get("oast") or {}
+        oast_session: Optional[OASTSession] = None
+        oast_server = str(oast_cfg.get("server") or "").strip()
+        if "://" in oast_server:
+            oast_server = urlparse(oast_server).netloc
+        oast_token = str(oast_cfg.get("token") or "")
+        oast_callback_url = ""
+
+        if scan_profile != "recon" and bool(oast_cfg.get("enabled", False)):
+            interactsh_path = OASTSession.resolve_tool()
+            if not interactsh_path:
+                yield {"type": "log", "message": "[!] OAST enabled but interactsh-client is not installed. Continuing without blind callbacks."}
+                yield {
+                    "type": "stage_skipped",
+                    "stage": "OAST (interactsh)",
+                    "tool": "interactsh",
+                    "reason": "tool_missing: interactsh",
+                }
+            else:
+                oast_session = OASTSession(oast_cfg, interactsh_path)
+                started = await oast_session.start(
+                    startup_timeout=int(oast_cfg.get("startup_timeout_seconds", 20) or 20)
+                )
+                if started and oast_session.enabled:
+                    oast_callback_url = oast_session.oast_url
+                    if not oast_server and oast_session.server:
+                        oast_server = oast_session.server
+                    yield {
+                        "type": "log",
+                        "message": (
+                            f"[*] OAST active: callback domain {oast_session.domain}. "
+                            f"Dalfox -b enabled; Nuclei -iserver " + (oast_server or "default") + "."
+                        ),
+                    }
+                    yield {"type": "scan_summary", "provider": "oast", "status": "started", "domain": oast_session.domain}
+                else:
+                    yield {"type": "log", "message": "[-] OAST client did not produce a callback domain; continuing without blind callbacks (non-fatal)."}
+                    oast_session.stop()
+                    oast_session = None
+        elif scan_profile == "recon":
+            yield {
+                "type": "stage_skipped",
+                "stage": "OAST (interactsh)",
+                "tool": "interactsh",
+                "reason": "profile: recon",
+            }
+        else:
+            yield {"type": "log", "message": "[*] OAST disabled for this project."}
+
+        if scan_profile != "recon" and bool(nuclei_options.get("update_templates", False)):
+            if is_tool_available("nuclei"):
+                async for event in NucleiProvider().update_templates():
+                    yield event
+            else:
+                yield {
+                    "type": "stage_skipped",
+                    "stage": "Nuclei Template Update",
+                    "tool": "nuclei",
+                    "reason": "tool_missing: nuclei",
+                }
+
         scan_queue = asyncio.Queue()
         
-        async def run_scanner(provider_func, targets, label, **kwargs):
+        async def run_scanner(provider_func, targets, label, time_cap_seconds=None, **kwargs):
+            from app.job_control import current_phase, kill_phase_processes
+            phase_label = f"scanner:{label}"
+
+            async def _run():
+                token = current_phase.set(phase_label)
+                try:
+                    async for event in provider_func(targets, **kwargs):
+                        await scan_queue.put((label, event))
+                finally:
+                    current_phase.reset(token)
+
+            task = asyncio.create_task(_run())
             try:
-                async for event in provider_func(targets, **kwargs):
-                    await scan_queue.put((label, event))
+                if time_cap_seconds:
+                    _, pending = await asyncio.wait({task}, timeout=time_cap_seconds)
+                    if task in pending:
+                        killed = kill_phase_processes(phase_label)
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        reason = f"time cap ({time_cap_seconds}s) exceeded; killed {killed} process(es)"
+                        await scan_queue.put((label, {
+                            "type": "stage_timeout",
+                            "stage": phase_label,
+                            "tool": label,
+                            "reason": reason,
+                        }))
+                else:
+                    await task
             except Exception as exc:
                 logger.error(f"Concurrent scanner {label} failed: {exc}", exc_info=True)
                 await scan_queue.put((label, {"type": "log", "message": f"[-] Scanner {label} failed: {exc}"}))
             finally:
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
                 await scan_queue.put((label, "__done__"))
 
         scan_tasks = []
 
-        # Requirement 5: Scan profiles ("recon" vs "recon_validation")
-        if scan_profile == "recon":
+        # Per-phase switch + scan profile both gate active scanners.
+        if not active_scanners_enabled:
+            if scan_profile == "recon":
+                skip_reason = "profile: recon"
+                yield {"type": "log", "message": "[*] Scan profile: 'recon' active. Skipping active vulnerability passes (Nuclei Host, Nuclei Endpoint, Dalfox, OpenRedirex)."}
+            else:
+                skip_reason = "switch: active_scanners disabled"
+                yield {"type": "log", "message": "[*] Active scanners disabled by project switch (Nuclei, Dalfox, OpenRedirex)."}
+            for stage_name, tool_name in (
+                ("Host Vulnerability Scan (nuclei)", "nuclei_host"),
+                ("Endpoint Vulnerability Scan (nuclei)", "nuclei_endpoint"),
+                ("XSS Scanning (dalfox)", "dalfox"),
+                ("Open Redirect Scanning (openredirex)", "openredirex"),
+            ):
+                yield {
+                    "type": "stage_skipped",
+                    "stage": stage_name,
+                    "tool": tool_name,
+                    "reason": skip_reason,
+                }
+                yield {"type": "log", "message": f"[!] Provider {tool_name} skipped ({skip_reason})"}
+            for provider_label in ("nuclei_host", "nuclei_endpoint", "dalfox", "openredirex"):
+                yield {
+                    "type": "scan_summary",
+                    "provider": provider_label,
+                    "status": "SKIPPED",
+                    "count": 0,
+                    "reason": skip_reason,
+                }
+        elif scan_profile == "recon":
             yield {"type": "log", "message": "[*] Scan profile: 'recon' active. Skipping active vulnerability passes (Nuclei Host, Nuclei Endpoint, Dalfox, OpenRedirex)."}
             yield {
                 "type": "stage_skipped",
@@ -1580,8 +2290,13 @@ class UnifiedDiscoveryProvider(BaseProvider):
                         NucleiProvider().discover_host_scan,
                         host_scan_targets,
                         "nuclei_host",
+                        time_cap_seconds=phase_time_cap(phase_switches, "active_scanners"),
                         rate_limit=nuclei_rl,
                         custom_headers=custom_headers_cfg,
+                        oast_server=oast_server or None,
+                        oast_token=oast_token or None,
+                        template_dir=template_dir or None,
+                        auto_scan=auto_scan_enabled,
                     )))
                 else:
                     yield {"type": "scan_summary", "provider": "nuclei_host", "status": "SKIPPED"}
@@ -1592,14 +2307,18 @@ class UnifiedDiscoveryProvider(BaseProvider):
                         NucleiProvider().discover_endpoint_scan,
                         gf_endpoint_urls,
                         "nuclei_endpoint",
+                        time_cap_seconds=phase_time_cap(phase_switches, "active_scanners"),
                         rate_limit=nuclei_rl,
                         custom_headers=custom_headers_cfg,
+                        oast_server=oast_server or None,
+                        oast_token=oast_token or None,
+                        template_dir=template_dir or None,
                     )))
                 else:
                     yield {"type": "scan_summary", "provider": "nuclei_endpoint", "status": "SKIPPED"}
                     yield {"type": "log", "message": "[!] Provider nuclei_endpoint skipped"}
                 
-            if scan_mode == "deep":
+            if active_scanners_enabled:
                 # Dalfox
                 dalfox_rl = min(get_tool_rl("dalfox"), 5) if waf_detected_hosts else get_tool_rl("dalfox")
                 if not is_available("dalfox"):
@@ -1612,8 +2331,10 @@ class UnifiedDiscoveryProvider(BaseProvider):
                         DalfoxProvider().discover,
                         gf_xss_urls,
                         "dalfox",
+                        time_cap_seconds=phase_time_cap(phase_switches, "active_scanners"),
                         rate_limit=dalfox_rl,
                         custom_headers=custom_headers_cfg,
+                        oast_url=oast_callback_url or None,
                     )))
                 else:
                     yield {"type": "log", "message": "[*] No GF XSS URLs found; skipping Dalfox."}
@@ -1631,6 +2352,7 @@ class UnifiedDiscoveryProvider(BaseProvider):
                         OpenredirexProvider().discover,
                         gf_redirect_urls,
                         "openredirex",
+                        time_cap_seconds=phase_time_cap(phase_switches, "active_scanners"),
                         rate_limit=get_tool_rl("openredirex"),
                         custom_headers=custom_headers_cfg,
                     )))
@@ -1644,9 +2366,26 @@ class UnifiedDiscoveryProvider(BaseProvider):
                 yield {"type": "scan_summary", "provider": "openredirex", "status": "SKIPPED"}
                 yield {"type": "log", "message": "[!] Provider openredirex skipped"}
 
+        vuln_scan_executed = len(scan_tasks) > 0
         active_scanners = len(scan_tasks)
-        
+        oast_candidate_hosts = {str(h or "").strip().lower() for h in live_host_targets if h}
+        oast_candidate_hosts.update(
+            (urlparse(u).hostname or "").lower() for u in gf_xss_urls if u
+        )
+        oast_candidate_hosts.discard("")
+
         while active_scanners > 0 or not scan_queue.empty():
+            # Drain correlated OAST interactions while scanners are running.
+            if oast_session:
+                for interaction in oast_session.drain_interactions():
+                    oast_event = OASTSession.interaction_to_finding(
+                        interaction, scope_config, oast_candidate_hosts
+                    )
+                    if oast_event:
+                        oast_interactions += 1
+                        yield oast_event
+                    else:
+                        logger.info("[oast] Ignored uncorrelated/out-of-scope interaction")
             try:
                 label, event = await asyncio.wait_for(scan_queue.get(), timeout=0.2)
             except asyncio.TimeoutError:
@@ -1703,8 +2442,144 @@ class UnifiedDiscoveryProvider(BaseProvider):
 
         await asyncio.gather(*scan_tasks, return_exceptions=True)
 
+        # Final OAST drain + shutdown
+        if oast_session:
+            for interaction in oast_session.drain_interactions():
+                oast_event = OASTSession.interaction_to_finding(
+                    interaction, scope_config, oast_candidate_hosts
+                )
+                if oast_event:
+                    oast_interactions += 1
+                    yield oast_event
+                else:
+                    logger.info("[oast] Ignored uncorrelated/out-of-scope interaction")
+            oast_session.stop()
+            oast_session = None
+            yield {
+                "type": "scan_summary",
+                "provider": "oast",
+                "status": "completed",
+                "count": oast_interactions,
+            }
+        if vuln_scan_executed:
+            yield timing("vulnerability_scan", vuln_scan_started)
+
+        # ================================================================
+        # PHASE 9B: Tech-Aware Routing (Phase 8.6)
+        # ================================================================
+        tech_routing_started = time.monotonic()
+        tech_routing_executed = False
+        tech_routing_cfg = phase8_cfg.get("tech_routing") or {}
+        if active_scanners_enabled and scan_profile != "recon" and bool(tech_routing_cfg.get("enabled", True)):
+            max_per_tech = int(tech_routing_cfg.get("max_hosts_per_tech", 25) or 25)
+            tech_targets: Dict[str, List[str]] = defaultdict(list)
+            wordpress_urls: List[str] = []
+
+            for asset in all_live_assets:
+                if not asset:
+                    continue
+                host_key = (asset.get("domain") or "").lower().strip()
+                asset_url = (asset.get("metadata") or {}).get("url") or host_to_live_url.get(host_key) or ""
+                if not host_key or not asset_url:
+                    continue
+                if scope_config and not is_in_scope(asset_url, scope_config):
+                    continue
+                techs_raw = ((asset.get("metadata") or {}).get("technologies")
+                             or (asset.get("metadata") or {}).get("tech") or [])
+                if isinstance(techs_raw, str):
+                    techs_raw = [techs_raw]
+                tech_blob = " ".join(str(t) for t in techs_raw).lower()
+                for tech_key, tag in TECH_TAG_MAP.items():
+                    if tech_key in tech_blob:
+                        if len(tech_targets[tag]) < max_per_tech and asset_url not in tech_targets[tag]:
+                            tech_targets[tag].append(asset_url)
+                if "wordpress" in tech_blob and asset_url not in wordpress_urls:
+                    wordpress_urls.append(asset_url)
+
+            for gql_url in graphql_urls:
+                if not gql_url or (scope_config and not is_in_scope(gql_url, scope_config)):
+                    continue
+                parsed_gql = urlparse(gql_url)
+                gql_base = f"{parsed_gql.scheme}://{parsed_gql.netloc}" if parsed_gql.netloc else gql_url
+                if len(tech_targets["graphql"]) < max_per_tech and gql_base not in tech_targets["graphql"]:
+                    tech_targets["graphql"].append(gql_base)
+
+            if tech_targets:
+                if is_tool_available("nuclei"):
+                    tech_routing_executed = True
+                    tech_nuclei = NucleiProvider()
+                    async for event in self._capped_events(
+                        lambda: tech_nuclei.discover_tech_scan(
+                            dict(tech_targets),
+                            rate_limit=get_tool_rl("nuclei"),
+                            custom_headers=custom_headers_cfg,
+                            oast_server=oast_server or None,
+                            oast_token=oast_token or None,
+                            template_dir=template_dir or None,
+                            auto_scan=auto_scan_enabled,
+                        ),
+                        "tech_routing",
+                        "nuclei",
+                        phase_time_cap(phase_switches, "active_scanners"),
+                    ):
+                        if event.get("type") == "scan_summary" and event.get("provider") == "nuclei_tech":
+                            tech_routing_findings = event.get("count", 0)
+                        yield event
+                else:
+                    yield {
+                        "type": "stage_skipped",
+                        "stage": "Tech-Aware Routing (nuclei tags)",
+                        "tool": "nuclei",
+                        "reason": "tool_missing: nuclei",
+                    }
+            else:
+                yield {"type": "log", "message": "[*] Tech-aware routing: no matching technologies detected."}
+                yield {"type": "scan_summary", "provider": "nuclei_tech", "status": "SKIPPED", "count": 0, "reason": "no_tech_targets"}
+
+            if wordpress_urls:
+                tech_routing_executed = True
+                wp_provider = WpscanProvider()
+                async for event in self._capped_events(
+                    lambda: wp_provider.scan(
+                        wordpress_urls[:max_per_tech],
+                        rate_limit=get_tool_rl("nuclei"),
+                        max_hosts=max_per_tech,
+                        project_config=project_config,
+                    ),
+                    "tech_routing",
+                    "wpscan",
+                    phase_time_cap(phase_switches, "active_scanners"),
+                ):
+                    if event.get("type") == "scan_summary" and event.get("provider") == "wpscan":
+                        wpscan_findings = event.get("count", 0)
+                    yield event
+        else:
+            if scan_profile == "recon":
+                reason = "profile: recon"
+            elif not active_scanners_enabled:
+                reason = "switch: active_scanners disabled"
+            else:
+                reason = "disabled"
+            yield {
+                "type": "stage_skipped",
+                "stage": "Tech-Aware Routing (nuclei tags)",
+                "tool": "nuclei",
+                "reason": reason,
+            }
+            yield {
+                "type": "stage_skipped",
+                "stage": "Tech Routing (wpscan)",
+                "tool": "wpscan",
+                "reason": reason,
+            }
+        if tech_routing_executed:
+            yield timing("tech_routing", tech_routing_started)
+
         nuclei_findings_count = nuclei_host_findings + nuclei_endpoint_findings
-        total_security_findings = nuclei_findings_count + dalfox_findings + openredirex_findings
+        total_security_findings = (
+            nuclei_findings_count + dalfox_findings + openredirex_findings
+            + tech_routing_findings + wpscan_findings + oast_interactions
+        )
 
         if is_new_path:
             p_discovery_str = "SKIPPED"
@@ -1731,11 +2606,15 @@ class UnifiedDiscoveryProvider(BaseProvider):
             f"    GAU Historical URLs: {len(all_gau_urls)}\n"
             f"    Waymore Hist. URLs : {len(all_waymore_urls)}\n"
             f"    SubJS JS Files     : {len(all_js_files)}\n"
-            f"    LinkFinder Endpts  : {linkfinder_endpoints}\n"
+            f"    JS Analysis Endpts : {js_analysis_endpoints} (files hashed: {len(js_analysis_files)})\n"
+            f"    Secret Candidates  : {secrets_found}\n"
+            f"    Cloud Buckets      : {cloud_buckets_found}\n"
             f"    GoWitness Screenpts: {gowitness_screenshots}\n"
             f"    Uro Normalised URLs: {len(uro_normalised_urls)} (removed {uro_removed})\n"
             f"    GF Matches         : {gf_classified} | Endpoint targets: {len(gf_endpoint_urls)}\n"
             f"    Nuclei Findings    : {nuclei_findings_count} (Host: {nuclei_host_findings}, Endpoint: {nuclei_endpoint_findings})\n"
+            f"    Tech Routing Finds : {tech_routing_findings} (WPScan: {wpscan_findings})\n"
+            f"    OAST Interactions  : {oast_interactions}\n"
             f"    Dalfox Confirmed XSS: {dalfox_findings}\n"
             f"    OpenRedirex Redirs : {openredirex_findings}\n"
             f"    Security Findings  : {total_security_findings}"
@@ -1768,7 +2647,14 @@ class UnifiedDiscoveryProvider(BaseProvider):
             "historical_urls":             len(all_gau_urls),
             "waymore_urls":                len(all_waymore_urls),
             "js_files":                    len(all_js_files),
+            "js_files_hashed":             len(js_analysis_files),
+            "js_analysis_endpoints":       js_analysis_endpoints,
             "extracted_endpoints":         linkfinder_endpoints,
+            "secret_candidates":           secrets_found,
+            "cloud_buckets_found":         cloud_buckets_found,
+            "oast_interactions":           oast_interactions,
+            "tech_routing_findings":       tech_routing_findings,
+            "wpscan_findings":             wpscan_findings,
             "screenshots":                 gowitness_screenshots,
             "uro_normalised_urls":         len(uro_normalised_urls),
             "uro_removed":                 uro_removed,

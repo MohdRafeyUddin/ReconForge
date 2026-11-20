@@ -13,6 +13,7 @@ Performs directory and file discovery on priority hosts:
 import asyncio
 import json
 import logging
+import math
 import os
 import platform
 import subprocess
@@ -20,6 +21,37 @@ import tempfile
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 from urllib.parse import urlparse
+
+# ---------------------------------------------------------------------------
+# Parallel FFUF defaults (global defaults + per-project overrides)
+# ---------------------------------------------------------------------------
+_FFUF_DEFAULTS_FALLBACK: Dict[str, Any] = {
+    "enabled": True,
+    "concurrency": 1,
+    "rate_strategy": "split",   # split = keep aggregate rate; per_worker = N x rate
+}
+_FFUF_DEFAULTS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "config", "ffuf_defaults.json"
+)
+_FFUF_DEFAULTS_CACHE: Optional[Dict[str, Any]] = None
+
+
+def _load_ffuf_defaults() -> Dict[str, Any]:
+    global _FFUF_DEFAULTS_CACHE
+    if _FFUF_DEFAULTS_CACHE is not None:
+        return dict(_FFUF_DEFAULTS_CACHE)
+    defaults = dict(_FFUF_DEFAULTS_FALLBACK)
+    try:
+        with open(_FFUF_DEFAULTS_PATH, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            for key in defaults:
+                if key in loaded and loaded[key] is not None:
+                    defaults[key] = loaded[key]
+    except Exception as exc:
+        logger.warning("Failed to load ffuf_defaults.json (%s); using built-in defaults", exc)
+    _FFUF_DEFAULTS_CACHE = defaults
+    return dict(defaults)
 
 from app.core.scope import is_in_scope
 from app.providers.base import BaseProvider
@@ -111,6 +143,44 @@ class FfufProvider(BaseProvider):
         except Exception:
             pass
         return 1000
+
+    @staticmethod
+    def normalize_ffuf_options(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Merges per-project FFUF options over global defaults and clamps values."""
+        opts = _load_ffuf_defaults()
+        if isinstance(raw, dict):
+            for key in list(opts.keys()):
+                if key in raw and raw[key] is not None:
+                    opts[key] = raw[key]
+        try:
+            raw_conc = opts.get("concurrency")
+            opts["concurrency"] = max(1, min(int(raw_conc) if raw_conc is not None else 1, 10))
+        except Exception:
+            opts["concurrency"] = 1
+        strategy = str(opts.get("rate_strategy") or "split").strip().lower()
+        opts["rate_strategy"] = strategy if strategy in ("split", "per_worker") else "split"
+        opts["enabled"] = bool(opts.get("enabled", True))
+        return opts
+
+    @staticmethod
+    def plan_ffuf_rate(
+        total_rate: int,
+        concurrency: int,
+        rate_strategy: str,
+        target_count: int,
+    ) -> Any:
+        """Returns (workers, per_worker_rate, aggregate_rate).
+
+        split: the configured per-tool rate is treated as a TOTAL budget.
+        per_worker: every worker uses the configured rate (N x aggregate).
+        """
+        workers = max(1, min(int(concurrency or 1), max(1, int(target_count or 1))))
+        total = max(1, int(total_rate or 1))
+        if str(rate_strategy).lower() == "per_worker":
+            per_worker = total
+        else:
+            per_worker = max(1, total // workers)
+        return workers, per_worker, per_worker * workers
 
     def _create_fallback_wordlist(self) -> str:
         """Creates a temporary ~1k-line wordlist when no external SecLists files are present."""
@@ -219,6 +289,183 @@ class FfufProvider(BaseProvider):
         max_results_per_host: int = 200,
         waf_detected_hosts: Optional[Set[str]] = None,
         detected_tech_per_host: Optional[Dict[str, List[str]]] = None,
+        ffuf_options: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Parallel content discovery wrapper (bounded FFUF worker pool)."""
+        opts = self.normalize_ffuf_options(ffuf_options)
+        cleaned_targets = [
+            t.strip().rstrip("/") for t in (targets or []) if isinstance(t, str) and t.strip()
+        ]
+
+        if not cleaned_targets:
+            yield {
+                "type": "scan_summary",
+                "provider": self.name,
+                "status": "SKIPPED",
+                "count": 0,
+                "reason": "no_priority_targets",
+            }
+            return
+
+        if not opts.get("enabled", True):
+            yield {
+                "type": "stage_skipped",
+                "stage": "Content Discovery (ffuf)",
+                "tool": "ffuf",
+                "reason": "disabled",
+            }
+            yield {"type": "scan_summary", "provider": self.name, "status": "SKIPPED", "count": 0}
+            return
+
+        try:
+            tool_path = self.detect_tool("ffuf")
+        except Exception:
+            tool_path = None
+        if not tool_path:
+            yield {
+                "type": "stage_skipped",
+                "stage": "Content Discovery (ffuf)",
+                "tool": "ffuf",
+                "reason": "tool_missing: ffuf",
+            }
+            yield {"type": "scan_summary", "provider": self.name, "status": "SKIPPED", "count": 0}
+            return
+
+        workers, per_worker_rate, aggregate_rate = self.plan_ffuf_rate(
+            rate_limit,
+            opts["concurrency"],
+            opts["rate_strategy"],
+            len(cleaned_targets),
+        )
+
+        # Serial path keeps the exact legacy event flow for a single worker.
+        if workers <= 1:
+            async for event in self._discover_content_sequential(
+                cleaned_targets,
+                scan_mode=scan_mode,
+                rate_limit=per_worker_rate,
+                custom_headers=custom_headers,
+                scope=scope,
+                wordlist_path=wordlist_path,
+                max_results_per_host=max_results_per_host,
+                waf_detected_hosts=waf_detected_hosts,
+                detected_tech_per_host=detected_tech_per_host,
+                emit_lifecycle_logs=True,
+            ):
+                yield event
+            return
+
+        start_ts = time.time()
+        yield {
+            "type": "log",
+            "message": (
+                f"\n========== Content Discovery (FFUF) ==========\n"
+                f"[*] Launching FFUF on {len(cleaned_targets)} priority hosts (Mode: {scan_mode.upper()})...\n"
+                f"[*] Parallel workers: {workers} | rate: {aggregate_rate} rps aggregate "
+                f"({per_worker_rate} rps/worker, strategy: {opts['rate_strategy']})\n"
+                f"[*] Auto-calibration (-ac) active | Per-host result cap: {max_results_per_host}"
+            ),
+        }
+        if opts["rate_strategy"] == "split":
+            yield {
+                "type": "log",
+                "message": (
+                    "[*] FFUF rate is a shared budget in split mode. Raise "
+                    "rate_limits.per_tool.ffuf to increase aggregate throughput; "
+                    "use rate_strategy='per_worker' to give every worker the full rate."
+                ),
+            }
+        else:
+            yield {
+                "type": "log",
+                "message": (
+                    f"[!] FFUF per_worker rate mode: aggregate can reach {aggregate_rate} rps. "
+                    "Ensure this matches the target's authorized rate limit."
+                ),
+            }
+
+        queue: asyncio.Queue = asyncio.Queue()
+        chunks = [cleaned_targets[i::workers] for i in range(workers)]
+
+        async def run_chunk(chunk: List[str], worker_idx: int) -> None:
+            try:
+                async for event in self._discover_content_sequential(
+                    chunk,
+                    scan_mode=scan_mode,
+                    rate_limit=per_worker_rate,
+                    custom_headers=custom_headers,
+                    scope=scope,
+                    wordlist_path=wordlist_path,
+                    max_results_per_host=max_results_per_host,
+                    waf_detected_hosts=waf_detected_hosts,
+                    detected_tech_per_host=detected_tech_per_host,
+                    emit_lifecycle_logs=False,
+                ):
+                    await queue.put((worker_idx, event))
+            except Exception as exc:
+                logger.error("[ffuf] Worker %s failed: %s", worker_idx, exc)
+                await queue.put((worker_idx, {
+                    "type": "log",
+                    "message": f"[-] FFUF worker {worker_idx + 1} failed: {exc}",
+                }))
+            finally:
+                await queue.put((worker_idx, "__done__"))
+
+        tasks = [asyncio.create_task(run_chunk(chunk, i)) for i, chunk in enumerate(chunks) if chunk]
+        total_discovered = 0
+        total_targets_scanned = 0
+        workers_done = 0
+
+        while workers_done < len(tasks) or not queue.empty():
+            try:
+                _, event = await asyncio.wait_for(queue.get(), timeout=0.2)
+            except asyncio.TimeoutError:
+                continue
+            if event == "__done__":
+                workers_done += 1
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "scan_summary" and event.get("provider") == self.name:
+                total_discovered += int(event.get("count") or 0)
+                total_targets_scanned += int(event.get("targets_scanned") or 0)
+                continue
+            yield event
+
+        await asyncio.gather(*tasks, return_exceptions=True)
+        duration = round(time.time() - start_ts, 2)
+        yield {
+            "type": "scan_summary",
+            "provider": self.name,
+            "status": "completed",
+            "count": total_discovered,
+            "targets_scanned": total_targets_scanned,
+            "duration_seconds": duration,
+            "concurrency": workers,
+            "per_worker_rate": per_worker_rate,
+            "aggregate_rate": aggregate_rate,
+            "rate_strategy": opts["rate_strategy"],
+        }
+        yield {
+            "type": "log",
+            "message": (
+                f"[√] FFUF Content Discovery completed. Total paths: {total_discovered} | "
+                f"Hosts: {total_targets_scanned} | Workers: {workers} | Duration: {duration}s"
+            ),
+        }
+
+    async def _discover_content_sequential(
+        self,
+        targets: List[str],
+        scan_mode: str = "fast",
+        rate_limit: int = 20,
+        custom_headers: Optional[Dict[str, str]] = None,
+        scope: Optional[Dict[str, List[str]]] = None,
+        wordlist_path: Optional[str] = None,
+        max_results_per_host: int = 200,
+        waf_detected_hosts: Optional[Set[str]] = None,
+        detected_tech_per_host: Optional[Dict[str, List[str]]] = None,
+        emit_lifecycle_logs: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Executes FFUF content discovery on filtered priority targets.
@@ -259,12 +506,13 @@ class FfufProvider(BaseProvider):
         total_targets_scanned = 0
         start_ts = time.time()
 
-        yield {
-            "type": "log",
-            "message": f"\n========== Content Discovery (FFUF) ==========\n"
-                       f"[*] Launching FFUF on {len(targets)} priority hosts (Mode: {scan_mode.upper()})...\n"
-                       f"[*] Auto-calibration (-ac) active | Per-host result cap: {max_results_per_host}",
-        }
+        if emit_lifecycle_logs:
+            yield {
+                "type": "log",
+                "message": f"\n========== Content Discovery (FFUF) ==========\n"
+                           f"[*] Launching FFUF on {len(targets)} priority hosts (Mode: {scan_mode.upper()})...\n"
+                           f"[*] Auto-calibration (-ac) active | Per-host result cap: {max_results_per_host}",
+            }
 
         try:
             for target_url in targets:
@@ -474,7 +722,7 @@ class FfufProvider(BaseProvider):
                                 }
                                 break
 
-                            path_url = r.get("url") or f"{target_url}/{r.get('input', {}).get('FUZZ', '')}"
+                            path_url = r.get("url") or f"{target_url}/{(r.get('input') or {}).get('FUZZ', '')}"
                             status_code = int(r.get("status") or 200)
                             content_len = int(r.get("length") or 0)
                             words = int(r.get("words") or 0)
@@ -554,8 +802,9 @@ class FfufProvider(BaseProvider):
             "targets_scanned": total_targets_scanned,
             "duration_seconds": duration,
         }
-        yield {
-            "type": "log",
-            "message": f"[√] FFUF Content Discovery completed. Total paths: {total_discovered} | Duration: {duration}s",
-        }
+        if emit_lifecycle_logs:
+            yield {
+                "type": "log",
+                "message": f"[√] FFUF Content Discovery completed. Total paths: {total_discovered} | Duration: {duration}s",
+            }
 

@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 from typing import Dict, List, Set, Any, Optional
 from urllib.parse import urlparse
@@ -56,6 +57,114 @@ def get_url_priority(url: str) -> int:
         return 3
     except Exception:
         return 3
+
+# File types that render as raw assets in a browser, not as useful pages.
+SCREENSHOT_SKIP_EXTENSIONS = {
+    ".js", ".mjs", ".css", ".map",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".mp4", ".webm", ".mp3", ".wav", ".avi", ".mov",
+    ".zip", ".tar", ".gz", ".rar", ".7z", ".exe", ".dll", ".bin", ".iso",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".txt", ".xml", ".csv", ".log",
+}
+
+
+def _screenshot_host_key(url: str) -> str:
+    """Returns a host[:port] key that ignores default ports and casing."""
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or parsed.netloc or "").lower()
+        scheme = (parsed.scheme or "").lower()
+        port = parsed.port
+        if port and not (
+            (scheme == "https" and port == 443)
+            or (scheme == "http" and port == 80)
+        ):
+            host = f"{host}:{port}"
+        return host
+    except Exception:
+        return ""
+
+
+def _screenshot_url_key(url: str) -> str:
+    """Canonical key so `https://host` and `https://host/` deduplicate."""
+    try:
+        parsed = urlparse((url or "").strip())
+        scheme = (parsed.scheme or "https").lower()
+        host = _screenshot_host_key(url)
+        path = parsed.path or "/"
+        query = f"?{parsed.query}" if parsed.query else ""
+        if path == "/" and not query:
+            path = ""
+        return f"{scheme}://{host}{path}{query}"
+    except Exception:
+        return (url or "").strip().lower()
+
+
+def select_screenshot_targets(
+    live_urls: Optional[List[str]] = None,
+    candidate_urls: Optional[List[str]] = None,
+    max_urls: int = 50,
+    max_per_host_extras: int = 5,
+) -> List[str]:
+    """Selects GoWitness targets: live host roots first, then prioritized URLs.
+
+    Roots come from HTTPX-confirmed live host URLs and are always kept (the
+    historical behaviour) before the budget is spent on merged/normalised
+    URLs. Candidates are ranked with :func:`get_url_priority` so parameterised
+    and API-like endpoints are captured before generic pages. ``max_urls``
+    bounds the whole list and ``max_per_host_extras`` stops a single noisy
+    host from consuming every remaining slot.
+    """
+    try:
+        max_urls = max(1, int(max_urls))
+    except (TypeError, ValueError):
+        max_urls = 50
+    try:
+        max_per_host_extras = max(0, int(max_per_host_extras))
+    except (TypeError, ValueError):
+        max_per_host_extras = 5
+
+    targets: List[str] = []
+    seen: Set[str] = set()
+    extras_per_host: Dict[str, int] = {}
+
+    def add(url: str) -> bool:
+        url = (url or "").strip()
+        if not url or len(targets) >= max_urls:
+            return False
+        key = _screenshot_url_key(url)
+        if not key or key in seen:
+            return False
+        seen.add(key)
+        targets.append(url)
+        return True
+
+    for url in live_urls or []:
+        add(url)
+
+    ranked = sorted(
+        (u.strip() for u in (candidate_urls or []) if u and u.strip()),
+        key=lambda u: (get_url_priority(u), len(u), u),
+    )
+    for url in ranked:
+        if len(targets) >= max_urls:
+            break
+        try:
+            ext = os.path.splitext(urlparse(url).path.lower())[1]
+        except Exception:
+            ext = ""
+        if ext in SCREENSHOT_SKIP_EXTENSIONS:
+            continue
+        host = _screenshot_host_key(url)
+        if host and extras_per_host.get(host, 0) >= max_per_host_extras:
+            continue
+        if add(url) and host:
+            extras_per_host[host] = extras_per_host.get(host, 0) + 1
+
+    return targets
+
 
 def merge_urls(
     katana_urls: Optional[List[str]] = None, 

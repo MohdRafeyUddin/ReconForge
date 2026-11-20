@@ -18,6 +18,8 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional
+
+from app.core.scan_options import FULL_SCAN_MODE
 from bson import ObjectId
 
 from app.database import get_database
@@ -212,7 +214,9 @@ class AsyncioScanScheduler:
 
                 interval_hours = max(1, int(schedule.get("interval_hours") or 24))
                 next_run = schedule.get("next_run")
-                scan_mode = schedule.get("scan_mode", "fast")
+                # Legacy schedule.scan_mode is intentionally ignored; every
+                # scheduled run uses the single full pipeline.
+                scan_mode = FULL_SCAN_MODE
                 seed_domains = project.get("seed_domains", [])
 
                 if not seed_domains:
@@ -289,11 +293,13 @@ class AsyncioScanScheduler:
                 job_doc = {
                     "project_id": project_id,
                     "provider_name": "Unified Discovery",
-                    "status": "pending",
                     "scan_mode": scan_mode,
+                    "job_kind": "full",
+                    "status": "pending",
+                    "phase_durations": [],
                     "created_at": now,
                     "heartbeat": now,
-                    "logs": [f"[+] Scheduled recurring scan triggered (mode: {scan_mode.upper()})."],
+                    "logs": ["[+] Scheduled recurring full scan triggered."],
                 }
                 res = await db.jobs.insert_one(job_doc)
                 job_id = str(res.inserted_id)

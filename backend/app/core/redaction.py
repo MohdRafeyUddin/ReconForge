@@ -33,6 +33,28 @@ HEADER_LINE_REGEX = re.compile(
     re.IGNORECASE,
 )
 
+# Well-known secret formats that must never reach logs, WebSocket events,
+# exports or API responses.
+SECRET_VALUE_REGEXES = (
+    re.compile(r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+)
+
+SENSITIVE_FLAG_NAMES = {
+    "-token", "--token", "-itoken", "--itoken",
+    "-interactsh-token", "--interactsh-token",
+    "-oast-token", "--oast-token",
+    "-secret", "--secret", "-secret-key", "--secret-key",
+    "-key", "--key", "-api-key", "--api-key", "-apikey", "--apikey",
+    "-api_key", "--api_key", "-access-key", "--access-key",
+    "-client-token", "--client-token", "-auth", "--auth",
+    "-password", "--password", "-pass", "--pass", "-pwd", "--pwd",
+}
+
 
 def redact_text(text: str) -> str:
     """Redacts sensitive tokens, credentials, and headers from arbitrary log strings."""
@@ -52,7 +74,25 @@ def redact_text(text: str) -> str:
 
     text = HEADER_LINE_REGEX.sub(_header_repl, text)
 
+    # Redact well-known secret value formats anywhere in the text
+    for secret_regex in SECRET_VALUE_REGEXES:
+        text = secret_regex.sub("[REDACTED]", text)
+
     return text
+
+
+def redact_payload(value):
+    """Recursively redacts secret-like strings in events/log payloads."""
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        return [redact_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: ("[REDACTED]" if str(key).lower() in ("raw", "secret", "secret_value") else redact_payload(val))
+            for key, val in value.items()
+        }
+    return value
 
 
 def redact_cmd_args(args: List[str]) -> List[str]:
@@ -104,8 +144,16 @@ def redact_cmd_args(args: List[str]) -> List[str]:
             i += 2
             continue
 
+        # --flag=value forms of secret-like flags
+        if arg.startswith("-") and "=" in arg:
+            flag = arg.split("=", 1)[0].lower()
+            if flag in SENSITIVE_FLAG_NAMES:
+                redacted.append(f"{arg.split('=', 1)[0]}=[REDACTED]")
+                i += 1
+                continue
+
         # Check token / secret flags
-        if arg in ("-token", "--token", "-secret", "--secret", "-key", "--key", "-api-key") and i + 1 < len(args):
+        if arg.lower() in SENSITIVE_FLAG_NAMES and i + 1 < len(args):
             redacted.append(arg)
             redacted.append("[REDACTED]")
             i += 2
@@ -126,3 +174,60 @@ def redact_cmd_args(args: List[str]) -> List[str]:
         i += 1
 
     return redacted
+
+
+SECRET_METADATA_FORBIDDEN_KEYS = {
+    "raw", "secret", "secret_value", "secretvalue", "match", "matched",
+    "value", "token", "password", "credential", "credentials", "key",
+    "private_key", "access_key", "payload",
+}
+
+
+def mask_secret_value(value: str, prefix_len: int = 4) -> str:
+    """
+    Returns a non-reversible display mask for a secret.
+
+    Only a very short prefix is retained so operators can distinguish findings
+    without exposing the credential. The full value is never returned.
+    """
+    if not value or not isinstance(value, str):
+        return ""
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) <= prefix_len:
+        return "*" * len(cleaned)
+    return f"{cleaned[:prefix_len]}{'*' * min(8, max(4, len(cleaned) - prefix_len))}"
+
+
+def scrub_secret_metadata(metadata: dict) -> dict:
+    """
+    Defensive sanitizer for secret assets before persistence/broadcast.
+
+    Removes keys that could contain a raw credential and forces any display
+    prefix through mask_secret_value. Never raises.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    scrubbed = {}
+    for key, val in metadata.items():
+        key_l = str(key).lower()
+        if key_l in SECRET_METADATA_FORBIDDEN_KEYS:
+            continue
+        if key_l in ("prefix", "masked_value", "masked", "masked_preview"):
+            scrubbed[key] = mask_secret_value(str(val or ""))
+            continue
+        if isinstance(val, dict):
+            scrubbed[key] = scrub_secret_metadata(val)
+        elif isinstance(val, list):
+            scrubbed[key] = [
+                scrub_secret_metadata(v) if isinstance(v, dict)
+                else redact_text(v) if isinstance(v, str)
+                else v
+                for v in val
+            ]
+        elif isinstance(val, str):
+            scrubbed[key] = redact_text(val)
+        else:
+            scrubbed[key] = val
+    return scrubbed

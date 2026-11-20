@@ -361,7 +361,7 @@ class ApiSurfaceProvider(BaseProvider):
                             if intro_resp.status_code == 200:
                                 try:
                                     data = intro_resp.json()
-                                    schema_data = data.get("data", {}).get("__schema")
+                                    schema_data = (data.get("data") or {}).get("__schema")
                                     if schema_data and "types" in schema_data:
                                         introspection_enabled = True
                                         types_count = len(schema_data["types"])

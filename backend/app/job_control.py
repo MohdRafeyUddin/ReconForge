@@ -14,13 +14,19 @@ logger = logging.getLogger("reconforge.job_control")
 # Context var to track active job ID in async tasks
 current_job_id = contextvars.ContextVar("current_job_id", default=None)
 
+# Context var identifying the phase that owns newly spawned subprocesses.
+current_phase = contextvars.ContextVar("current_phase", default=None)
+
 # Registry of active subprocesses: job_id -> list of subprocess.Popen
 active_processes = defaultdict(list)
+# Maps id(proc) -> phase label so a phase time cap can kill only its own tree.
+active_process_phases: dict = {}
 
 def register_process(proc):
     jid = current_job_id.get()
     if jid:
         active_processes[jid].append(proc)
+        active_process_phases[id(proc)] = current_phase.get()
         logger.info(f"Registered process {proc.pid} for job {jid}")
 
 def unregister_process(proc):
@@ -31,6 +37,20 @@ def unregister_process(proc):
             logger.info(f"Unregistered process {proc.pid} for job {jid}")
         except ValueError:
             pass
+    active_process_phases.pop(id(proc), None)
+
+
+def kill_phase_processes(phase: Optional[str]) -> int:
+    """Hard-kills every registered process owned by ``phase``. Returns the count."""
+    if not phase:
+        return 0
+    killed = 0
+    for procs in list(active_processes.values()):
+        for proc in list(procs):
+            if active_process_phases.get(id(proc)) == phase:
+                kill_process_tree(proc)
+                killed += 1
+    return killed
 
 
 def kill_process_tree(proc: subprocess.Popen, tool_name: Optional[str] = None) -> None:

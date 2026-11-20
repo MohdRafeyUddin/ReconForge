@@ -248,7 +248,10 @@ async def test_e2e_run_discovery_job_all_phases_completes_on_real_mongo():
             yield {"type": "js_event", "data": {"url": "https://example.com/bundle.js"}}
             yield {"type": "scan_summary", "provider": "subjs", "count": 1}
 
+        gowitness_targets = []
+
         async def fake_gowitness(targets, **kwargs):
+            gowitness_targets.extend(targets)
             yield {"type": "scan_summary", "provider": "gowitness", "screenshots": 1}
 
         async def fake_linkfinder(targets, **kwargs):
@@ -395,6 +398,12 @@ async def test_e2e_run_discovery_job_all_phases_completes_on_real_mongo():
         assert "content_discovery" in executed
         assert "api_surface" in executed
         assert "param_discovery" in executed
+
+        # 5. Assert: GoWitness runs after URL extraction and gets more than
+        #    the bare host root, without duplicate targets.
+        assert "https://example.com" in gowitness_targets
+        assert any(url != "https://example.com" for url in gowitness_targets), gowitness_targets
+        assert len(gowitness_targets) == len(set(gowitness_targets))
 
     finally:
         await teardown_real_test_db(client, db, old_db, old_is_mock)

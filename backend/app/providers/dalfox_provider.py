@@ -27,6 +27,7 @@ class DalfoxProvider(BaseProvider):
         seed_domains: List[str],
         rate_limit: Optional[int] = None,
         custom_headers: Optional[Dict[str, str]] = None,
+        oast_url: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         urls = list(dict.fromkeys(u.strip() for u in seed_domains if u and u.strip()))
         
@@ -80,6 +81,10 @@ class DalfoxProvider(BaseProvider):
             dalfox_flags = ["file", wsl_temp_path if is_windows else temp_path, "--silent", "--worker", str(worker_count)]
             if delay_ms > 0:
                 dalfox_flags.extend(["--delay", str(delay_ms)])
+
+            # Phase 8.4 — blind XSS / OAST callback (optional).
+            if oast_url:
+                dalfox_flags.extend(["-b", oast_url])
 
             if custom_headers:
                 for hk, hv in custom_headers.items():

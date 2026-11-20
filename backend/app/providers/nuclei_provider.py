@@ -179,6 +179,7 @@ class NucleiProvider(BaseProvider):
         # Structure to collect findings by host: host -> list of findings
         crawled_findings: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         total_findings_found = 0
+        info_findings_found = 0
         seen_findings = set()
 
         # Severity counters for logging/telemetry
@@ -197,7 +198,7 @@ class NucleiProvider(BaseProvider):
             q.put(None)
 
         def process_line(line: str, current_pass_name: str, current_pass_severity_counts: Dict[str, int]) -> List[Dict[str, Any]]:
-            nonlocal total_findings_found, pass_findings_found
+            nonlocal total_findings_found, pass_findings_found, info_findings_found
             events = []
             try:
                 record = json.loads(line)
@@ -271,6 +272,40 @@ class NucleiProvider(BaseProvider):
                 "type": "log",
                 "message": f"\nFinding:\nSeverity: {severity.upper()}\nTemplate: {template_name}\nMatched URL:\n{matched_url}"
             })
+
+            # Info-level template matches are reconnaissance context, not
+            # vulnerabilities: persist them as `recon_info` assets and keep
+            # them out of findings/scoring.
+            if severity == "info":
+                info_findings_found += 1
+                if severity in severity_counts:
+                    severity_counts[severity] += 1
+                if severity in current_pass_severity_counts:
+                    current_pass_severity_counts[severity] += 1
+                info_key = f"{template_id}:{matched_url}:{match_host or ''}"
+                events.append({
+                    "type": "asset",
+                    "data": {
+                        "domain": match_host or matched_url,
+                        "type": "recon_info",
+                        "value": info_key,
+                        "status": "live",
+                        "metadata": {
+                            "source": "nuclei",
+                            "severity": "info",
+                            "template_id": template_id,
+                            "template_name": template_name,
+                            "matched_url": matched_url,
+                            "host": match_host,
+                            "tags": tags,
+                            "timestamp": timestamp,
+                            "pass_name": current_pass_name,
+                        },
+                        "discovered_by": "nuclei",
+                        "sources": ["nuclei"],
+                    },
+                })
+                return events
 
             # Emit FindingDetected WebSocket event
             events.append({
@@ -366,13 +401,14 @@ class NucleiProvider(BaseProvider):
                     "-jsonl",
                     "-silent",
                     "-duc",
+                    "-as",
                     "-rl", "150",
                     "-c", "25",
                     "-bs", "25"
                 ]
                 cmd = [executable, *args, *nuclei_flags]
 
-                exec_msg = f"[*] Executing pass {pass_name}: {' '.join(cmd)}"
+                exec_msg = self.format_cmd_log(cmd)
                 logger.info(exec_msg)
                 yield {"type": "log", "message": exec_msg}
 
@@ -556,6 +592,7 @@ class NucleiProvider(BaseProvider):
             "provider": self.name,
             "urls_scanned": len(urls),
             "findings_found": total_findings_found,
+            "info_findings": info_findings_found,
             "duration_seconds": duration_s,
             "severity_counts": severity_counts
         }
@@ -572,6 +609,10 @@ class NucleiProvider(BaseProvider):
         scan_label: str,
         rate_limit: Optional[int] = None,
         custom_headers: Optional[Dict[str, str]] = None,
+        oast_server: Optional[str] = None,
+        oast_token: Optional[str] = None,
+        template_dir: Optional[str] = None,
+        auto_scan: bool = False,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Run a custom list of Nuclei passes against *urls*.
 
@@ -634,6 +675,7 @@ class NucleiProvider(BaseProvider):
 
         crawled_findings: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         total_findings_found = 0
+        info_findings_found = 0
         seen_findings: set = set()
 
         severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
@@ -646,7 +688,7 @@ class NucleiProvider(BaseProvider):
         pass_findings_found = 0  # shared across nested scope
 
         def process_line(line: str, current_pass_name: str, current_pass_severity_counts: Dict[str, int]) -> List[Dict[str, Any]]:
-            nonlocal total_findings_found, pass_findings_found
+            nonlocal total_findings_found, pass_findings_found, info_findings_found
             events = []
             try:
                 record = json.loads(line)
@@ -717,6 +759,39 @@ class NucleiProvider(BaseProvider):
                 "type": "log",
                 "message": f"\nFinding:\nSeverity: {severity.upper()}\nTemplate: {template_name}\nMatched URL:\n{matched_url}"
             })
+
+            # Info-level matches → recon_info (never scored as vulnerabilities)
+            if severity == "info":
+                info_findings_found += 1
+                if severity in severity_counts:
+                    severity_counts[severity] += 1
+                if severity in current_pass_severity_counts:
+                    current_pass_severity_counts[severity] += 1
+                info_key = f"{template_id}:{matched_url}:{match_host or ''}"
+                events.append({
+                    "type": "asset",
+                    "data": {
+                        "domain": match_host or matched_url,
+                        "type": "recon_info",
+                        "value": info_key,
+                        "status": "live",
+                        "metadata": {
+                            "source": "nuclei",
+                            "severity": "info",
+                            "template_id": template_id,
+                            "template_name": template_name,
+                            "matched_url": matched_url,
+                            "host": match_host,
+                            "tags": tags,
+                            "timestamp": timestamp,
+                            "pass_name": current_pass_name,
+                        },
+                        "discovered_by": "nuclei",
+                        "sources": ["nuclei"],
+                    },
+                })
+                return events
+
             events.append({
                 "type": "scan_summary",
                 "event": "FindingDetected",
@@ -774,25 +849,34 @@ class NucleiProvider(BaseProvider):
 
             for pass_info in passes:
                 pass_name = pass_info["name"]
-                pass_tags = pass_info["tags"]
-                pass_severity = pass_info["severity"]
+                pass_tags = pass_info.get("tags") or ""
+                pass_severity = pass_info.get("severity") or ""
 
                 yield {"type": "scan_summary", "event": "NucleiPassStarted", "pass_name": pass_name}
-                yield {"type": "log", "message": f"\n[*] Starting pass: {pass_name} (tags: {pass_tags})"}
+                yield {"type": "log", "message": f"\n[*] Starting pass: {pass_name} (tags: {pass_tags or 'auto'})"}
 
                 args = ["-e", tool_path] if is_windows else []
                 rl_val = str(rate_limit) if rate_limit else "150"
                 nuclei_flags = [
                     "-l", wsl_temp_path,
-                    "-tags", pass_tags,
-                    "-severity", pass_severity,
                     "-jsonl",
                     "-silent",
                     "-duc",
+                    "-as",  # automatic scan mode is required for every Nuclei pass
                     "-rl", rl_val,
                     "-c", "25",
                     "-bs", "25",
                 ]
+                if pass_tags:
+                    nuclei_flags.extend(["-tags", pass_tags])
+                if pass_severity:
+                    nuclei_flags.extend(["-severity", pass_severity])
+                if oast_server:
+                    nuclei_flags.extend(["-iserver", oast_server])
+                if oast_token:
+                    nuclei_flags.extend(["-interactsh-token", oast_token])
+                if template_dir:
+                    nuclei_flags.extend(["-t", template_dir])
                 if custom_headers:
                     for hk, hv in custom_headers.items():
                         if hk and hv:
@@ -954,6 +1038,7 @@ class NucleiProvider(BaseProvider):
             "provider": scan_label,
             "urls_scanned": len(urls),
             "findings_found": total_findings_found,
+            "info_findings": info_findings_found,
             "duration_seconds": duration_s,
             "severity_counts": severity_counts,
         }
@@ -976,12 +1061,17 @@ class NucleiProvider(BaseProvider):
         live_host_urls: List[str],
         rate_limit: Optional[int] = None,
         custom_headers: Optional[Dict[str, str]] = None,
+        oast_server: Optional[str] = None,
+        oast_token: Optional[str] = None,
+        template_dir: Optional[str] = None,
+        auto_scan: bool = False,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Scan bare live hosts for technology, misconfig, and exposure issues.
 
         Input:  ``live_host_urls`` – list of bare HTTP/HTTPS host URLs produced by HTTPX
                                      (e.g. ["https://app.example.com", "http://admin.example.com"]).
-        Passes: NUCLEI_HOST_PASSES (tech, exposure, misconfig, config, panel, default-login, dns, ssl).
+        Passes: NUCLEI_HOST_PASSES (tech, exposure, misconfig, config, panel, dns, ssl).
+        Never includes default-login tags.
         """
         urls = []
         seen: set = set()
@@ -1005,8 +1095,19 @@ class NucleiProvider(BaseProvider):
             yield {"type": "log", "message": "[√] Provider nuclei_host completed"}
             return
 
+        host_passes = list(NUCLEI_HOST_PASSES)
+        if auto_scan:
+            host_passes.append({
+                "name": "AutoScan",
+                "tags": "",
+                "severity": "info,low,medium,high,critical",
+                "automatic_scan": True,
+            })
         async for event in self._run_passes(
-            NUCLEI_HOST_PASSES, urls, "Nuclei Host Scan", rate_limit=rate_limit, custom_headers=custom_headers
+            host_passes, urls, "Nuclei Host Scan",
+            rate_limit=rate_limit, custom_headers=custom_headers,
+            oast_server=oast_server, oast_token=oast_token,
+            template_dir=template_dir,
         ):
             # Re-label the provider field so the frontend pipeline card reads correctly.
             if event.get("type") == "scan_summary" and event.get("provider") == "Nuclei Host Scan":
@@ -1022,6 +1123,9 @@ class NucleiProvider(BaseProvider):
         gf_urls: List[str],
         rate_limit: Optional[int] = None,
         custom_headers: Optional[Dict[str, str]] = None,
+        oast_server: Optional[str] = None,
+        oast_token: Optional[str] = None,
+        template_dir: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Scan GF-classified interesting endpoints for exploitable bug-classes.
 
@@ -1053,9 +1157,161 @@ class NucleiProvider(BaseProvider):
             return
 
         async for event in self._run_passes(
-            NUCLEI_ENDPOINT_PASSES, urls, "Nuclei Endpoint Scan", rate_limit=rate_limit, custom_headers=custom_headers
+            NUCLEI_ENDPOINT_PASSES, urls, "Nuclei Endpoint Scan",
+            rate_limit=rate_limit, custom_headers=custom_headers,
+            oast_server=oast_server, oast_token=oast_token,
+            template_dir=template_dir,
         ):
             if event.get("type") == "scan_summary" and event.get("provider") == "Nuclei Endpoint Scan":
                 event = {**event, "provider": "Nuclei Endpoint Scan"}
             yield event
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Tech-aware routing  (detected technology → targeted Nuclei tags / -as)
+    # ──────────────────────────────────────────────────────────────────────
+
+    async def discover_tech_scan(
+        self,
+        targets_by_tag: Dict[str, List[str]],
+        rate_limit: Optional[int] = None,
+        custom_headers: Optional[Dict[str, str]] = None,
+        oast_server: Optional[str] = None,
+        oast_token: Optional[str] = None,
+        template_dir: Optional[str] = None,
+        auto_scan: bool = False,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Runs targeted Nuclei passes for detected technologies.
+
+        ``targets_by_tag`` maps a Nuclei tag (jenkins, grafana, wordpress, …)
+        to the hosts where that technology was observed. When ``auto_scan`` is
+        enabled an extra ``-as`` pass is executed for the union of targets.
+        """
+        yield {"type": "log", "message": "\n========== Tech-Aware Routing: Targeted Nuclei =========="}
+
+        cleaned: Dict[str, List[str]] = {}
+        for tag, urls in (targets_by_tag or {}).items():
+            clean_tag = str(tag or "").strip().lower()
+            if not clean_tag or not urls:
+                continue
+            normalized: List[str] = []
+            seen: set = set()
+            for u in urls:
+                norm = self.normalize_url(str(u))
+                if norm and norm not in seen:
+                    seen.add(norm)
+                    normalized.append(norm)
+            if normalized:
+                cleaned[clean_tag] = normalized[:50]
+
+        if not cleaned and not auto_scan:
+            yield {"type": "scan_summary", "provider": "nuclei_tech", "status": "SKIPPED", "count": 0, "reason": "no_tech_targets"}
+            return
+
+        total = 0
+        for tag, urls in cleaned.items():
+            passes = [{
+                "name": f"Tech-{tag}",
+                "tags": tag,
+                "severity": "info,low,medium,high,critical",
+            }]
+            async for event in self._run_passes(
+                passes, urls, f"Nuclei Tech ({tag})",
+                rate_limit=rate_limit, custom_headers=custom_headers,
+                oast_server=oast_server, oast_token=oast_token,
+                template_dir=template_dir,
+            ):
+                if event.get("type") == "scan_summary" and event.get("event") == "PassSummary":
+                    total += int(event.get("findings_found") or 0)
+                yield event
+
+        if auto_scan:
+            all_urls: List[str] = []
+            seen_all: set = set()
+            for urls in cleaned.values():
+                for u in urls:
+                    if u not in seen_all:
+                        seen_all.add(u)
+                        all_urls.append(u)
+            if all_urls:
+                passes = [{
+                    "name": "AutoScan",
+                    "tags": "",
+                    "severity": "info,low,medium,high,critical",
+                    "automatic_scan": True,
+                }]
+                async for event in self._run_passes(
+                    passes, all_urls[:50], "Nuclei AutoScan",
+                    rate_limit=rate_limit, custom_headers=custom_headers,
+                    oast_server=oast_server, oast_token=oast_token,
+                    template_dir=template_dir,
+                ):
+                    if event.get("type") == "scan_summary" and event.get("event") == "PassSummary":
+                        total += int(event.get("findings_found") or 0)
+                    yield event
+
+        yield {
+            "type": "scan_summary",
+            "provider": "nuclei_tech",
+            "status": "completed",
+            "count": total,
+            "technologies": sorted(cleaned.keys()),
+        }
+        yield {"type": "log", "message": f"[√] Tech-aware Nuclei routing complete: {total} finding(s) across {len(cleaned)} technology tag(s)."}
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Template maintenance
+    # ──────────────────────────────────────────────────────────────────────
+
+    async def update_templates(self) -> AsyncGenerator[Dict[str, Any], None]:
+        """Updates Nuclei templates when explicitly enabled by the project."""
+        yield {"type": "log", "message": "\n========== Nuclei Template Update =========="}
+        try:
+            tool_path = self.detect_tool("nuclei")
+        except Exception:
+            tool_path = None
+        if not tool_path:
+            yield {"type": "stage_skipped", "stage": "Nuclei Template Update", "tool": "nuclei", "reason": "tool_missing: nuclei"}
+            yield {"type": "scan_summary", "provider": "nuclei_templates", "status": "SKIPPED", "count": 0}
+            return
+
+        is_windows = platform.system().lower() == "windows"
+        cmd = ["wsl", "-e", tool_path, "-update-templates", "-silent"] if is_windows else [tool_path, "-update-templates", "-silent"]
+        yield {"type": "log", "message": self.format_cmd_log(cmd)}
+
+        def _run():
+            return subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+            )
+
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, _run)
+            output_tail = ((result.stdout or "") + (result.stderr or "")).strip()[-500:]
+            if result.returncode != 0:
+                yield {
+                    "type": "stage_error",
+                    "stage": "Nuclei Template Update",
+                    "tool": "nuclei",
+                    "returncode": result.returncode,
+                    "message": f"nuclei -update-templates exited with code {result.returncode}: {output_tail}",
+                }
+                yield {"type": "scan_summary", "provider": "nuclei_templates", "status": "failed", "count": 0}
+            else:
+                if output_tail:
+                    yield {"type": "log", "message": f"[*] Nuclei templates: {output_tail}"}
+                yield {"type": "log", "message": "[√] Nuclei templates updated."}
+                yield {"type": "scan_summary", "provider": "nuclei_templates", "status": "completed", "count": 0}
+        except subprocess.TimeoutExpired:
+            yield {"type": "log", "message": "[-] Nuclei template update timed out after 180s (non-fatal)."}
+            yield {"type": "scan_summary", "provider": "nuclei_templates", "status": "timeout", "count": 0}
+        except Exception as exc:
+            logger.warning("Nuclei template update failed: %s", exc)
+            yield {"type": "log", "message": f"[-] Nuclei template update failed: {exc} (non-fatal)"}
+            yield {"type": "scan_summary", "provider": "nuclei_templates", "status": "failed", "count": 0}
 

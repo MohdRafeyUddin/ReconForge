@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "scan_modes": [
+    "deep"
+  ],
+  "max_hosts": 25,
+  "concurrency": 5,
+  "timeout_seconds": 15,
+  "version_light": true,
+  "priority": "interesting"
+}

@@ -37,6 +37,7 @@ from urllib.parse import urlparse
 
 from app.providers.base import BaseProvider
 from app.core.scope import is_in_scope
+from app.core.redaction import SENSITIVE_HEADER_KEYS, redact_text
 
 logger = logging.getLogger("reconforge.providers.httpx")
 
@@ -257,6 +258,17 @@ class HttpxProvider(BaseProvider):
             content_length_int = self._to_int(content_length)
             tls_info = self._coalesce(payload, "tls_info", "ssl_info", "tls", "ssl")
 
+            # Stored request/response metadata for the asset detail view.
+            request_obj = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+            response_obj = payload.get("response") if isinstance(payload.get("response"), dict) else {}
+            request_method = str(payload.get("method") or request_obj.get("method") or "GET").upper()
+            request_headers = self._sanitize_header_items(
+                request_obj.get("headers") or payload.get("request_headers")
+            )
+            response_headers = self._sanitize_header_items(
+                response_obj.get("headers") or payload.get("response_headers")
+            )
+
             # Phase 3 enrichments
             favicon_hash = payload.get("favicon_mmh3") or payload.get("favicon") or payload.get("favicon_hash")
             jarm = payload.get("jarm")
@@ -358,6 +370,9 @@ class HttpxProvider(BaseProvider):
                     "cdn_waf": cdn_waf_info,
                     "response_body_path": body_rel_path,
                     "response_body_size": body_saved_size,
+                    "request_method": request_method,
+                    "request_headers": request_headers,
+                    "response_headers": response_headers,
                     "source": "httpx",
                 },
                 "discovered_by": "httpx",
@@ -496,6 +511,28 @@ class HttpxProvider(BaseProvider):
             }
 
     @staticmethod
+    def _sanitize_header_items(raw: Any) -> List[str]:
+        """Normalises request/response headers and redacts sensitive values."""
+        items: List[str] = []
+        if isinstance(raw, dict):
+            raw = [f"{k}: {v}" for k, v in raw.items()]
+        elif isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return items
+        for entry in raw[:60]:
+            text = str(entry or "").strip()
+            if not text:
+                continue
+            if ":" in text:
+                header_key, header_val = text.split(":", 1)
+                if header_key.strip().lower() in SENSITIVE_HEADER_KEYS:
+                    items.append(f"{header_key.strip()}: [REDACTED]")
+                    continue
+            items.append(redact_text(text)[:500])
+        return items
+
+    @staticmethod
     def parse_httpx_json_line(line: str) -> Optional[Tuple[str, int]]:
         """Parses a single line of httpx -json output and returns (url, status_code)."""
         if not line or not line.strip():
@@ -554,16 +591,20 @@ class HttpxProvider(BaseProvider):
     async def probe_historical_urls(
         self,
         urls: List[str],
+        live_hosts: Optional[Any] = None,
         rate_limit: int = 20,
         custom_headers: Optional[Dict[str, str]] = None,
         timeout: int = 120,
+        per_url_timeout: int = 8,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Probes historical URLs (from GAU / Waymore) using httpx with -mc 200,301,302,401,403.
-        Probes in batches of 50.
-        Increases timeout in proportion to URL count (cap 10 min).
-        Does NOT store timed-out/unprobed URLs as historical_dead; stores them with status 'unprobed'.
+        (a) probe only URLs whose host is in the live-host set from the httpx stage; mark the others "unprobed" with reason "host not live";
+        (b) a batch timeout affects only that batch: mark it unprobed and CONTINUE with the remaining batches;
+        (c) scale the batch timeout with batch size and the per-URL timeout;
+        (d) report the final live/dead/unprobed counts and the reason for unprobed ones.
         """
+        import math
         from app.job_control import register_process, unregister_process, check_job_status
 
         if not urls:
@@ -589,34 +630,57 @@ class HttpxProvider(BaseProvider):
             return
 
         clean_urls = list(dict.fromkeys(u.strip() for u in urls if u and u.strip()))
+
+        confirmed_live: Dict[str, int] = {}
+        probed_dead: List[str] = []
+        unprobed: List[tuple[str, str]] = []
+
+        # (a) Partition into probeable vs unprobed by live_hosts
+        urls_to_probe: List[str] = []
+        if live_hosts is not None:
+            # Compare bare hostnames only (scheme, path and port removed) so a
+            # live entry such as "https://host:8443/" still matches its URLs.
+            live_host_set = {
+                str(h).strip().lower().split("://")[-1].split("/")[0].split(":")[0]
+                for h in live_hosts if h
+            }
+            for u in clean_urls:
+                parsed = urlparse(u)
+                h = (parsed.netloc or parsed.path.split("/")[0]).split(":")[0].lower()
+                if h in live_host_set:
+                    urls_to_probe.append(u)
+                else:
+                    unprobed.append((u, "host not live"))
+        else:
+            urls_to_probe = list(clean_urls)
+
         # Proportional timeout capped at 10 minutes (600s)
-        total_timeout = min(600, max(timeout, int(len(clean_urls) * 1.5)))
+        total_timeout = min(600, max(timeout, int(len(urls_to_probe) * 1.5)))
 
         yield {
             "type": "log",
             "message": f"\n========== Probing Historical URLs (HTTPX) ==========\n"
-                       f"[*] Probing {len(clean_urls)} historical URLs for live status (200,301,302,401,403) "
-                       f"in batches of 50 (Global timeout: {total_timeout}s)...",
+                       f"[*] Probing {len(urls_to_probe)} historical URLs for live status (200,301,302,401,403) "
+                       f"({len(unprobed)} skipped: host not live) in batches of 50 (Global timeout: {total_timeout}s)...",
         }
-
-        confirmed_live: Dict[str, int] = {}
-        probed_dead: List[str] = []
-        unprobed: List[str] = []
 
         batch_size = 50
         start_ts = time.time()
-        timed_out_global = False
 
-        for i in range(0, len(clean_urls), batch_size):
+        for i in range(0, len(urls_to_probe), batch_size):
             elapsed = time.time() - start_ts
             remaining_global = total_timeout - elapsed
-            if remaining_global <= 0 or timed_out_global:
-                # Remaining URLs were never reached
-                unprobed.extend(clean_urls[i:])
+            if remaining_global <= 0:
+                # Remaining URLs were never reached due to global timeout
+                for rem_u in urls_to_probe[i:]:
+                    unprobed.append((rem_u, "global timeout"))
                 break
 
-            batch = clean_urls[i:i + batch_size]
-            batch_timeout = max(10, min(int(remaining_global), len(batch) * 2))
+            batch = urls_to_probe[i:i + batch_size]
+            # (c) Scale the batch timeout with batch size and the per-URL timeout
+            effective_concurrency = max(1, min(rate_limit, 10))
+            scaled_batch_timeout = int(math.ceil(len(batch) / effective_concurrency) * per_url_timeout) + 10
+            batch_timeout = max(15, min(int(remaining_global), scaled_batch_timeout))
 
             temp_in = tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".txt", encoding="utf-8")
             for u in batch:
@@ -629,7 +693,7 @@ class HttpxProvider(BaseProvider):
                 wsl_in=wsl_in,
                 rate_limit=rate_limit,
                 custom_headers=custom_headers,
-                timeout=8,
+                timeout=per_url_timeout,
                 is_windows=is_windows,
             )
 
@@ -668,7 +732,6 @@ class HttpxProvider(BaseProvider):
 
             except asyncio.TimeoutError:
                 batch_timed_out = True
-                timed_out_global = True
                 from app.job_control import kill_process_tree
                 kill_process_tree(proc, "httpx")
                 yield {
@@ -689,12 +752,12 @@ class HttpxProvider(BaseProvider):
                                 confirmed_live[u_res] = sc_res
                 except Exception:
                     pass
-                # Unprobed: Any URLs in this batch not confirmed live, plus remaining batches
+                # (b) A batch timeout affects only that batch: mark it unprobed and CONTINUE with remaining batches
                 for u in batch:
                     if u in batch_confirmed:
                         confirmed_live[u] = batch_confirmed[u]
                     else:
-                        unprobed.append(u)
+                        unprobed.append((u, "batch timeout"))
             finally:
                 unregister_process(proc)
                 try:
@@ -702,12 +765,6 @@ class HttpxProvider(BaseProvider):
                         os.unlink(temp_in.name)
                 except Exception:
                     pass
-
-            if batch_timed_out:
-                # Add all remaining batches to unprobed
-                if i + batch_size < len(clean_urls):
-                    unprobed.extend(clean_urls[i + batch_size:])
-                break
 
         # Emit live events
         for live_u, sc in confirmed_live.items():
@@ -754,7 +811,9 @@ class HttpxProvider(BaseProvider):
             }
 
         # Emit unprobed assets and events (Type: unprobed_url, status: unprobed)
-        for unprobed_u in unprobed:
+        unprobed_reasons: Dict[str, int] = {}
+        for unprobed_u, reason in unprobed:
+            unprobed_reasons[reason] = unprobed_reasons.get(reason, 0) + 1
             parsed = urlparse(unprobed_u)
             h = parsed.netloc.lower() or parsed.path.split("/")[0].lower()
             if ":" in h:
@@ -772,7 +831,7 @@ class HttpxProvider(BaseProvider):
                         "host": h,
                         "status": "unprobed",
                         "source": "historical_archive",
-                        "reason": "timed_out_or_unprobed",
+                        "reason": reason,
                     },
                     "discovered_by": "httpx_historical_probe",
                     "sources": ["gau", "waymore"],
@@ -783,20 +842,29 @@ class HttpxProvider(BaseProvider):
                 "data": {
                     "url": unprobed_u,
                     "status": "unprobed",
+                    "reason": reason,
                 },
             }
 
+        # (d) Report final live/dead/unprobed counts and the reason for unprobed ones
+        reason_summary = ", ".join(f"{r}: {c}" for r, c in unprobed_reasons.items()) if unprobed_reasons else "none"
+        complete_msg = (
+            f"[√] Historical probing complete: {len(confirmed_live)} live | {len(probed_dead)} dead | "
+            f"{len(unprobed)} unprobed (reasons: {reason_summary})."
+        )
         yield {
             "type": "log",
-            "message": f"[√] Historical probing complete: {len(confirmed_live)} live | {len(probed_dead)} dead | {len(unprobed)} unprobed.",
+            "message": complete_msg,
         }
         yield {
             "type": "scan_summary",
             "provider": "httpx_historical_probe",
             "status": "completed",
-            "total_probed": len(clean_urls),
+            "total_urls": len(clean_urls),
+            "probed_count": len(urls_to_probe),
             "live_count": len(confirmed_live),
             "dead_count": len(probed_dead),
             "unprobed_count": len(unprobed),
+            "unprobed_reasons": unprobed_reasons,
         }
 

@@ -10,9 +10,15 @@ import { GfTab } from "./GfTab";
 import type { GfUrlRecord } from "./GfTab";
 import { ContentDiscoveryTab } from "./ContentDiscoveryTab";
 import type { ContentPathRecord } from "./ContentDiscoveryTab";
+import { APITab } from "./APITab";
+import { CloudTab } from "./CloudTab";
+import { DiscoveredActionPanel } from "./DiscoveredActionPanel";
+import { FetchBodyButton } from "./FetchBodyButton";
+import { ScreenshotsTab } from "./ScreenshotsTab";
 import { NucleiTab } from "./NucleiTab";
-import { apiCall, SCREENSHOT_BASE_URL } from "../../services/api";
+import { apiCall, API_BASE_URL } from "../../services/api";
 import { HighlightText, ExactMatchBadge, getExactMatchFields } from "../Common/HighlightText";
+import { Pagination, usePagination } from "../Common/Pagination";
 
 const getRootDomain = (domain: string): string => {
   if (!domain || typeof domain !== "string") return "";
@@ -60,6 +66,8 @@ interface Asset {
   cluster_skip_reason?: string;
   response_body_path?: string;
   services?: any[];
+  first_seen?: string;
+  last_seen?: string;
 }
 
 interface AssetTableProps {
@@ -72,11 +80,14 @@ interface AssetTableProps {
   gfRecords?: GfUrlRecord[];
   contentPathRecords?: ContentPathRecord[];
   latestScanTime?: string | null;
-  initialTab?: "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei" | "content_discovery" | "historical_urls" | "js_files" | "screenshots";
+  initialTab?: InventoryTabId;
   initialSeverityFilter?: string | null;
+  onRefresh?: () => void;
 }
 
-type InventoryTab = "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei" | "content_discovery" | "historical_urls" | "js_files" | "screenshots";
+type InventoryTabId = "assets" | "dns" | "takeovers" | "normalized_urls" | "gf" | "nuclei" | "content_discovery" | "api_endpoints" | "historical_urls" | "js_files" | "screenshots" | "secrets" | "cloud_buckets" | "recon_info";
+
+type InventoryTab = InventoryTabId;
 
 export const AssetTable: React.FC<AssetTableProps> = ({
   assets,
@@ -90,18 +101,23 @@ export const AssetTable: React.FC<AssetTableProps> = ({
   latestScanTime = null,
   initialTab,
   initialSeverityFilter = null,
+  onRefresh,
 }) => {
   const [activeInventoryTab, setActiveInventoryTab] = useState<InventoryTab>(initialTab || "assets");
   const [search, setSearch] = useState("");
   const [historicalSearch, setHistoricalSearch] = useState("");
   const [jsSearch, setJsSearch] = useState("");
-  const [screenshotsSearch, setScreenshotsSearch] = useState("");
   const [filterType, setFilterType] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [assetPage, setAssetPage] = useState(1);
+  const [assetPageSize, setAssetPageSize] = useState(20);
+  const [expandedBodies, setExpandedBodies] = useState<Record<string, { loading: boolean; error: string | null; content: string | null }>>({});
+  const [screenshotModal, setScreenshotModal] = useState<{ src: string; title: string; url: string } | null>(null);
+  const [screenshotsRefreshNonce, setScreenshotsRefreshNonce] = useState(0);
   const [activeTabs, setActiveTabs] = useState<Record<string, string>>({});
   const [showExportDropdown, setShowExportDropdown] = useState(false);
-  const [sortField, setSortField] = useState<string | null>("hunt_priority");
+  const [sortField, setSortField] = useState<string | null>("status");
   const [sortAsc, setSortAsc] = useState<boolean>(false);
 
   const handleSort = (field: string) => {
@@ -115,7 +131,19 @@ export const AssetTable: React.FC<AssetTableProps> = ({
 
   const handleCopyTopHosts = (count: number = 10) => {
     const sorted = [...assets]
-      .filter(a => a.domain && (a.hunt_priority !== undefined || a.status === "live"))
+      .filter(a => {
+        const type = (a.type || "").toLowerCase();
+        const metadata = (a.metadata || {}) as any;
+        const statusCode = metadata.status_code ?? (a as any).status_code;
+        const isPassive = ["candidate", "passive_candidate"].includes((a.status || "").toLowerCase()) || Boolean(metadata.passive_candidate);
+        return (
+          Boolean(a.domain) &&
+          ["subdomain", "host"].includes(type) &&
+          a.status === "live" &&
+          statusCode !== undefined && statusCode !== null &&
+          !isPassive
+        );
+      })
       .sort((a, b) => ((b.hunt_priority ?? 0) - (a.hunt_priority ?? 0)))
       .slice(0, count);
     const text = sorted.map(a => a.domain).join("\n");
@@ -250,13 +278,54 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     setActiveTabs(prev => ({ ...prev, [assetId]: tab }));
   };
 
+  const loadExpandedBody = async (asset: Asset) => {
+    const pId = projectId || asset.project_id;
+    const hasBody = asset.metadata?.response_body_path || asset.response_body_path;
+    if (!pId || !hasBody) return;
+    let alreadyLoaded = false;
+    setExpandedBodies((prev) => {
+      alreadyLoaded = Boolean(prev[asset.id]);
+      if (alreadyLoaded) return prev;
+      return { ...prev, [asset.id]: { loading: true, error: null, content: null } };
+    });
+    if (alreadyLoaded) return;
+    try {
+      const data = await apiCall(`/assets/project/${pId}/asset/${asset.id}/response-body`);
+      setExpandedBodies((prev) => ({
+        ...prev,
+        [asset.id]: { loading: false, error: null, content: data.content ?? "(Empty response body)" },
+      }));
+    } catch (err: any) {
+      setExpandedBodies((prev) => ({
+        ...prev,
+        [asset.id]: { loading: false, error: err.message || "Failed to load response body", content: null },
+      }));
+    }
+  };
+
   const toggleExpand = (id: string) => {
-    setExpandedId(expandedId === id ? null : id);
+    const next = expandedId === id ? null : id;
+    setExpandedId(next);
+    if (next) {
+      const asset = assets.find((a) => a.id === id);
+      if (asset) loadExpandedBody(asset);
+    }
   };
 
   const baseFilteredAssets = assets.filter((asset) => {
     // Only core target assets belong in the main Assets table; secondary types have their own dedicated sub-tabs
     if (["js_file", "screenshot", "finding", "historical_url", "historical_dead", "unprobed_url", "uro_url", "gf_url", "content_path", "dns_record"].includes(asset.type)) {
+      return false;
+    }
+    // Passive-only candidates have no HTTP status, DNS record, IP or ports;
+    // keep the Assets table focused on actionable infrastructure.
+    if (
+      asset.type === "subdomain" &&
+      ["candidate", "unknown"].includes(String(asset.status || "").toLowerCase()) &&
+      !asset.metadata?.url &&
+      !asset.metadata?.dnsx &&
+      !(asset.open_ports?.length)
+    ) {
       return false;
     }
     const q = search.toLowerCase().trim();
@@ -296,9 +365,18 @@ export const AssetTable: React.FC<AssetTableProps> = ({
       if (sortField === "hunt_priority") {
         aVal = a.hunt_priority ?? -1;
         bVal = b.hunt_priority ?? -1;
-      } else if (sortField === "risk") {
-        aVal = a.risk?.score ?? -1;
-        bVal = b.risk?.score ?? -1;
+      } else if (sortField === "domain") {
+        aVal = (a.domain || "").toLowerCase();
+        bVal = (b.domain || "").toLowerCase();
+      } else if (sortField === "status") {
+        aVal = a.metadata?.status_code ?? (a as any).status_code ?? -1;
+        bVal = b.metadata?.status_code ?? (b as any).status_code ?? -1;
+      } else if (sortField === "ip") {
+        aVal = a.metadata?.ip || a.metadata?.ip_address || a.metadata?.dnsx?.a?.[0] || "";
+        bVal = b.metadata?.ip || b.metadata?.ip_address || b.metadata?.dnsx?.a?.[0] || "";
+      } else if (sortField === "ports") {
+        aVal = (a.open_ports?.length ? a.open_ports : a.metadata?.open_ports || []).length;
+        bVal = (b.open_ports?.length ? b.open_ports : b.metadata?.open_ports || []).length;
       }
       if (aVal < bVal) return sortAsc ? -1 : 1;
       if (aVal > bVal) return sortAsc ? 1 : -1;
@@ -310,6 +388,41 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     if (!search.trim()) return 0;
     return filteredAssets.filter((a) => getExactMatchFields(a, search).length > 0).length;
   }, [filteredAssets, search]);
+
+  const screenshotByHost = React.useMemo(() => {
+    const origin = API_BASE_URL.replace(/\/api\/v1\/?$/, "");
+    const map: Record<string, { src: string; title: string; url: string; timestamp: string }> = {};
+    for (const a of assets) {
+      const meta = a.metadata || {};
+      const hasScreenshotData = a.type === "screenshot"
+        || Boolean(meta.filename && meta.run_id && meta.screenshot_path);
+      if (!hasScreenshotData) continue;
+      const host = String(meta.host || a.domain || "").toLowerCase();
+      const filename = meta.filename || String(meta.screenshot_path || "").split("/").pop();
+      const runId = meta.run_id;
+      if (!projectId || !host || !filename || !runId) continue;
+      const ts = String(meta.timestamp || a.updated_at || a.created_at || "");
+      if (map[host] && map[host].timestamp >= ts) continue;
+      map[host] = {
+        src: `${origin}/api/v1/assets/project/${projectId}/screenshots/${runId}/${filename}`,
+        title: meta.title || `Screenshot of ${host}`,
+        url: meta.url || a.domain || host,
+        timestamp: ts,
+      };
+    }
+    return map;
+  }, [assets, projectId]);
+
+  const assetTotalPages = Math.max(1, Math.ceil(filteredAssets.length / assetPageSize));
+  const assetSafePage = Math.min(assetPage, assetTotalPages);
+  const pagedAssets = React.useMemo(
+    () => filteredAssets.slice((assetSafePage - 1) * assetPageSize, assetSafePage * assetPageSize),
+    [filteredAssets, assetSafePage, assetPageSize]
+  );
+
+  React.useEffect(() => {
+    setAssetPage(1);
+  }, [search, filterType, filterStatus, sortField, sortAsc, assetPageSize]);
 
 
   const handleCopy = (text: string) => {
@@ -405,22 +518,39 @@ export const AssetTable: React.FC<AssetTableProps> = ({
   }, [assets]);
 
   const javascriptFiles = React.useMemo(() => {
-    return assets.filter(a => a.type === "js_file").map(a => ({
-      url: a.domain,
-      host: a.metadata?.host || "",
-      size: a.metadata?.size || "unknown",
-      source: a.metadata?.source || a.discovered_by || "subjs"
-    }));
-  }, [assets]);
+    const files: { url: string; host: string; size: any; source: string }[] = [];
+    const seen = new Set<string>();
 
-  const screenshotsList = React.useMemo(() => {
-    return assets.filter(a => a.type === "screenshot").map(a => ({
-      url: a.domain,
-      title: a.metadata?.title || "",
-      screenshot_path: a.metadata?.screenshot_path || "",
-      timestamp: a.metadata?.timestamp || a.created_at,
-      source: a.metadata?.source || "gowitness"
-    }));
+    const addFile = (url: string, host: string, size: any, source: string) => {
+      const clean = String(url || "").trim();
+      if (!clean || seen.has(clean)) return;
+      seen.add(clean);
+      let resolvedHost = host;
+      if (!resolvedHost) {
+        try {
+          resolvedHost = new URL(clean, "https://placeholder").hostname;
+        } catch {
+          resolvedHost = "";
+        }
+      }
+      files.push({ url: clean, host: resolvedHost, size: size || "unknown", source: source || "unknown" });
+    };
+
+    // Stored js_file assets (JS analysis / SubJS / source maps)
+    assets.filter((a) => a.type === "js_file").forEach((a) => {
+      const meta = a.metadata || {};
+      addFile(meta.url || (a as any).value || a.domain, meta.host || "", meta.size, meta.source || a.discovered_by || "subjs");
+    });
+
+    // Katana also records JS files on the host asset itself.
+    assets.filter((a) => a.type === "subdomain" || a.type === "host").forEach((a) => {
+      const list = (a.metadata?.katana?.js_files || []) as string[];
+      for (const jsUrl of list) {
+        addFile(jsUrl, a.domain || "", "unknown", "katana");
+      }
+    });
+
+    return files;
   }, [assets]);
 
   const filteredHistoricalUrls = React.useMemo(() => {
@@ -447,18 +577,6 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     });
   }, [javascriptFiles, jsSearch]);
 
-  const filteredScreenshotsList = React.useMemo(() => {
-    const q = screenshotsSearch.toLowerCase().trim();
-    if (!q) return screenshotsList;
-    return screenshotsList.filter((s) => {
-      return (
-        (s.url || "").toLowerCase().includes(q) ||
-        (s.title || "").toLowerCase().includes(q) ||
-        (s.source || "").toLowerCase().includes(q)
-      );
-    });
-  }, [screenshotsList, screenshotsSearch]);
-
   const contentDiscoveryList = React.useMemo(() => {
     if (contentPathRecords && contentPathRecords.length > 0) {
       return contentPathRecords;
@@ -477,21 +595,70 @@ export const AssetTable: React.FC<AssetTableProps> = ({
     }));
   }, [assets, contentPathRecords]);
 
+  // Phase 8 — masked secrets, cloud bucket candidates and info-level recon assets
+  const secretRecords = React.useMemo(() => {
+    return assets.filter(a => ["secret_finding", "secret"].includes(a.type)).map((a) => ({
+      id: a.id,
+      host: a.metadata?.host || a.domain || "",
+      detector: a.metadata?.secret_type || a.metadata?.detector || "secret",
+      location: a.metadata?.location || `${a.metadata?.location_url || ""}:${a.metadata?.line || 0}`,
+      prefix: a.metadata?.masked_preview || a.metadata?.prefix || "",
+      verified: false,
+      severity: a.metadata?.severity || "medium",
+      scanner: a.metadata?.scanner || a.discovered_by || "secrets",
+      url: a.metadata?.location_url || a.metadata?.url || "",
+      first_seen: a.first_seen || a.created_at,
+      last_seen: a.last_seen || a.updated_at,
+    }));
+  }, [assets]);
+
+  const reconInfoRecords = React.useMemo(() => {
+    return assets.filter(a => a.type === "recon_info").map((a) => ({
+      template_id: a.metadata?.template_id || "",
+      template_name: a.metadata?.template_name || a.metadata?.template_id || "Info",
+      matched_url: a.metadata?.matched_url || "",
+      host: a.metadata?.host || a.domain || "",
+      tags: a.metadata?.tags || [],
+      timestamp: a.metadata?.timestamp || a.first_seen || a.created_at,
+    }));
+  }, [assets]);
+
+  const historicalPager = usePagination(filteredHistoricalUrls, 20, historicalSearch);
+  const jsPager = usePagination(filteredJavascriptFiles, 20, jsSearch);
+  const secretPager = usePagination(secretRecords, 20);
+  const reconPager = usePagination(reconInfoRecords, 20);
+
   const inventoryTabs: { id: InventoryTab; label: string; count?: number }[] = [
     { id: "assets", label: "Assets", count: filteredAssets.length },
     { id: "dns", label: "DNS", count: dnsRecords.length },
     { id: "takeovers", label: "Takeovers", count: takeoverRecords.length },
     { id: "content_discovery", label: "Content Discovery", count: contentDiscoveryList.length },
+    { id: "api_endpoints", label: "API" },
     { id: "normalized_urls", label: "Normalized URLs", count: displayedNormalizedUrls.length },
     { id: "gf", label: "Interesting URLs", count: gfTotalCount },
-    { id: "nuclei", label: "Security Findings", count: nucleiFindings.length },
+    { id: "secrets", label: "Secrets", count: secretRecords.length },
+    { id: "cloud_buckets", label: "Cloud" },
     { id: "historical_urls", label: "Historical URLs", count: historicalUrls.length },
     { id: "js_files", label: "JS Files", count: javascriptFiles.length },
-    { id: "screenshots", label: "Screenshots", count: screenshotsList.length },
+    { id: "screenshots", label: "Screenshots" },
   ];
 
   return (
     <div className="space-y-4">
+      {/* Always-visible targeted actions on extracted URLs */}
+      <DiscoveredActionPanel
+        projectId={projectId}
+        assets={assets}
+        onRefresh={onRefresh}
+        dnsRecordCount={dnsRecords.length}
+        onOpenInventoryTab={(tab) => {
+          setActiveInventoryTab(tab);
+          if (tab === "screenshots") {
+            setScreenshotsRefreshNonce((nonce) => nonce + 1);
+          }
+        }}
+      />
+
       {/* Sub-tab navigation */}
       <div className="flex items-center gap-1.5 border-b border-dark-border pb-1 overflow-x-auto">
         {inventoryTabs.map((tab) => (
@@ -512,6 +679,24 @@ export const AssetTable: React.FC<AssetTableProps> = ({
             )}
           </button>
         ))}
+        {projectId && (
+          <div className="ml-auto flex items-center gap-1.5 pl-2">
+            <a
+              href={`${API_BASE_URL}/reports/project/${projectId}/export/urls`}
+              className="px-2.5 py-1.5 rounded border border-dark-border text-[10px] font-mono font-bold uppercase tracking-wider text-slate-300 hover:text-cyber-accent hover:border-cyber-accent/50 transition-colors whitespace-nowrap"
+              title="Download an in-scope URL list (Burp/ZAP importable)"
+            >
+              Export URLs
+            </a>
+            <a
+              href={`${API_BASE_URL}/reports/project/${projectId}/export/burp`}
+              className="px-2.5 py-1.5 rounded border border-dark-border text-[10px] font-mono font-bold uppercase tracking-wider text-slate-300 hover:text-cyber-accent hover:border-cyber-accent/50 transition-colors whitespace-nowrap"
+              title="Download a Burp/ZAP XML URL export"
+            >
+              Burp XML
+            </a>
+          </div>
+        )}
       </div>
 
       {/* DNS Tab */}
@@ -528,19 +713,33 @@ export const AssetTable: React.FC<AssetTableProps> = ({
       {activeInventoryTab === "content_discovery" && (
         <ContentDiscoveryTab
           records={contentDiscoveryList}
+          projectId={projectId}
           projectName={projectName}
           latestScanTime={latestScanTime}
         />
       )}
 
+      {/* API endpoints tab */}
+      {activeInventoryTab === "api_endpoints" && (
+        <APITab projectId={projectId} />
+      )}
+
       {/* Normalized URLs Tab */}
       {activeInventoryTab === "normalized_urls" && (
-        <NormalizedUrlTab records={displayedNormalizedUrls} projectName={projectName} />
+        <NormalizedUrlTab
+          records={displayedNormalizedUrls}
+          projectId={projectId}
+          projectName={projectName}
+        />
       )}
 
       {/* GF Interesting URLs Tab */}
       {activeInventoryTab === "gf" && (
-        <GfTab records={gfRecords} projectName={projectName} />
+        <GfTab
+          records={gfRecords}
+          projectId={projectId}
+          projectName={projectName}
+        />
       )}
 
       {/* Security Findings Tab */}
@@ -550,6 +749,119 @@ export const AssetTable: React.FC<AssetTableProps> = ({
           projectName={projectName}
           initialSeverityFilter={initialSeverityFilter}
         />
+      )}
+
+      {/* Phase 8: Recon Info Tab */}
+      {activeInventoryTab === "recon_info" && (
+        <div className="bg-dark-card border border-dark-border rounded-xl glass p-4">
+          <div className="border-b border-dark-border pb-3 mb-4">
+            <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">Reconnaissance Context</h3>
+            <span className="text-[10px] font-mono text-slate-500">{reconInfoRecords.length} info-level Nuclei match(es) — not scored as vulnerabilities</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="bg-dark-bg/70 border-b border-dark-border text-slate-400 font-mono uppercase tracking-wider text-[10px]">
+                  <th className="p-3">Template</th>
+                  <th className="p-3">Matched URL</th>
+                  <th className="p-3">Host</th>
+                  <th className="p-3">Tags</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reconInfoRecords.length === 0 ? (
+                  <tr><td colSpan={4} className="p-6 text-center text-slate-500 uppercase tracking-widest font-mono text-[10px]">No info-level matches yet.</td></tr>
+                ) : reconPager.pageItems.map((rec, idx) => (
+                  <tr key={`${rec.template_id}-${idx}`} className="border-b border-dark-border/50 hover:bg-dark-hover/30 font-mono text-[11px]">
+                    <td className="p-3 text-slate-300">{rec.template_name || rec.template_id}</td>
+                    <td className="p-3 break-all">
+                      {rec.matched_url ? (
+                        <a href={rec.matched_url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline">{rec.matched_url}</a>
+                      ) : "-"}
+                    </td>
+                    <td className="p-3 text-slate-300">{rec.host || "-"}</td>
+                    <td className="p-3 text-slate-500">{(rec.tags || []).join(", ") || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Pagination
+            page={reconPager.page}
+            pageSize={reconPager.pageSize}
+            total={reconPager.total}
+            onPageChange={reconPager.setPage}
+            onPageSizeChange={reconPager.setPageSize}
+            itemLabel="recon match(es)"
+          />
+        </div>
+      )}
+
+      {/* Phase 8: Secrets Tab (masked values only) */}
+      {activeInventoryTab === "secrets" && (
+        <div className="bg-dark-card border border-dark-border rounded-xl glass p-4">
+          <div className="border-b border-dark-border pb-3 mb-4">
+            <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">Secret Candidates</h3>
+            <span className="text-[10px] font-mono text-slate-500">
+              {secretRecords.length} masked candidate(s). Raw secret values are never stored, logged or exported.
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="bg-dark-bg/70 border-b border-dark-border text-slate-400 font-mono uppercase tracking-wider text-[10px]">
+                  <th className="p-3">Detector</th>
+                  <th className="p-3">Prefix</th>
+                  <th className="p-3">Host</th>
+                  <th className="p-3">Location</th>
+                  <th className="p-3">Verified</th>
+                  <th className="p-3">Scanner</th>
+                </tr>
+              </thead>
+              <tbody>
+                {secretRecords.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="p-6 text-center text-slate-500 font-mono text-[10px]">
+                      <div className="uppercase tracking-widest">No secret candidates found</div>
+                      <div className="mt-2 normal-case text-slate-600 max-w-2xl mx-auto leading-relaxed">
+                        Secrets are detected only in stored HTTP response bodies and JS files
+                        (trufflehog/gitleaks). FFUF hits and historical URLs are not saved as
+                        response bodies by default, so there is nothing to scan until a page
+                        containing a credential is stored.
+                      </div>
+                    </td>
+                  </tr>
+                ) : secretPager.pageItems.map((rec) => (
+                  <tr key={rec.id} className="border-b border-dark-border/50 hover:bg-dark-hover/30 font-mono text-[11px]">
+                    <td className="p-3 text-slate-200 font-bold">{rec.detector}</td>
+                    <td className="p-3 text-cyber-warning select-none">{rec.prefix || "****"}</td>
+                    <td className="p-3 text-slate-300 break-all">{rec.host || "-"}</td>
+                    <td className="p-3 text-slate-400 break-all">{rec.location || "-"}</td>
+                    <td className="p-3">
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${rec.verified ? "bg-cyber-danger/20 border-cyber-danger/40 text-cyber-danger" : "bg-slate-500/10 border-slate-500/30 text-slate-400"}`}>
+                        {rec.verified ? "VERIFIED" : "UNVERIFIED"}
+                      </span>
+                    </td>
+                    <td className="p-3 text-slate-400">{rec.scanner}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Pagination
+            page={secretPager.page}
+            pageSize={secretPager.pageSize}
+            total={secretPager.total}
+            onPageChange={secretPager.setPage}
+            onPageSizeChange={secretPager.setPageSize}
+            itemLabel="secret candidate(s)"
+          />
+        </div>
+      )}
+
+      {/* Cloud services, cloud URLs and bucket candidates */}
+      {activeInventoryTab === "cloud_buckets" && (
+        <CloudTab projectId={projectId} />
       )}
 
       {/* Historical URLs Tab */}
@@ -591,7 +903,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredHistoricalUrls.map((urlObj, idx) => {
+                  historicalPager.pageItems.map((urlObj, idx) => {
                     const exactMatch = Boolean(
                       historicalSearch.trim() &&
                       (urlObj.url.toLowerCase() === historicalSearch.trim().toLowerCase() ||
@@ -606,6 +918,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                             <a href={urlObj.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline">
                               <HighlightText text={urlObj.url} highlight={historicalSearch} />
                             </a>
+                            <FetchBodyButton projectId={projectId} url={urlObj.url} compact />
                             {exactMatch && <ExactMatchBadge />}
                           </div>
                         </td>
@@ -645,6 +958,14 @@ export const AssetTable: React.FC<AssetTableProps> = ({
               </tbody>
             </table>
           </div>
+          <Pagination
+            page={historicalPager.page}
+            pageSize={historicalPager.pageSize}
+            total={historicalPager.total}
+            onPageChange={historicalPager.setPage}
+            onPageSizeChange={historicalPager.setPageSize}
+            itemLabel="historical URL(s)"
+          />
         </div>
       )}
 
@@ -686,7 +1007,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredJavascriptFiles.map((jsObj, idx) => {
+                  jsPager.pageItems.map((jsObj, idx) => {
                     const exactMatch = Boolean(
                       jsSearch.trim() &&
                       (jsObj.url.toLowerCase() === jsSearch.trim().toLowerCase() ||
@@ -719,84 +1040,23 @@ export const AssetTable: React.FC<AssetTableProps> = ({
               </tbody>
             </table>
           </div>
+          <Pagination
+            page={jsPager.page}
+            pageSize={jsPager.pageSize}
+            total={jsPager.total}
+            onPageChange={jsPager.setPage}
+            onPageSizeChange={jsPager.setPageSize}
+            itemLabel="JS file(s)"
+          />
         </div>
       )}
 
       {/* Screenshots Tab */}
       {activeInventoryTab === "screenshots" && (
-        <div className="bg-dark-card border border-dark-border rounded-xl glass p-4">
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4 border-b border-dark-border pb-3">
-            <div>
-              <h3 className="text-xs font-mono uppercase tracking-wider text-cyber-accent">Captured Screenshots</h3>
-              <span className="text-[10px] font-mono text-slate-500">{filteredScreenshotsList.length} / {screenshotsList.length} screenshots</span>
-            </div>
-            <div className="relative w-full sm:w-72">
-              <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-500">
-                <Search className="w-3.5 h-3.5" />
-              </span>
-              <input
-                type="text"
-                placeholder="Search screenshots by title, URL, host..."
-                value={screenshotsSearch}
-                onChange={(e) => setScreenshotsSearch(e.target.value)}
-                className="w-full bg-dark-input border border-dark-border rounded pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyber-accent font-mono"
-              />
-            </div>
-          </div>
-          {filteredScreenshotsList.length === 0 ? (
-            <div className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono text-[10px]">
-              {screenshotsList.length === 0 ? "No screenshots captured yet. Run scan in deep mode." : "No screenshots match your search."}
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-              {filteredScreenshotsList.map((screen, idx) => {
-                const imgUrl = screen.screenshot_path.startsWith("http") 
-                  ? screen.screenshot_path 
-                  : `${SCREENSHOT_BASE_URL}${screen.screenshot_path}`;
-                const exactMatch = Boolean(
-                  screenshotsSearch.trim() &&
-                  (screen.url.toLowerCase() === screenshotsSearch.trim().toLowerCase() ||
-                   (screen.title && screen.title.toLowerCase() === screenshotsSearch.trim().toLowerCase()) ||
-                   (screen.source && screen.source.toLowerCase() === screenshotsSearch.trim().toLowerCase()))
-                );
-                  
-                return (
-                  <div key={idx} className="bg-dark-bg border border-dark-border rounded-lg overflow-hidden flex flex-col group hover:border-cyber-accent/60 transition-all">
-                    <div className="relative aspect-video bg-slate-900 border-b border-dark-border overflow-hidden">
-                      <img 
-                        src={imgUrl} 
-                        alt={screen.title} 
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                        onError={(e) => {
-                          (e.target as HTMLElement).style.display = 'none';
-                        }}
-                      />
-                    </div>
-                    <div className="p-3 flex flex-col justify-between flex-grow font-mono text-[10px]">
-                      <div className="mb-2">
-                        <div className="flex items-center gap-1.5 flex-wrap mb-1">
-                          <a href={screen.url} target="_blank" rel="noopener noreferrer" className="text-cyber-accent hover:underline break-all font-bold block">
-                            <HighlightText text={screen.url} highlight={screenshotsSearch} />
-                          </a>
-                          {exactMatch && <ExactMatchBadge />}
-                        </div>
-                        <span className="text-slate-400 block text-[9px]">
-                          <HighlightText text={screen.title} highlight={screenshotsSearch} />
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center text-[9px] text-slate-500 border-t border-dark-border/40 pt-2">
-                        <span>{screen.timestamp ? new Date(screen.timestamp).toLocaleDateString() : "-"}</span>
-                        <span className="px-1 py-0.2 bg-blue-500/10 border border-blue-500/30 text-blue-400 rounded uppercase font-semibold">
-                          <HighlightText text={screen.source} highlight={screenshotsSearch} />
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+        <ScreenshotsTab
+          projectId={projectId}
+          refreshNonce={screenshotsRefreshNonce}
+        />
       )}
 
       {/* Existing Assets Tab */}
@@ -900,30 +1160,34 @@ export const AssetTable: React.FC<AssetTableProps> = ({
           <thead>
             <tr className="bg-dark-bg/70 border-b border-dark-border text-slate-400 font-mono uppercase tracking-wider">
               <th className="p-4 w-10"></th>
-              <th className="p-4">Asset / Subdomain</th>
-              <th className="p-4">Type</th>
-              <th className="p-4">Status & Code</th>
-              <th className="p-4">Risk</th>
-              <th className="p-4">Exposure</th>
-              <th className="p-4">Priority</th>
-              <th className="p-4 cursor-pointer hover:text-cyber-accent select-none" onClick={() => handleSort("hunt_priority")}>Hunt Priority {sortField === "hunt_priority" ? (sortAsc ? "▲" : "▼") : ""}</th>
-              <th className="p-4">IP Address</th>
-              <th className="p-4">Open Ports</th>
-              <th className="p-4">Discovered By</th>
+              <th className="p-4 cursor-pointer hover:text-cyber-accent select-none" onClick={() => handleSort("domain")}>Asset / URL {sortField === "domain" ? (sortAsc ? "▲" : "▼") : ""}</th>
+              <th className="p-4 cursor-pointer hover:text-cyber-accent select-none" onClick={() => handleSort("status")}>Status & Code {sortField === "status" ? (sortAsc ? "▲" : "▼") : ""}</th>
+              <th className="p-4 cursor-pointer hover:text-cyber-accent select-none" onClick={() => handleSort("ip")}>IP Address {sortField === "ip" ? (sortAsc ? "▲" : "▼") : ""}</th>
+              <th className="p-4 cursor-pointer hover:text-cyber-accent select-none" onClick={() => handleSort("ports")}>Open Ports {sortField === "ports" ? (sortAsc ? "▲" : "▼") : ""}</th>
             </tr>
           </thead>
           <tbody>
             {filteredAssets.length === 0 ? (
               <tr>
-                <td colSpan={10} className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono">
+                <td colSpan={5} className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono">
                   No assets match current criteria
                 </td>
               </tr>
             ) : (
-              filteredAssets.map((asset) => {
+              pagedAssets.map((asset) => {
                 const isExpanded = expandedId === asset.id;
-                const ip = asset.metadata?.ip_address || "N/A";
-                const hasExposedPorts = (asset.open_ports || []).some(p => [22, 21, 23, 3389].includes(p));
+                const ip =
+                  asset.metadata?.ip_address ||
+                  asset.metadata?.ip ||
+                  asset.metadata?.dnsx?.a?.[0] ||
+                  asset.metadata?.dnsx?.aaaa?.[0] ||
+                  (asset as any).resolved_ip ||
+                  "—";
+                const assetPorts: number[] =
+                  asset.open_ports?.length
+                    ? asset.open_ports
+                    : asset.metadata?.open_ports || [];
+                const hasExposedPorts = assetPorts.some(p => [22, 21, 23, 3389].includes(p));
                 const exactFields = getExactMatchFields(asset, search);
 
                 return (
@@ -956,7 +1220,7 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                             >
                               <Copy className="w-3.5 h-3.5" />
                             </button>
-                            {(asset.metadata?.response_body_path || asset.response_body_path) && (
+                            {(asset.metadata?.response_body_path || asset.response_body_path) ? (
                               <button
                                 onClick={() => handleOpenResponseBody(asset)}
                                 className="px-1.5 py-0.5 rounded bg-cyan-500/15 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 text-[9px] font-mono flex items-center gap-1 transition-all cursor-pointer shadow-sm"
@@ -965,6 +1229,12 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                                 <FileText className="w-3 h-3" />
                                 Body
                               </button>
+                            ) : (
+                              <FetchBodyButton
+                                projectId={projectId}
+                                url={asset.metadata?.url || `https://${asset.domain}`}
+                                compact
+                              />
                             )}
                           </div>
                           {/* Badges row: CDN/WAF and Cluster Rep/Member */}
@@ -1002,12 +1272,24 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                               </span>
                             )}
                           </div>
+                          {screenshotByHost[(asset.domain || "").toLowerCase()] && (
+                            <button
+                              onClick={() => {
+                                const shot = screenshotByHost[(asset.domain || "").toLowerCase()];
+                                setScreenshotModal({ src: shot.src, title: shot.title, url: shot.url });
+                              }}
+                              className="mt-1.5 block rounded border border-dark-border overflow-hidden hover:border-cyber-accent/60 transition-colors cursor-zoom-in"
+                              title="Open screenshot"
+                            >
+                              <img
+                                src={screenshotByHost[(asset.domain || "").toLowerCase()].src}
+                                alt={`Screenshot of ${asset.domain}`}
+                                className="w-28 h-16 object-cover"
+                                loading="lazy"
+                              />
+                            </button>
+                          )}
                         </div>
-                      </td>
-                      <td className="p-4">
-                        <span className="px-2 py-0.5 rounded-full bg-dark-bg border border-dark-border text-slate-400 font-mono uppercase tracking-wider text-[10px]">
-                          {asset.type}
-                        </span>
                       </td>
                       <td className="p-4">
                         {(() => {
@@ -1026,13 +1308,17 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                                     ? "bg-slate-500/10 border border-slate-500/30 text-slate-400"
                                     : "bg-cyber-danger/10 border border-cyber-danger/30 text-cyber-danger"
                                 }`}>
-                                  {asset.status}
+                                  {asset.status || asset.metadata?.status || "unknown"}
                                 </span>
-                                {statusCode !== undefined && (
+                                {statusCode !== undefined ? (
                                   <span className="px-1.5 py-0.5 rounded bg-dark-bg border border-dark-border text-slate-200 font-mono text-[10px]">
                                     <HighlightText text={statusCode} highlight={search} />
                                   </span>
-                                )}
+                                ) : asset.status === "resolved" ? (
+                                  <span className="px-1.5 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 font-mono text-[9px] uppercase">
+                                    DNS resolved
+                                  </span>
+                                ) : null}
                               </div>
                               {isInteresting && (
                                 <span
@@ -1051,111 +1337,15 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                           );
                         })()}
                       </td>
-                      <td className="p-4">
-                        {(() => {
-                          const score = (asset as any).risk?.score;
-                          const level = (asset as any).risk?.level;
-                          if (score === undefined || score === null) {
-                            return (
-                              <span className="px-2 py-0.5 rounded-full bg-slate-500/10 border border-slate-500/25 text-slate-500 text-[10px] font-medium font-mono">
-                                Not scored
-                              </span>
-                            );
-                          }
-                          let badgeColor = "bg-slate-500/10 border-slate-500/30 text-slate-400";
-                          if (score >= 90) badgeColor = "bg-red-500/10 border-red-500/30 text-red-500 font-bold";
-                          else if (score >= 70) badgeColor = "bg-orange-500/10 border-orange-500/30 text-orange-500 font-bold";
-                          else if (score >= 40) badgeColor = "bg-yellow-500/10 border-yellow-500/30 text-yellow-400";
-                          else if (score >= 1) badgeColor = "bg-blue-500/10 border-blue-500/30 text-blue-400";
-                          
-                          return (
-                            <button
-                              onClick={() => toggleExpand(asset.id)}
-                              className={`px-2 py-0.5 rounded border text-[10px] font-mono cursor-pointer transition-all hover:scale-105 ${badgeColor}`}
-                            >
-                              {score} ({level})
-                            </button>
-                          );
-                        })()}
-                      </td>
-                      <td className="p-4">
-                        {(() => {
-                          const risk = (asset as any).risk;
-                          if (!risk) return <span className="text-slate-600 font-mono">-</span>;
-                          const isExposed = risk.exposure_factors?.includes("Internet Exposed");
-                          return isExposed ? (
-                            <span className="px-1.5 py-0.5 rounded bg-cyber-primary/10 border border-cyber-primary/30 text-cyber-primary text-[10px] font-mono uppercase tracking-wider font-bold">
-                              Exposed
-                            </span>
-                          ) : (
-                            <span className="px-1.5 py-0.5 rounded bg-slate-500/10 border border-slate-500/25 text-slate-500 text-[10px] font-mono uppercase tracking-wider">
-                              Internal
-                            </span>
-                          );
-                        })()}
-                      </td>
-                      <td className="p-4">
-                        {(() => {
-                          const risk = (asset as any).risk;
-                          if (!risk) return <span className="text-slate-600 font-mono">-</span>;
-                          const prio = risk.recommended_priority || "";
-                          let color = "text-slate-400";
-                          if (prio.includes("Immediate")) color = "text-red-500 font-bold";
-                          else if (prio.includes("High")) color = "text-orange-500";
-                          else if (prio.includes("Medium")) color = "text-yellow-400";
-                          else if (prio.includes("Low")) color = "text-blue-400";
-                          
-                          return (
-                            <span className={`text-[10px] font-mono ${color}`}>
-                              {prio.replace(" remediation required", "").replace(" remediation", "")}
-                            </span>
-                          );
-                        })()}
-                      </td>
-                      <td className="p-4">
-                        {(() => {
-                          const hp = asset.hunt_priority;
-                          const reasons = asset.hunt_reasons || [];
-                          if (hp === undefined || hp === null) {
-                            return <span className="text-slate-600 font-mono text-[10px]">-</span>;
-                          }
-                          let hpColor = "bg-slate-500/10 border-slate-500/30 text-slate-400";
-                          if (hp >= 80) hpColor = "bg-cyan-500/15 border-cyan-500/40 text-cyan-300 font-bold";
-                          else if (hp >= 50) hpColor = "bg-amber-500/15 border-amber-500/40 text-amber-300 font-bold";
-                          else if (hp >= 20) hpColor = "bg-blue-500/15 border-blue-500/40 text-blue-300";
-
-                          return (
-                            <div className="relative group inline-block">
-                              <span className={`px-2 py-0.5 rounded border text-[10px] font-mono cursor-help inline-flex items-center gap-1 ${hpColor}`}>
-                                🎯 {hp}
-                              </span>
-                              {reasons.length > 0 && (
-                                <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-50 bg-dark-card border border-dark-border p-2.5 rounded-lg shadow-2xl text-[10px] font-mono text-slate-200 w-64 whitespace-normal">
-                                  <div className="font-bold text-cyber-accent mb-1 border-b border-dark-border pb-0.5">
-                                    Hunt Priority Factors:
-                                  </div>
-                                  <ul className="list-disc pl-3 space-y-0.5">
-                                    {reasons.map((r, idx) => (
-                                      <li key={idx} className="leading-tight">
-                                        <HighlightText text={r} highlight={search} />
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })()}
-                      </td>
                       <td className="p-4 font-mono text-slate-300">
                         <HighlightText text={ip} highlight={search} />
                       </td>
                       <td className="p-4 font-mono">
                         <div className="flex flex-wrap gap-1">
-                          {asset.open_ports.length === 0 ? (
+                          {assetPorts.length === 0 ? (
                             <span className="text-slate-500 font-sans">-</span>
                           ) : (
-                            asset.open_ports.map((port) => (
+                            assetPorts.map((port) => (
                               <span
                                 key={port}
                                 className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
@@ -1170,15 +1360,76 @@ export const AssetTable: React.FC<AssetTableProps> = ({
                           )}
                         </div>
                       </td>
-                      <td className="p-4 text-slate-400 font-mono">
-                        <HighlightText text={asset.discovered_by} highlight={search} />
-                      </td>
                     </tr>
 
                     {/* Expandable Details Row */}
                     {isExpanded && (
                       <tr>
-                        <td colSpan={10} className="bg-dark-bg/30 p-4 border-b border-dark-border">
+                        <td colSpan={7} className="bg-dark-bg/30 p-4 border-b border-dark-border">
+                          {/* Request / Response */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4 font-mono text-xs">
+                            <div className="bg-dark-card border border-dark-border rounded-lg p-4">
+                              <h5 className="font-bold text-cyber-accent border-b border-dark-border pb-1.5 mb-2.5 uppercase tracking-wider text-[10px]">
+                                Request
+                              </h5>
+                              <div className="space-y-1.5">
+                                <div className="text-slate-200 break-all select-all">
+                                  <span className="text-cyber-accent font-bold mr-2">
+                                    {asset.metadata?.request_method || "GET"}
+                                  </span>
+                                  {asset.metadata?.url || asset.domain}
+                                </div>
+                                <div className="max-h-40 overflow-y-auto text-[10px] text-slate-400 space-y-0.5">
+                                  {(asset.metadata?.request_headers || []).length > 0 ? (
+                                    asset.metadata.request_headers.map((h: string, i: number) => (
+                                      <div key={i} className="break-all select-all"><HighlightText text={h} highlight={search} /></div>
+                                    ))
+                                  ) : (
+                                    <div className="text-slate-600">No stored request headers.</div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="bg-dark-card border border-dark-border rounded-lg p-4">
+                              <h5 className="font-bold text-cyber-accent border-b border-dark-border pb-1.5 mb-2.5 uppercase tracking-wider text-[10px]">
+                                Response
+                              </h5>
+                              <div className="flex items-center gap-2 mb-1.5">
+                                <span className="px-1.5 py-0.5 rounded bg-dark-bg border border-dark-border text-slate-200 text-[10px]">
+                                  HTTP {asset.metadata?.status_code ?? (asset as any).status_code ?? "-"}
+                                </span>
+                                <span className="text-[10px] text-slate-500">
+                                  {asset.metadata?.content_length ? `${asset.metadata.content_length} B` : ""}
+                                </span>
+                              </div>
+                              <div className="max-h-24 overflow-y-auto text-[10px] text-slate-400 space-y-0.5 mb-2">
+                                {(asset.metadata?.response_headers || []).length > 0 ? (
+                                  asset.metadata.response_headers.map((h: string, i: number) => (
+                                    <div key={i} className="break-all select-all"><HighlightText text={h} highlight={search} /></div>
+                                  ))
+                                ) : (
+                                  <div className="text-slate-600">No stored response headers.</div>
+                                )}
+                              </div>
+                              <div className="border-t border-dark-border pt-2">
+                                {expandedBodies[asset.id]?.loading ? (
+                                  <div className="text-slate-500 text-[10px]">Loading response body...</div>
+                                ) : expandedBodies[asset.id]?.error ? (
+                                  <div className="text-rose-300 text-[10px]">{expandedBodies[asset.id].error}</div>
+                                ) : expandedBodies[asset.id]?.content ? (
+                                  <pre className="text-slate-300 whitespace-pre-wrap break-all max-h-48 overflow-y-auto select-all text-[10px]">
+                                    {expandedBodies[asset.id].content}
+                                  </pre>
+                                ) : (
+                                  <div className="text-slate-600 text-[10px]">
+                                    No stored response body for this asset.
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
                           <div className={`grid grid-cols-1 ${asset.risk ? "md:grid-cols-3" : "md:grid-cols-2"} gap-6 p-2 font-mono text-xs`}>
                             {/* Left Side: DNS/IP Meta */}
                             <div className="bg-dark-card border border-dark-border rounded-lg p-4">
@@ -1680,7 +1931,63 @@ export const AssetTable: React.FC<AssetTableProps> = ({
           </tbody>
         </table>
       </div>
+
+      <Pagination
+        page={assetSafePage}
+        pageSize={assetPageSize}
+        total={filteredAssets.length}
+        onPageChange={setAssetPage}
+        onPageSizeChange={setAssetPageSize}
+        itemLabel="asset(s)"
+      />
     </div>
+      )}
+
+      {/* Screenshot Modal */}
+      {screenshotModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4"
+          onClick={() => setScreenshotModal(null)}
+        >
+          <div className="max-w-6xl w-full max-h-full flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3 p-2 bg-dark-card border border-dark-border rounded-t-lg">
+              <div className="min-w-0">
+                <div className="text-xs font-mono text-slate-200 break-all select-all">{screenshotModal.title}</div>
+                {screenshotModal.url && (
+                  <a
+                    href={screenshotModal.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[10px] font-mono text-cyber-accent hover:underline break-all"
+                    title="Open captured page"
+                  >
+                    {screenshotModal.url} ↗
+                  </a>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <a
+                  href={screenshotModal.src}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-2 py-1 rounded border border-dark-border bg-dark-input text-slate-300 hover:text-white text-[10px] font-mono"
+                  title="Open screenshot image"
+                >
+                  Open image
+                </a>
+                <button
+                  onClick={() => setScreenshotModal(null)}
+                  className="p-1.5 rounded border border-dark-border bg-dark-input text-slate-300 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="bg-black/40 border border-t-0 border-dark-border rounded-b-lg overflow-auto flex justify-center">
+              <img src={screenshotModal.src} alt={screenshotModal.title} className="max-h-[80vh] w-auto object-contain" />
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Response Body Modal */}

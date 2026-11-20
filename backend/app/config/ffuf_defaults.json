@@ -1,0 +1,5 @@
+{
+  "enabled": true,
+  "concurrency": 1,
+  "rate_strategy": "split"
+}

@@ -1,6 +1,9 @@
-import React, { useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import { Search, Download, Copy, Check, ArrowUpDown } from "lucide-react";
 import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
+import { Pagination, usePagination } from "../Common/Pagination";
+import { FetchBodyButton } from "./FetchBodyButton";
+import { apiCall } from "../../services/api";
 
 export interface ContentPathRecord {
   value: string;
@@ -17,6 +20,7 @@ export interface ContentPathRecord {
 
 interface ContentDiscoveryTabProps {
   records: ContentPathRecord[];
+  projectId?: string;
   projectName?: string;
   latestScanTime?: string | null;
 }
@@ -41,6 +45,7 @@ const download = (content: string, filename: string) => {
 
 export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
   records,
+  projectId,
   projectName = "project",
   latestScanTime,
 }) => {
@@ -51,23 +56,59 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [showExport, setShowExport] = useState(false);
+  const [remoteRecords, setRemoteRecords] = useState<ContentPathRecord[] | null>(null);
+
+  // Fetch directly from the backend so the tab always has every host, even
+  // when the parent asset feed is paginated, stale, or partially updated.
+  useEffect(() => {
+    setSelectedHost("all");
+    if (!projectId) {
+      setRemoteRecords(null);
+      return;
+    }
+    let cancelled = false;
+    apiCall(`/assets/project/${projectId}/content-paths?limit=500`)
+      .then((res: any) => {
+        if (cancelled) return;
+        setRemoteRecords(Array.isArray(res?.items) ? res.items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setRemoteRecords(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  const sourceRecords = useMemo(() => {
+    if (remoteRecords && remoteRecords.length >= records.length) {
+      return remoteRecords;
+    }
+    return records;
+  }, [remoteRecords, records]);
 
   // Extract unique hosts and status codes for filter dropdowns
   const uniqueHosts = useMemo(() => {
     const hosts = new Set<string>();
-    records.forEach((r) => {
+    sourceRecords.forEach((r) => {
       if (r.host) hosts.add(r.host);
     });
     return Array.from(hosts).sort();
-  }, [records]);
+  }, [sourceRecords]);
 
   const uniqueStatusCodes = useMemo(() => {
     const codes = new Set<number>();
-    records.forEach((r) => {
+    sourceRecords.forEach((r) => {
       if (r.status_code) codes.add(r.status_code);
     });
     return Array.from(codes).sort((a, b) => a - b);
-  }, [records]);
+  }, [sourceRecords]);
+
+  useEffect(() => {
+    if (selectedHost !== "all" && !uniqueHosts.includes(selectedHost)) {
+      setSelectedHost("all");
+    }
+  }, [uniqueHosts, selectedHost]);
 
   const latestScanDate = useMemo(() => {
     if (!latestScanTime) return null;
@@ -85,7 +126,7 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
-    return records.filter((r) => {
+    return sourceRecords.filter((r) => {
       // Search filter
       if (q) {
         const matchesUrl = r.value.toLowerCase().includes(q);
@@ -126,7 +167,14 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
         return sortOrder === "asc" ? aDate - bDate : bDate - aDate;
       }
     });
-  }, [records, search, selectedHost, selectedStatus, sortBy, sortOrder]);
+  }, [sourceRecords, search, selectedHost, selectedStatus, sortBy, sortOrder]);
+
+  const { page, setPage, pageSize, setPageSize, pageItems, total } =
+    usePagination(
+      filtered,
+      20,
+      `${search}|${selectedHost}|${selectedStatus}|${sortBy}|${sortOrder}`
+    );
 
   const isNewInLatestScan = (firstSeenStr?: string): boolean => {
     if (!firstSeenStr) return false;
@@ -282,13 +330,13 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
             {filtered.length === 0 ? (
               <tr>
                 <td colSpan={7} className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono">
-                  {records.length === 0
+                  {sourceRecords.length === 0
                     ? "No content paths discovered yet — run a scan with FFUF / Feroxbuster enabled"
                     : "No content paths match search/filters"}
                 </td>
               </tr>
             ) : (
-              filtered.map((r, idx) => {
+              pageItems.map((r, idx) => {
                 const sc = r.status_code || 200;
                 const isNew = isNewInLatestScan(r.first_seen);
                 const exactMatch = Boolean(
@@ -322,10 +370,11 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
                           href={r.value}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="select-all break-all text-slate-200 hover:text-cyber-accent hover:underline transition-colors"
+                          className="select-all break-all text-cyber-accent hover:underline"
                         >
                           <HighlightText text={r.value} highlight={search} />
                         </a>
+                        <FetchBodyButton projectId={projectId} url={r.value} compact />
                         {exactMatch && <ExactMatchBadge />}
                         {isNew && (
                           <span className="shrink-0 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 rounded text-[9px] font-bold uppercase tracking-wider">
@@ -336,15 +385,19 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
                     </td>
 
                     {/* Host */}
-                    <td className="p-3.5 text-slate-400 whitespace-nowrap">
-                      <a
-                        href={`https://${r.host}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="hover:text-cyber-accent hover:underline transition-colors"
-                      >
-                        <HighlightText text={r.host} highlight={search} />
-                      </a>
+                    <td className="p-3.5 text-slate-400 whitespace-nowrap select-all">
+                      {r.host ? (
+                        <a
+                          href={`https://${r.host}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="hover:text-cyber-accent hover:underline"
+                        >
+                          <HighlightText text={r.host} highlight={search} />
+                        </a>
+                      ) : (
+                        "—"
+                      )}
                     </td>
 
                     {/* Status Code */}
@@ -375,10 +428,14 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
                     <td className="p-3.5 text-slate-400 whitespace-nowrap">{r.words ?? "—"}</td>
 
                     {/* Redirect */}
-                    <td className="p-3.5 text-slate-400 max-w-xs break-all">
+                    <td className="p-3.5 text-slate-400 max-w-xs break-all select-all">
                       {r.redirect_location ? (
                         <a
-                          href={r.redirect_location.startsWith("http") ? r.redirect_location : `https://${r.host}${r.redirect_location.startsWith("/") ? "" : "/"}${r.redirect_location}`}
+                          href={
+                            /^https?:\/\//i.test(r.redirect_location)
+                              ? r.redirect_location
+                              : `https://${r.host}${r.redirect_location.startsWith("/") ? "" : "/"}${r.redirect_location}`
+                          }
                           target="_blank"
                           rel="noopener noreferrer"
                           className="text-cyber-accent hover:underline"
@@ -410,16 +467,17 @@ export const ContentDiscoveryTab: React.FC<ContentDiscoveryTabProps> = ({
         </table>
       </div>
 
-      {/* Summary Footer */}
-      <div className="p-3 border-t border-dark-border bg-dark-bg/40 flex justify-between items-center text-[11px] font-mono text-slate-500">
-        <span>
-          Showing {filtered.length} of {records.length} content path entries
-        </span>
-        {records.length > 0 && (
-          <span>
-            {uniqueHosts.length} hosts probed • {uniqueStatusCodes.length} status codes observed
-          </span>
-        )}
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        itemLabel="content path(s)"
+      />
+      <div className="px-4 py-2 border-t border-dark-border bg-dark-bg/30 text-[10px] font-mono text-slate-600">
+        {sourceRecords.length} total discovered • {uniqueHosts.length} host(s) •{" "}
+        {uniqueStatusCodes.length} status code(s)
       </div>
     </div>
   );

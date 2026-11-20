@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from "react";
 import { Search, Download, ShieldAlert } from "lucide-react";
 import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
+import { Pagination, usePagination } from "../Common/Pagination";
 
 export interface TakeoverRecord {
   subdomain: string;
@@ -54,6 +55,9 @@ export const TakeoverTab: React.FC<TakeoverTabProps> = ({ records, projectName =
       return matchSearch && matchStatus;
     });
   }, [records, search, filterStatus]);
+
+  const { page, setPage, pageSize, setPageSize, pageItems, total } =
+    usePagination(filtered, 20, `${search}|${filterStatus}`);
 
   const vulnCount = records.filter((r) => r.status === "Vulnerable").length;
   const safeCount = records.filter((r) => r.status === "Not Vulnerable").length;
@@ -127,7 +131,7 @@ export const TakeoverTab: React.FC<TakeoverTabProps> = ({ records, projectName =
               <tr><td colSpan={5} className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono">
                 {records.length === 0 ? "No takeover data — run a scan with Subzy enabled" : "No records match filter"}
               </td></tr>
-            ) : filtered.map((r, idx) => {
+            ) : pageItems.map((r, idx) => {
               const exactMatch = Boolean(
                 search.trim() &&
                 (r.subdomain.toLowerCase() === search.trim().toLowerCase() ||
@@ -156,7 +160,15 @@ export const TakeoverTab: React.FC<TakeoverTabProps> = ({ records, projectName =
                       <HighlightText text={r.provider || "—"} highlight={search} />
                       {r.cname && (
                         <div className="text-[10px] text-slate-500 font-mono mt-0.5 truncate max-w-xs" title={r.cname}>
-                          CNAME: {r.cname}
+                          CNAME:{" "}
+                          <a
+                            href={`https://${r.cname}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-cyber-accent hover:underline"
+                          >
+                            {r.cname}
+                          </a>
                         </div>
                       )}
                     </div>
@@ -200,9 +212,14 @@ export const TakeoverTab: React.FC<TakeoverTabProps> = ({ records, projectName =
           </tbody>
         </table>
       </div>
-      <div className="px-4 py-2 border-t border-dark-border bg-dark-bg/30 text-[10px] font-mono text-slate-600">
-        {filtered.length} / {records.length} records
-      </div>
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        itemLabel="takeover record(s)"
+      />
     </div>
   );
 };

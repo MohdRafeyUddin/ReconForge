@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from "react";
 import { Search, Download } from "lucide-react";
 import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
+import { Pagination, usePagination } from "../Common/Pagination";
 
 export interface DnsRecord {
   subdomain: string;
@@ -70,6 +71,9 @@ export const DnsTab: React.FC<DnsTabProps> = ({
       return sortDir === "asc" ? cmp : -cmp;
     });
   }, [filtered, sortKey, sortDir]);
+
+  const { page, setPage, pageSize, setPageSize, pageItems, total } =
+    usePagination(sorted, 20, search);
 
   const exportFullCSV = () => {
     const headers = ["Subdomain", "Status", "IPv4", "IPv6", "CNAME", "Resolved At"];
@@ -198,7 +202,7 @@ export const DnsTab: React.FC<DnsTabProps> = ({
                 </td>
               </tr>
             ) : (
-              sorted.map((r, idx) => {
+              pageItems.map((r, idx) => {
                 const exactMatch = Boolean(
                   search.trim() &&
                   (r.subdomain.toLowerCase() === search.trim().toLowerCase() ||
@@ -289,9 +293,14 @@ export const DnsTab: React.FC<DnsTabProps> = ({
         </table>
       </div>
 
-      <div className="px-4 py-2 border-t border-dark-border bg-dark-bg/30 text-[10px] font-mono text-slate-600">
-        {sorted.length} / {records.length} records
-      </div>
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        itemLabel="DNS record(s)"
+      />
     </div>
   );
 };

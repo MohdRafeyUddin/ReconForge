@@ -13,10 +13,33 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 from bson import ObjectId
 
+from app.services.asset_counts import collect_counts
+
 logger = logging.getLogger("reconforge.run_history")
 
 RUNS_BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "runs"))
 MAX_RAW_FILE_KB = 5120  # 5 MB size cap per raw output file
+
+# Stage 1 — asset types may only be compared when both runs executed the
+# phase that produces them (switch-OFF phases must not look "removed").
+ASSET_PHASE_MAP: Dict[str, str] = {
+    "subdomain": "subdomain_discovery",
+    "historical_url": "crawling",
+    "content_path": "content_discovery",
+    "param": "param_discovery",
+    "api_spec": "api_surface",
+    "graphql_endpoint": "api_surface",
+    "js_file": "js_analysis",
+    "screenshot": "screenshots",
+    "finding": "vulnerability_scan",
+    "recon_info": "vulnerability_scan",
+    "secret": "secret_scan",
+    "secret_finding": "secret_scan",
+    "cloud_bucket": "cloud_enum",
+    "bucket": "cloud_enum",
+    "takeover": "takeover_crosscheck",
+    "suggested_root": "root_expansion",
+}
 
 
 def _sanitize_path_component(comp: str) -> str:
@@ -168,7 +191,7 @@ async def record_run_history(
             duration_sec = max(0.0, (finished_at - started_at).total_seconds())
 
         status = job.get("status", "completed")
-        scan_mode = job.get("scan_mode", "fast")
+        scan_mode = job.get("scan_mode", "full")
         scan_profile = project.get("scan_profile", "recon")
 
         # 4. Config Snapshot: Header NAMES only, never secret values
@@ -182,6 +205,18 @@ async def record_run_history(
             "scan_profile": scan_profile,
             "port_range": project.get("port_range") or "1-10000",
             "assume_tools_installed": project.get("assume_tools_installed", True),
+            "phase_switches": project.get("phase_switches") or {},
+            "job_kind": job.get("job_kind", "full"),
+            # Phase 8 snapshot (secrets are never included)
+            "phase8": {
+                "oast_enabled": bool((project.get("oast") or {}).get("enabled")),
+                "oast_server": (project.get("oast") or {}).get("server") or "",
+                "nuclei_options": project.get("nuclei_options") or {},
+                "cloud_enum_enabled": bool((project.get("cloud_enum") or {}).get("enabled")),
+                "js_analysis_enabled": bool((project.get("js_analysis") or {}).get("enabled", True)),
+                "secrets_scan_enabled": bool((project.get("secrets_scan") or {}).get("enabled", True)),
+                "tech_routing_enabled": bool((project.get("tech_routing") or {}).get("enabled", True)),
+            },
         }
 
         # 5. Extract counts from assets and job logs
@@ -197,28 +232,13 @@ async def record_run_history(
         except Exception:
             pass
 
-        # Calculate counts
-        subdomains_count = run_asset_counts.get("subdomain", 0)
-        live_count = await db.run_assets.count_documents({
-            "project_id": str(project_id),
-            "job_id": str(job_id),
-            "status": "live",
-        }) if run_asset_counts else 0
-
-        # Ports count
-        open_ports_count = 0
-        try:
-            live_cursor = db.run_assets.find({
-                "project_id": str(project_id),
-                "job_id": str(job_id),
-                "status": "live",
-            })
-            async for l_doc in live_cursor:
-                meta = l_doc.get("metadata") or {}
-                ports = meta.get("open_ports") or l_doc.get("open_ports") or []
-                open_ports_count += len(ports)
-        except Exception:
-            pass
+        # Canonical counts: host assets only for hosts; URLs counted separately.
+        canonical_counts = await collect_counts(db.run_assets, str(project_id), str(job_id))
+        subdomains_count = canonical_counts["subdomains"]
+        resolved_hosts_count = canonical_counts["resolved_hosts"]
+        passive_candidates_count = canonical_counts["passive_candidates"]
+        live_count = canonical_counts["live_hosts"]
+        open_ports_count = canonical_counts["ports"]
 
         # Stage markers extraction from logs if not passed
         markers = list(stage_markers or [])
@@ -234,31 +254,47 @@ async def record_run_history(
 
         # Save raw outputs if provided
         raw_output_paths: Dict[str, str] = {}
+        secret_scanner_tools = {
+            "secrets", "secret", "secret_scan", "secret_finding",
+            "trufflehog", "gitleaks",
+        }
         if raw_outputs:
             for tool, out_content in raw_outputs.items():
+                tool_l = str(tool).strip().lower()
+                if (
+                    tool_l in secret_scanner_tools
+                    or "trufflehog" in tool_l
+                    or "gitleaks" in tool_l
+                    or "secret" in tool_l
+                ):
+                    logger.info("Skipping raw output persistence for secret scanner %s", tool)
+                    continue
                 p = save_raw_tool_output(str(project_id), str(job_id), tool, out_content)
                 if p:
                     raw_output_paths[tool] = p
 
         counts_summary = {
+            **canonical_counts,
             "subdomains": subdomains_count,
-            "resolved": run_asset_counts.get("subdomain", 0),
+            "resolved": resolved_hosts_count,
+            "resolved_hosts": resolved_hosts_count,
+            "passive_candidates": passive_candidates_count,
             "live": live_count,
+            "live_hosts": live_count,
             "ports": open_ports_count,
-            "content_paths": run_asset_counts.get("content_path", 0),
-            "params": run_asset_counts.get("param", 0),
             "findings": run_asset_counts.get("finding", 0),
-            "api_specs": run_asset_counts.get("api_spec", 0),
-            "graphql_endpoints": run_asset_counts.get("graphql_endpoint", 0),
-            "js_files": run_asset_counts.get("js_file", 0),
             "suggested_roots": run_asset_counts.get("suggested_root", 0),
             "takeovers": run_asset_counts.get("takeover", 0),
+            "secrets": run_asset_counts.get("secret_finding", 0) + run_asset_counts.get("secret", 0),
+            "cloud_buckets": run_asset_counts.get("bucket", 0) + run_asset_counts.get("cloud_bucket", 0),
+            "screenshots": run_asset_counts.get("screenshot", 0),
+            "recon_info": run_asset_counts.get("recon_info", 0),
             "rejected_urls": job.get("rejected_urls_count", 0),
             "urls_by_source": {
                 "katana": run_asset_counts.get("katana_url", 0),
-                "gau": run_asset_counts.get("historical_url", 0),
-                "uro": run_asset_counts.get("uro_url", 0),
-                "gf": run_asset_counts.get("gf_url", 0),
+                "gau": canonical_counts["historical_urls"],
+                "uro": canonical_counts["normalized_urls"],
+                "gf": canonical_counts["gf_urls"],
             },
         }
 
@@ -272,9 +308,14 @@ async def record_run_history(
             "status": status,
             "scan_mode": scan_mode,
             "scan_profile": scan_profile,
+            "run_kind": job.get("job_kind", "full"),
+            "targeted": job.get("targeted") or None,
             "executed_phases": job.get("executed_phases", []),
+            "skipped_phases": job.get("skipped_phases", []),
+            "phase_durations": job.get("phase_durations", []),
             "stage_markers": markers,
             "counts": counts_summary,
+            "targeted_counts": job.get("targeted_counts") or {},
             "tool_versions": tool_versions or {},
             "config_snapshot": config_snapshot,
             "raw_output_paths": raw_output_paths,
@@ -335,6 +376,18 @@ async def compare_runs(
 
     all_types = sorted(list(set(grouped_a.keys()) | set(grouped_b.keys())))
 
+    # Only compare asset types whose producing phase ran in BOTH runs.
+    phases_a = set((run_a or {}).get("executed_phases") or [])
+    phases_b = set((run_b or {}).get("executed_phases") or [])
+    if phases_a and phases_b:
+        all_types = [
+            t for t in all_types
+            if (
+                ASSET_PHASE_MAP.get(t) is None
+                or (ASSET_PHASE_MAP[t] in phases_a and ASSET_PHASE_MAP[t] in phases_b)
+            )
+        ]
+
     comparison: Dict[str, Any] = {}
     total_added = 0
     total_removed = 0
@@ -367,11 +420,15 @@ async def compare_runs(
         "run_a_meta": {
             "started_at": run_a.get("started_at") if run_a else None,
             "scan_mode": run_a.get("scan_mode") if run_a else None,
+            "scan_profile": run_a.get("scan_profile") if run_a else None,
+            "run_kind": run_a.get("run_kind", "full") if run_a else None,
             "status": run_a.get("status") if run_a else None,
         },
         "run_b_meta": {
             "started_at": run_b.get("started_at") if run_b else None,
             "scan_mode": run_b.get("scan_mode") if run_b else None,
+            "scan_profile": run_b.get("scan_profile") if run_b else None,
+            "run_kind": run_b.get("run_kind", "full") if run_b else None,
             "status": run_b.get("status") if run_b else None,
         },
         "summary": {

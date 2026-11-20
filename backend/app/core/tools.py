@@ -22,6 +22,7 @@ SPECIAL_SCRIPT_CANDIDATES: Dict[str, List[str]] = {
     "openredirex": ["~/tools/OpenRedireX/openredirex.py", "~/OpenRedireX/openredirex.py"],
     "dnsreaper": ["~/tools/dnsReaper/main.py", "~/dnsReaper/main.py", "~/tools/dnsReaper/dnsReaper.py"],
     "massdns": ["/usr/local/bin/massdns", "/usr/bin/massdns", "~/tools/massdns/bin/massdns"],
+    "cloud_enum": ["~/tools/cloud_enum/cloud_enum.py", "~/cloud_enum/cloud_enum.py"],
 }
 
 # Central Tool Registry
@@ -274,6 +275,81 @@ RECON_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Subdomain takeover tool with accurate DNS scanning signatures.",
         "install_hint": "git clone https://github.com/punk-security/dnsReaper.git ~/tools/dnsReaper && pip install -r ~/tools/dnsReaper/requirements.txt",
     },
+    # ------------------------------------------------------------------
+    # Phase 8 — JS analysis, secrets, cloud buckets, OAST, tech routing
+    # ------------------------------------------------------------------
+    "jsluice": {
+        "name": "jsluice",
+        "binary": "jsluice",
+        "category": "JS Analysis",
+        "required": False,
+        "description": "Extracts URLs, paths and secrets from JavaScript files.",
+        "install_hint": "go install github.com/BishopFox/jsluice/cmd/jsluice@latest",
+    },
+    "xnlinkfinder": {
+        "name": "xnLinkFinder",
+        "binary": "xnLinkFinder",
+        "category": "JS Analysis",
+        "required": False,
+        "description": "Endpoint discovery from JavaScript files (LinkFinder successor).",
+        "install_hint": "pipx install xnLinkFinder",
+    },
+    "sourcemapper": {
+        "name": "SourceMapper",
+        "binary": "sourcemapper",
+        "category": "JS Analysis",
+        "required": False,
+        "description": "Fetches JavaScript source maps and reconstructs their sources.",
+        "install_hint": "go install github.com/denandz/sourcemapper@latest",
+    },
+    "trufflehog": {
+        "name": "TruffleHog",
+        "binary": "trufflehog",
+        "category": "Secrets",
+        "required": False,
+        "description": "Detects and classifies secrets in files and response bodies.",
+        "install_hint": "go install github.com/trufflesecurity/trufflehog/v3@latest",
+    },
+    "gitleaks": {
+        "name": "Gitleaks",
+        "binary": "gitleaks",
+        "category": "Secrets",
+        "required": False,
+        "description": "SAST secret scanner used as a fallback for local response files.",
+        "install_hint": "go install github.com/gitleaks/gitleaks/v8@latest",
+    },
+    "cloud_enum": {
+        "name": "cloud_enum",
+        "binary": "cloud_enum",
+        "category": "Cloud",
+        "required": False,
+        "description": "Multi-cloud public bucket enumeration (AWS, Azure, GCP).",
+        "install_hint": "git clone https://github.com/initstring/cloud_enum.git ~/tools/cloud_enum && pip install -r ~/tools/cloud_enum/requirements.txt",
+    },
+    "s3scanner": {
+        "name": "S3Scanner",
+        "binary": "s3scanner",
+        "category": "Cloud",
+        "required": False,
+        "description": "Checks S3 bucket candidates for existence and public access.",
+        "install_hint": "pipx install s3scanner",
+    },
+    "interactsh": {
+        "name": "Interactsh Client",
+        "binary": "interactsh-client",
+        "category": "OAST",
+        "required": False,
+        "description": "Out-of-band interaction client for blind vulnerability validation.",
+        "install_hint": "go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest",
+    },
+    "wpscan": {
+        "name": "WPScan",
+        "binary": "wpscan",
+        "category": "Tech Routing",
+        "required": False,
+        "description": "WordPress vulnerability scanner used when WordPress is detected.",
+        "install_hint": "sudo apt install -y wpscan  # or: sudo gem install wpscan",
+    },
 }
 
 # Allowlist definitions: tool names come strictly from registry allowlist
@@ -305,7 +381,8 @@ special = {
     'linkfinder': [f'{home}/tools/LinkFinder/linkfinder.py', f'{home}/LinkFinder/linkfinder.py'],
     'openredirex': [f'{home}/tools/OpenRedireX/openredirex.py', f'{home}/OpenRedireX/openredirex.py'],
     'dnsreaper': [f'{home}/tools/dnsReaper/main.py', f'{home}/dnsReaper/main.py', f'{home}/tools/dnsReaper/dnsReaper.py'],
-    'massdns': ['/usr/local/bin/massdns', '/usr/bin/massdns', f'{home}/tools/massdns/bin/massdns']
+    'massdns': ['/usr/local/bin/massdns', '/usr/bin/massdns', f'{home}/tools/massdns/bin/massdns'],
+    'cloud_enum': [f'{home}/tools/cloud_enum/cloud_enum.py', f'{home}/cloud_enum/cloud_enum.py']
 }
 
 res = {}
@@ -567,7 +644,17 @@ def resolve_all_tools_in_system(timeout_seconds: int = 10) -> Tuple[Dict[str, Op
         # Ensure search order directories are in PATH for command -v: ~/go/bin, ~/.local/bin, /snap/bin, /usr/local/bin, /usr/bin
         bash_script = (
             f'PATH="$HOME/go/bin:$HOME/.local/bin:/snap/bin:/usr/local/bin:/usr/bin:$PATH"; '
-            f'for t in {" ".join(valid_binaries)}; do echo "$t=$(command -v $t)"; done'
+            f'for t in {" ".join(valid_binaries)}; do '
+            'p=$(command -v "$t"); '
+            'if [ -z "$p" ]; then '
+            'case "$t" in '
+            'cloud_enum) [ -f "$HOME/tools/cloud_enum/cloud_enum.py" ] && p="$HOME/tools/cloud_enum/cloud_enum.py";; '
+            'linkfinder) [ -f "$HOME/tools/LinkFinder/linkfinder.py" ] && p="$HOME/tools/LinkFinder/linkfinder.py";; '
+            'openredirex) [ -f "$HOME/tools/OpenRedireX/openredirex.py" ] && p="$HOME/tools/OpenRedireX/openredirex.py";; '
+            'dnsreaper) [ -f "$HOME/tools/dnsReaper/main.py" ] && p="$HOME/tools/dnsReaper/main.py";; '
+            'esac; '
+            'fi; '
+            'echo "$t=$p"; done'
         )
         cmd = ["wsl", "-e", "bash", "-lc", bash_script]
         try:
@@ -621,6 +708,7 @@ def resolve_all_tools_in_system(timeout_seconds: int = 10) -> Tuple[Dict[str, Op
         special = {
             "linkfinder": [f"{home_dir}/tools/LinkFinder/linkfinder.py", f"{home_dir}/LinkFinder/linkfinder.py"],
             "openredirex": [f"{home_dir}/tools/OpenRedireX/openredirex.py", f"{home_dir}/OpenRedireX/openredirex.py"],
+            "cloud_enum": [f"{home_dir}/tools/cloud_enum/cloud_enum.py", f"{home_dir}/cloud_enum/cloud_enum.py"],
         }
         for b in valid_binaries:
             found = shutil.which(b, path=full_path)

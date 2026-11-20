@@ -91,6 +91,8 @@ def load_hunt_weights() -> dict:
             "no_waf_or_cdn": 10,
             "high_value_technology": 20,
             "has_js_endpoints": 10,
+            "has_exposed_secrets": 25,
+            "has_open_bucket": 20,
             "many_historical_urls": 10
         },
         "caps": {
@@ -104,6 +106,8 @@ def load_hunt_weights() -> dict:
             "no_waf_or_cdn": 10,
             "high_value_technology": 25,
             "has_js_endpoints": 10,
+            "has_exposed_secrets": 25,
+            "has_open_bucket": 25,
             "many_historical_urls": 10
         },
         "sensitive_keywords": ["dev", "stg", "stage", "staging", "uat", "test", "testing", "internal", "corp", "admin", "portal", "vpn", "gateway", "qa", "sandbox", "demo", "preprod", "nonprod"],
@@ -434,7 +438,42 @@ def compute_host_risk_and_hunt(
         hunt_total += w
         hunt_reasons.append(f"Exposed JavaScript endpoints for review ({len(host_js)} scripts) (+{w})")
 
-    # 11. Many historical URLs (>= 10)
+    # 11. Exposed secrets (masked findings only)
+    host_secrets = [
+        s for s in all_project_assets
+        if s.get("type") in ("secret_finding", "secret")
+        and (
+            s.get("domain", "").lower() == host_domain
+            or (s.get("metadata") or {}).get("host", "").lower() == host_domain
+        )
+    ]
+    if host_secrets:
+        w = min(hunt_factors.get("has_exposed_secrets", 25), hunt_caps.get("has_exposed_secrets", 25))
+        hunt_total += w
+        hunt_reasons.append(f"Exposed secret candidates on host ({len(host_secrets)}) (+{w})")
+
+    # 12. Public/open cloud buckets tied to this host
+    host_buckets = [
+        b for b in all_project_assets
+        if b.get("type") in ("bucket", "cloud_bucket")
+        and (
+            b.get("domain", "").lower() == host_domain
+            or (b.get("metadata") or {}).get("host", "").lower() == host_domain
+        )
+    ]
+    if host_buckets:
+        public_bucket = any(bool((b.get("metadata") or {}).get("public")) for b in host_buckets)
+        w = min(
+            hunt_factors.get("has_open_bucket", 20) + (5 if public_bucket else 0),
+            hunt_caps.get("has_open_bucket", 25),
+        )
+        hunt_total += w
+        hunt_reasons.append(
+            f"Cloud bucket candidate tied to host ({len(host_buckets)}"
+            f"{', public listing' if public_bucket else ''}) (+{w})"
+        )
+
+    # 13. Many historical URLs (>= 10)
     host_hist = [u for u in all_project_assets if u.get("type") in ("historical_url", "uro_url", "gf_url") and u.get("domain", "").lower() == host_domain]
     if len(host_hist) >= 10:
         w = min(hunt_factors.get("many_historical_urls", 10), hunt_caps.get("many_historical_urls", 10))
@@ -506,7 +545,13 @@ async def recalculate_all_scores(project_id: str) -> list:
     assets_cursor = db.assets.find({"project_id": str(project_id)})
     all_project_assets = await assets_cursor.to_list(length=100000)
 
-    hosts = [a for a in all_project_assets if a.get("type") in ("subdomain", "domain", "ip", "service")]
+    from app.services.asset_counts import HOST_ASSET_TYPES, is_passive_candidate
+
+    hosts = [
+        a for a in all_project_assets
+        if str(a.get("type") or "").strip().lower() in HOST_ASSET_TYPES
+        and not is_passive_candidate(a)
+    ]
     findings = [a for a in all_project_assets if a.get("type") == "finding"]
 
     # 2. Extract new or changed hosts from latest scan diff
@@ -520,6 +565,10 @@ async def recalculate_all_scores(project_id: str) -> list:
                 new_or_changed_set.add(str(h).lower())
             for ch in latest_diff.get("changed_hosts", []):
                 new_or_changed_set.add(str(ch.get("domain", "")).lower())
+            for mj in latest_diff.get("modified_js_files", []):
+                host = str((mj or {}).get("host") or "").lower()
+                if host:
+                    new_or_changed_set.add(host)
     except Exception as e:
         logger.debug(f"Could not load scan diff for hunt scoring: {e}")
 

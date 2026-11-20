@@ -4,6 +4,7 @@ from bson import ObjectId
 from typing import List, Any
 from app.database import get_database
 from app.models import ProjectCreate, ProjectUpdate, ProjectResponse, serialize_doc
+from app.core.scan_options import normalize_phase_switches
 from app.providers.unified_discovery_provider import detect_target_type
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
@@ -29,6 +30,13 @@ def mask_project_secrets(doc: Any) -> Any:
                 else:
                     masked_alerts[key] = "********"
         doc_copy["alerts"] = masked_alerts
+
+    oast = doc_copy.get("oast")
+    if isinstance(oast, dict):
+        masked_oast = dict(oast)
+        if str(masked_oast.get("token") or "").strip():
+            masked_oast["token"] = "********"
+        doc_copy["oast"] = masked_oast
     return doc_copy
 
 
@@ -81,7 +89,6 @@ async def create_project(project_in: ProjectCreate):
         "schedule": project_in.schedule or {
             "enabled": False,
             "interval_hours": 24,
-            "scan_mode": "fast",
             "last_run": None,
             "next_run": None,
         },
@@ -102,11 +109,21 @@ async def create_project(project_in: ProjectCreate):
         "clustering": project_in.clustering or {
             "scan_all_cluster_members": False,
         },
+        "phase_switches": normalize_phase_switches(project_in.phase_switches),
         "port_range": project_in.port_range or "1-10000",
         "response_body_max_kb": project_in.response_body_max_kb or 500,
         "scan_profile": project_in.scan_profile or "recon",
         "enable_root_expansion": bool(project_in.enable_root_expansion),
         "max_permutations": project_in.max_permutations or 50000,
+        "js_analysis": project_in.js_analysis,
+        "secrets_scan": project_in.secrets_scan,
+        "cloud_enum": project_in.cloud_enum,
+        "oast": project_in.oast,
+        "nuclei_options": project_in.nuclei_options,
+        "tech_routing": project_in.tech_routing,
+        "nmap_options": project_in.nmap_options,
+        "ffuf_options": project_in.ffuf_options,
+        "screenshot_options": project_in.screenshot_options,
         "owner_id": "local",
         "created_at": datetime.utcnow()
     }
@@ -131,7 +148,10 @@ async def update_project(
         raise HTTPException(status_code=404, detail="Project not found")
 
     update_dict = {k: v for k, v in project_update.dict(exclude_unset=True).items() if v is not None}
-    
+
+    if "phase_switches" in update_dict:
+        update_dict["phase_switches"] = normalize_phase_switches(update_dict["phase_switches"])
+
     # Validate recurring schedule requirement
     merged_scope = update_dict.get("scope", project.get("scope"))
     merged_schedule = update_dict.get("schedule", project.get("schedule"))
@@ -146,6 +166,12 @@ async def update_project(
                 val = incoming_alerts[key]
                 if is_masked_placeholder(val):
                     incoming_alerts[key] = existing_alerts.get(key, "")
+
+    if "oast" in update_dict and isinstance(update_dict["oast"], dict):
+        existing_oast = project.get("oast") or {}
+        incoming_oast = update_dict["oast"]
+        if is_masked_placeholder(incoming_oast.get("token")):
+            incoming_oast["token"] = existing_oast.get("token", "")
 
     if "seed_domains" in update_dict and update_dict["seed_domains"]:
         seed = update_dict["seed_domains"][0]

@@ -1,6 +1,8 @@
 import React, { useState, useMemo } from "react";
 import { Search, Download } from "lucide-react";
 import { HighlightText, ExactMatchBadge } from "../Common/HighlightText";
+import { Pagination, usePagination } from "../Common/Pagination";
+import { FetchBodyButton } from "./FetchBodyButton";
 
 export interface NormalizedUrlRecord {
   original_url: string;
@@ -11,6 +13,7 @@ export interface NormalizedUrlRecord {
 
 interface NormalizedUrlTabProps {
   records: NormalizedUrlRecord[];
+  projectId?: string;
   projectName?: string;
 }
 
@@ -32,7 +35,7 @@ const download = (content: string, filename: string) => {
   URL.revokeObjectURL(url);
 };
 
-export const NormalizedUrlTab: React.FC<NormalizedUrlTabProps> = ({ records, projectName = "project" }) => {
+export const NormalizedUrlTab: React.FC<NormalizedUrlTabProps> = ({ records, projectId, projectName = "project" }) => {
   const [search, setSearch] = useState("");
   const [showExport, setShowExport] = useState(false);
 
@@ -47,6 +50,9 @@ export const NormalizedUrlTab: React.FC<NormalizedUrlTabProps> = ({ records, pro
         (r.duplicate_removed ? "removed duplicate" : "kept unique").includes(q)
     );
   }, [records, search]);
+
+  const { page, setPage, pageSize, setPageSize, pageItems, total } =
+    usePagination(filtered, 20, search);
 
   return (
     <div className="bg-dark-card border border-dark-border rounded-xl glass overflow-hidden">
@@ -97,7 +103,7 @@ export const NormalizedUrlTab: React.FC<NormalizedUrlTabProps> = ({ records, pro
               <tr><td colSpan={4} className="p-8 text-center text-slate-500 uppercase tracking-widest font-mono">
                 {records.length === 0 ? "No normalized URLs yet — run a scan with Uro enabled" : "No results match search"}
               </td></tr>
-            ) : filtered.map((r, idx) => {
+            ) : pageItems.map((r, idx) => {
               const exactMatch = Boolean(
                 search.trim() &&
                 (r.normalized_url.toLowerCase() === search.trim().toLowerCase() ||
@@ -117,6 +123,7 @@ export const NormalizedUrlTab: React.FC<NormalizedUrlTabProps> = ({ records, pro
                       <a href={r.normalized_url} target="_blank" rel="noopener noreferrer" className="hover:underline transition-colors">
                         <HighlightText text={r.normalized_url} highlight={search} />
                       </a>
+                      <FetchBodyButton projectId={projectId} url={r.normalized_url} compact />
                       {exactMatch && <ExactMatchBadge />}
                     </div>
                   </td>
@@ -136,9 +143,14 @@ export const NormalizedUrlTab: React.FC<NormalizedUrlTabProps> = ({ records, pro
           </tbody>
         </table>
       </div>
-      <div className="px-4 py-2 border-t border-dark-border bg-dark-bg/30 text-[10px] font-mono text-slate-600">
-        {filtered.length} / {records.length} records
-      </div>
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+        itemLabel="URL record(s)"
+      />
     </div>
   );
 };

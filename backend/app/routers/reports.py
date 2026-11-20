@@ -1,11 +1,64 @@
+import re
+from xml.sax.saxutils import escape as xml_escape
+
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from bson import ObjectId
+from app.core.redaction import redact_text
+from app.core.scope import is_in_scope
 from app.database import get_database
 from app.models import serialize_doc
 from datetime import datetime
+from urllib.parse import urlparse
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
+
+# Phase 8.7 — URL-valued asset types exported to Burp/ZAP
+EXPORT_URL_TYPES = (
+    "historical_url", "uro_url", "gf_url", "content_path",
+    "api_spec", "graphql_endpoint", "js_file", "cloud_bucket", "bucket",
+)
+
+
+def collect_export_urls(assets, scope=None):
+    """Collects unique, in-scope, secret-redacted URLs for export.
+
+    Live host URLs are ordered first by hunt_priority, followed by URL-valued
+    assets belonging to those hosts.
+    """
+    host_priority = {}
+    candidates = []
+    host_types = {"subdomain", "host"}
+
+    for asset in assets or []:
+        if not isinstance(asset, dict):
+            continue
+        a_type = str(asset.get("type") or "").lower()
+        meta = asset.get("metadata") or {}
+        host = str(meta.get("host") or asset.get("domain") or "").lower()
+        priority = int(asset.get("hunt_priority") or 0)
+
+        if a_type in host_types:
+            url = str(meta.get("url") or "").strip()
+            if url.startswith(("http://", "https://")) and (not scope or is_in_scope(url, scope)):
+                host_priority[host] = max(host_priority.get(host, 0), priority)
+                candidates.append((host, redact_text(url)))
+            continue
+
+        if a_type not in EXPORT_URL_TYPES:
+            continue
+        url = str(meta.get("url") or asset.get("value") or asset.get("domain") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        if scope and not is_in_scope(url, scope):
+            continue
+        candidates.append((host, redact_text(url)))
+
+    merged = {}
+    for host, url in candidates:
+        merged[url] = max(merged.get(url, 0), host_priority.get(host, 0))
+
+    return [url for url, _ in sorted(merged.items(), key=lambda item: (-item[1], item[0]))]
 
 @router.get("/project/{project_id}/summary")
 async def get_report_summary(project_id: str):
@@ -19,19 +72,22 @@ async def get_report_summary(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    from app.services.asset_counts import collect_counts, is_live_http_host
+
+    counts = await collect_counts(db.assets, project_id)
     cursor = db.assets.find({"project_id": project_id})
     assets = await cursor.to_list(length=1000)
-    
+
     # Analyze risk factors (exposed administrative ports, expired TLS certs, etc.)
     exposed_admin_services = []
     total_ports = set()
     live_count = 0
     subdomains = []
-    
+
     for asset in assets:
-        if asset.get("status") == "live":
+        if is_live_http_host(asset):
             live_count += 1
-            
+
         if asset.get("type") == "subdomain":
             subdomains.append(asset.get("domain"))
             
@@ -51,7 +107,10 @@ async def get_report_summary(project_id: str):
         "project_name": project["name"],
         "generated_at": datetime.utcnow().isoformat(),
         "total_assets": len(assets),
+        "resolved_hosts": counts["resolved_hosts"],
+        "passive_candidates": counts["passive_candidates"],
         "live_hosts": live_count,
+        "urls_total": counts["urls_total"],
         "unique_open_ports": list(total_ports),
         "exposed_admin_services": exposed_admin_services,
         "risk_score": 100 - (len(exposed_admin_services) * 10) if len(exposed_admin_services) <= 10 else 0
@@ -199,3 +258,67 @@ async def export_html_report(project_id: str):
     </html>
     """
     return html_content
+
+
+@router.get("/project/{project_id}/export/urls")
+async def export_url_list(project_id: str):
+    """Plain-text URL list importable by Burp/ZAP and other tooling."""
+    db = get_database()
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID format")
+
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    cursor = db.assets.find({"project_id": project_id, "type": {"$in": list(EXPORT_URL_TYPES)}})
+    assets = await cursor.to_list(length=50000)
+    urls = collect_export_urls(assets, project.get("scope"))
+    content = "\n".join(urls) + ("\n" if urls else "")
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", str(project.get("name") or "project"))[:60] or "project"
+    return PlainTextResponse(
+        content,
+        headers={"Content-Disposition": f'attachment; filename="reconforge_{safe_name}_urls.txt"'},
+    )
+
+
+@router.get("/project/{project_id}/export/burp")
+async def export_burp_xml(project_id: str):
+    """URL list in a simple XML envelope for Burp/ZAP imports.
+
+    No proxy automation is performed — this is an export-only convenience.
+    """
+    db = get_database()
+    if not ObjectId.is_valid(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project ID format")
+
+    project = await db.projects.find_one({"_id": ObjectId(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    cursor = db.assets.find({"project_id": project_id, "type": {"$in": list(EXPORT_URL_TYPES)}})
+    assets = await cursor.to_list(length=50000)
+    urls = collect_export_urls(assets, project.get("scope"))
+
+    items = []
+    for url in urls:
+        parsed = urlparse(url)
+        items.append(
+            "  <item>\n"
+            f"    <url>{xml_escape(url)}</url>\n"
+            f"    <host>{xml_escape(parsed.netloc)}</host>\n"
+            f"    <path>{xml_escape(parsed.path or '/')}</path>\n"
+            f"    <method>GET</method>\n"
+            "  </item>"
+        )
+    xml_content = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f"<!-- ReconForge URL export: {xml_escape(str(project.get('name') or 'project'))} -->\n"
+        "<items>\n" + "\n".join(items) + ("\n" if items else "") + "</items>\n"
+    )
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", str(project.get("name") or "project"))[:60] or "project"
+    return Response(
+        content=xml_content,
+        media_type="application/xml",
+        headers={"Content-Disposition": f'attachment; filename="reconforge_{safe_name}_burp.xml"'},
+    )

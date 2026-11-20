@@ -332,10 +332,92 @@ Customize environment variables in `.env`:
 
 ---
 
-## 7. Scan Modes
+## 7. Scan Model — One Full Scan + Per-Phase Switches
 
-*   **FAST SCAN**: Runs passive enumeration, DNS resolution, port scanning, web probing, Katana crawling, Uro normalization, GF patterns, and Nuclei host exposure checks. Optimized for speed and low footprint.
-*   **DEEP SCAN**: Extends the Fast Scan by executing historical GAU URL extraction, JS endpoint discovery (LinkFinder), visual screenshot capture (GoWitness), parameter-specific active XSS validation (Dalfox), and open redirect confirmations (OpenRedirex).
+The Fast/Deep selector has been removed. Every scan runs the same full
+pipeline; expensive phases are enabled per project from **Project Settings →
+Scan Phases**. Each switch is **OFF by default**, shows an estimated cost, and
+has a hard time cap (seconds). At the cap the phase's process tree is killed,
+partial output is kept, and a `stage_timeout` event is recorded.
+
+**Always-on phases**
+
+Passive discovery, DNS resolution, HTTPX probing, subdomain takeover checks,
+Katana, SubJS, JS analysis, URL merge/Uro, GF classification, and a baseline
+top-1000 port scan.
+
+**Optional phases** (`phase_switches` on the project document)
+
+| Switch | Default | Time cap default | Estimated cost |
+|---|---|---|---|
+| `dns_bruteforce` — brute force + permutations | OFF | 600s | High |
+| `waymore` — historical archive supplement | OFF | 240s | Medium |
+| `ffuf` — content discovery | OFF | 600s | High |
+| `param_discovery` — Arjun/x8 | OFF | 300s | Medium |
+| `wide_port_scan` — upgrade baseline to `port_range` | OFF | 600s | High |
+| `active_scanners` — Nuclei/Dalfox/OpenRedirex | OFF | 900s | Very high |
+| `screenshots` — GoWitness | OFF | 300s | Medium |
+
+Active scanners remain governed by `scan_profile`; the default `recon` profile
+still skips Nuclei, Dalfox, and OpenRedirex. Time caps are clamped to 1–7200s.
+
+Legacy `scan_mode` values on old jobs and schedules are still accepted and
+displayed, but new runs are stored as `scan_mode: "full"`. The scheduler ignores
+a legacy schedule mode and launches a full scan.
+
+**Targeted runs**
+
+Run ffuf, Arjun/x8, or a wide port scan on selected hosts only:
+
+```http
+POST /api/v1/jobs/project/{project_id}/targeted
+Content-Type: application/json
+
+{
+  "tool": "ffuf",                // ffuf | arjun | naabu
+  "hosts": ["https://app.example.com"],
+  "port_range": "1-2000",        // naabu only, optional
+  "time_cap_seconds": 600        // optional, clamped 1-7200
+}
+```
+
+The request is scope-filtered before execution. The run gets its own `job_id`,
+applies the project rate limit, has a hard timeout, records `executed_phases`,
+`phase_durations` and `run_assets`, saves assets normally, and appears in
+**Run History** as a targeted run (`run_kind: "targeted"`).
+
+**Per-phase durations**
+
+Executed phases emit `phase_timing` events; Run History shows each phase's
+duration in the run inspection modal. Diffing and run comparison only compare
+asset types whose producing phase ran in **both** runs, so a switch left OFF
+never produces stale/closed/removed noise.
+
+### Phase 8 optional tools (WSL install commands)
+
+```bash
+# JS analysis
+go install github.com/BishopFox/jsluice/cmd/jsluice@latest
+pipx install xnLinkFinder
+go install github.com/denandz/sourcemapper@latest
+
+# Secret scanning (offline, no verification)
+go install github.com/trufflesecurity/trufflehog/v3@latest
+go install github.com/gitleaks/gitleaks/v8@latest
+
+# Cloud buckets (read-only checks; no content downloads)
+git clone https://github.com/initstring/cloud_enum.git ~/tools/cloud_enum
+pip install -r ~/tools/cloud_enum/requirements.txt
+pipx install s3scanner
+
+# OAST + WordPress validation
+go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest
+sudo apt install -y wpscan   # or: sudo gem install wpscan
+```
+
+All tools are in the WSL Tool Registry with absolute-path resolution and
+`backend/storage/tool_paths_override.json` override support. Full details and
+manual tests are in `docs/PHASE8.md`.
 
 ---
 

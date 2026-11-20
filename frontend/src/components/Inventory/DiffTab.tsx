@@ -25,8 +25,13 @@ export interface ScanDiffSummary {
   closed_ports_count: number;
   changed_hosts_count: number;
   new_js_files_count: number;
+  modified_js_files_count?: number;
   new_findings_count: number;
   new_content_paths_count?: number;
+  new_secret_findings_count?: number;
+  new_buckets_count?: number;
+  new_recon_info_count?: number;
+  changed_screenshots_count?: number;
   total_changes: number;
 }
 
@@ -52,6 +57,12 @@ export interface ScanDiffData {
   closed_ports: { domain: string; port: number }[];
   changed_hosts: HostFingerprintChange[];
   new_js_files: string[];
+  modified_js_files?: {
+    url: string;
+    host?: string;
+    old_hash?: string;
+    new_hash?: string;
+  }[];
   new_findings: {
     domain?: string;
     matched_url: string;
@@ -67,6 +78,42 @@ export interface ScanDiffData {
     host?: string;
     status_code?: number;
     content_length?: number;
+  }[];
+  new_secret_findings?: {
+    key?: string;
+    secret_type?: string;
+    host?: string;
+    url?: string;
+    location?: string;
+    line?: number;
+    masked_preview?: string;
+    severity?: string;
+  }[];
+  new_buckets?: {
+    value?: string;
+    url?: string;
+    host?: string;
+    bucket_name?: string;
+    provider?: string;
+    public?: boolean;
+    in_scope_keyword?: string;
+  }[];
+  new_recon_info?: {
+    key?: string;
+    template_id?: string;
+    template_name?: string;
+    matched_url?: string;
+    host?: string;
+    tags?: string[];
+  }[];
+  changed_screenshots?: {
+    url?: string;
+    host?: string;
+    old_hash?: string;
+    new_hash?: string;
+    screenshot_path?: string;
+    filename?: string;
+    run_id?: string;
   }[];
 }
 
@@ -96,7 +143,12 @@ type DiffSection =
   | "fingerprints"
   | "findings"
   | "content_paths"
-  | "js";
+  | "js"
+  | "modified_js"
+  | "secrets"
+  | "buckets"
+  | "recon_info"
+  | "screenshots";
 
 export const DiffTab: React.FC<DiffTabProps> = ({
   projectId,
@@ -155,8 +207,13 @@ export const DiffTab: React.FC<DiffTabProps> = ({
     closed_ports: [],
     changed_hosts: [],
     new_js_files: [],
+    modified_js_files: [],
     new_findings: [],
     new_content_paths: [],
+    new_secret_findings: [],
+    new_buckets: [],
+    new_recon_info: [],
+    changed_screenshots: [],
   };
 
   const summary = diffDoc?.summary || {
@@ -167,8 +224,13 @@ export const DiffTab: React.FC<DiffTabProps> = ({
     closed_ports_count: 0,
     changed_hosts_count: 0,
     new_js_files_count: 0,
+    modified_js_files_count: 0,
     new_findings_count: 0,
     new_content_paths_count: 0,
+    new_secret_findings_count: 0,
+    new_buckets_count: 0,
+    new_recon_info_count: 0,
+    changed_screenshots_count: 0,
     total_changes: 0,
   };
 
@@ -205,12 +267,47 @@ export const DiffTab: React.FC<DiffTabProps> = ({
       (f.parameter && f.parameter.toLowerCase().includes(filterText))
   );
   const filteredJs = diff.new_js_files.filter((u) => u.toLowerCase().includes(filterText));
+  const filteredModifiedJs = (diff.modified_js_files || []).filter(
+    (j) =>
+      (j.url || "").toLowerCase().includes(filterText) ||
+      (j.host || "").toLowerCase().includes(filterText) ||
+      (j.new_hash || "").toLowerCase().includes(filterText)
+  );
   const filteredContentPaths = (diff.new_content_paths || []).filter(
     (cp) =>
       (cp.url || cp.value || "").toLowerCase().includes(filterText) ||
       (cp.domain || cp.host || "").toLowerCase().includes(filterText) ||
       String(cp.status_code || "").includes(filterText) ||
       String(cp.content_length || "").includes(filterText)
+  );
+  const filteredSecrets = (diff.new_secret_findings || []).filter(
+    (s) =>
+      (s.secret_type || "").toLowerCase().includes(filterText) ||
+      (s.host || "").toLowerCase().includes(filterText) ||
+      (s.url || "").toLowerCase().includes(filterText) ||
+      (s.location || "").toLowerCase().includes(filterText)
+  );
+  const filteredBuckets = (diff.new_buckets || []).filter(
+    (b) =>
+      (b.url || b.value || "").toLowerCase().includes(filterText) ||
+      (b.host || "").toLowerCase().includes(filterText) ||
+      (b.bucket_name || "").toLowerCase().includes(filterText) ||
+      (b.provider || "").toLowerCase().includes(filterText)
+  );
+  const filteredReconInfo = (diff.new_recon_info || []).filter(
+    (r) =>
+      (r.template_id || "").toLowerCase().includes(filterText) ||
+      (r.template_name || "").toLowerCase().includes(filterText) ||
+      (r.matched_url || "").toLowerCase().includes(filterText) ||
+      (r.host || "").toLowerCase().includes(filterText)
+  );
+  const filteredChangedScreenshots = (diff.changed_screenshots || []).filter(
+    (s) =>
+      (s.url || "").toLowerCase().includes(filterText) ||
+      (s.host || "").toLowerCase().includes(filterText) ||
+      (s.filename || "").toLowerCase().includes(filterText) ||
+      (s.old_hash || "").toLowerCase().includes(filterText) ||
+      (s.new_hash || "").toLowerCase().includes(filterText)
   );
 
   if (loading) {
@@ -482,6 +579,11 @@ export const DiffTab: React.FC<DiffTabProps> = ({
             { id: "findings", label: "New Findings", count: summary.new_findings_count },
             { id: "content_paths", label: "New Content Paths", count: summary.new_content_paths_count || 0 },
             { id: "js", label: "New JS", count: summary.new_js_files_count },
+            { id: "modified_js", label: "Modified JS", count: summary.modified_js_files_count || 0 },
+            { id: "secrets", label: "New Secrets", count: summary.new_secret_findings_count || 0 },
+            { id: "buckets", label: "New Buckets", count: summary.new_buckets_count || 0 },
+            { id: "recon_info", label: "Recon Info", count: summary.new_recon_info_count || 0 },
+            { id: "screenshots", label: "Changed Screenshots", count: summary.changed_screenshots_count || 0 },
           ].map((sec) => (
             <button
               key={sec.id}
@@ -968,6 +1070,244 @@ export const DiffTab: React.FC<DiffTabProps> = ({
                     <span className="text-[10px] px-1.5 py-0.5 bg-cyan-500/20 text-cyan-300 rounded font-bold ml-2">
                       +JS
                     </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Modified JavaScript Files (Phase 8.1 hash diff) */}
+        {(selectedSection === "all" || selectedSection === "modified_js") && (
+          <div className="bg-dark-card border border-dark-border rounded-xl p-4 glass">
+            <div className="flex items-center justify-between mb-3 border-b border-dark-border pb-2">
+              <div className="flex items-center space-x-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-fuchsia-500" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                  Modified JavaScript Files ({filteredModifiedJs.length})
+                </h3>
+              </div>
+              <span className="text-[10px] font-mono text-fuchsia-400 font-bold uppercase">
+                SHA-256 changed between runs
+              </span>
+            </div>
+            {filteredModifiedJs.length === 0 ? (
+              <p className="text-xs text-slate-500 font-mono py-2">
+                No modified JS content detected.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {filteredModifiedJs.map((js, idx) => (
+                  <div key={idx} className="bg-dark-bg/80 border border-fuchsia-500/30 rounded-lg p-3 text-xs font-mono">
+                    <div className="flex items-center justify-between mb-1">
+                      <a href={js.url} target="_blank" rel="noopener noreferrer" className="text-fuchsia-300 hover:text-cyber-accent break-all">
+                        {js.url}
+                      </a>
+                      <span className="text-[10px] px-1.5 py-0.5 bg-fuchsia-500/20 text-fuchsia-300 rounded font-bold ml-2">
+                        CHANGED
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-500 break-all">
+                      <span className="text-rose-400">{String(js.old_hash || "none").slice(0, 16)}</span>
+                      <ChevronRight className="inline w-3 h-3 mx-1 text-slate-500" />
+                      <span className="text-emerald-400">{String(js.new_hash || "none").slice(0, 16)}</span>
+                      {js.host ? <span className="ml-2 text-slate-400">({js.host})</span> : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* New Secret Findings (masked values only) */}
+        {(selectedSection === "all" || selectedSection === "secrets") && (
+          <div className="bg-dark-card border border-dark-border rounded-xl p-4 glass">
+            <div className="flex items-center justify-between mb-3 border-b border-dark-border pb-2">
+              <div className="flex items-center space-x-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-500" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                  New Secret Candidates ({filteredSecrets.length})
+                </h3>
+              </div>
+              <span className="text-[10px] font-mono text-rose-400 font-bold uppercase">
+                Masked — never raw values
+              </span>
+            </div>
+            {filteredSecrets.length === 0 ? (
+              <p className="text-xs text-slate-500 font-mono py-2">No new secret candidates in this scan.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead>
+                    <tr className="text-slate-500 uppercase text-[10px]">
+                      <th className="p-2">Type</th>
+                      <th className="p-2">Host</th>
+                      <th className="p-2">Location</th>
+                      <th className="p-2">Masked Preview</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredSecrets.map((s, idx) => (
+                      <tr key={s.key || idx} className="border-t border-dark-border">
+                        <td className="p-2 text-rose-300">{s.secret_type || "secret"}</td>
+                        <td className="p-2 text-slate-300">
+                          {s.host ? (
+                            <a
+                              href={`https://${s.host}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="hover:text-cyber-accent hover:underline"
+                            >
+                              {s.host}
+                            </a>
+                          ) : (
+                            "-"
+                          )}
+                        </td>
+                        <td className="p-2 text-slate-400 break-all">
+                          {s.location ? (
+                            /^https?:\/\//i.test(String(s.location)) ? (
+                              <a
+                                href={String(s.location)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-cyber-accent hover:underline"
+                              >
+                                {s.location}
+                              </a>
+                            ) : (
+                              s.location
+                            )
+                          ) : s.url ? (
+                            <a
+                              href={String(s.url)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-cyber-accent hover:underline"
+                            >
+                              {s.url}
+                            </a>
+                          ) : (
+                            "-"
+                          )}
+                        </td>
+                        <td className="p-2 text-amber-300">{s.masked_preview || "****"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* New Cloud Buckets */}
+        {(selectedSection === "all" || selectedSection === "buckets") && (
+          <div className="bg-dark-card border border-dark-border rounded-xl p-4 glass">
+            <div className="flex items-center justify-between mb-3 border-b border-dark-border pb-2">
+              <div className="flex items-center space-x-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                  New Cloud Bucket Candidates ({filteredBuckets.length})
+                </h3>
+              </div>
+              <span className="text-[10px] font-mono text-amber-400 font-bold uppercase">
+                In-scope names only — no content downloaded
+              </span>
+            </div>
+            {filteredBuckets.length === 0 ? (
+              <p className="text-xs text-slate-500 font-mono py-2">No new bucket candidates in this scan.</p>
+            ) : (
+              <div className="space-y-2">
+                {filteredBuckets.map((b, idx) => (
+                  <div key={b.value || b.url || idx} className="flex items-center justify-between gap-3 bg-dark-bg/70 border border-amber-500/25 rounded p-3 text-xs font-mono">
+                    <a
+                      href={b.url || b.value}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-amber-300 break-all hover:text-cyber-accent hover:underline"
+                    >
+                      {b.url || b.value}
+                    </a>
+                    <span className="text-slate-400 shrink-0">
+                      {b.provider || "cloud"} | {b.public ? "public listing" : "exists"} | keyword: {b.in_scope_keyword || "-"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* New Recon Info (info-level, never vulnerabilities) */}
+        {(selectedSection === "all" || selectedSection === "recon_info") && (
+          <div className="bg-dark-card border border-dark-border rounded-xl p-4 glass">
+            <div className="flex items-center justify-between mb-3 border-b border-dark-border pb-2">
+              <div className="flex items-center space-x-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-sky-500" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                  New Recon Info ({filteredReconInfo.length})
+                </h3>
+              </div>
+              <span className="text-[10px] font-mono text-sky-400 font-bold uppercase">
+                Info-level Nuclei matches — not scored
+              </span>
+            </div>
+            {filteredReconInfo.length === 0 ? (
+              <p className="text-xs text-slate-500 font-mono py-2">No new info-level recon notes.</p>
+            ) : (
+              <div className="space-y-2">
+                {filteredReconInfo.map((r, idx) => (
+                  <div key={r.key || idx} className="bg-dark-bg/70 border border-sky-500/25 rounded p-3 text-xs font-mono">
+                    <div className="text-sky-300 break-all">{r.template_name || r.template_id || "info"}</div>
+                    <div className="text-slate-400 break-all mt-1">{r.matched_url || r.host || "-"}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Changed Screenshots (page hash changed between runs) */}
+        {(selectedSection === "all" || selectedSection === "screenshots") && (
+          <div className="bg-dark-card border border-dark-border rounded-xl p-4 glass">
+            <div className="flex items-center justify-between mb-3 border-b border-dark-border pb-2">
+              <div className="flex items-center space-x-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-violet-500" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                  Changed Screenshots ({filteredChangedScreenshots.length})
+                </h3>
+              </div>
+              <span className="text-[10px] font-mono text-violet-400 font-bold uppercase">
+                Page hash changed between runs
+              </span>
+            </div>
+            {filteredChangedScreenshots.length === 0 ? (
+              <p className="text-xs text-slate-500 font-mono py-2">No screenshot page changes detected.</p>
+            ) : (
+              <div className="space-y-2">
+                {filteredChangedScreenshots.map((shot, idx) => (
+                  <div key={`${shot.url}-${idx}`} className="bg-dark-bg/70 border border-violet-500/25 rounded p-3 text-xs font-mono">
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <a
+                        href={shot.url || (shot.host ? `https://${shot.host}` : "#")}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-violet-300 break-all select-all hover:text-cyber-accent hover:underline"
+                      >
+                        {shot.url || shot.host}
+                      </a>
+                      <span className="shrink-0 px-1.5 py-0.5 bg-violet-500/20 text-violet-300 rounded font-bold text-[9px] uppercase">
+                        Screenshot Changed
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-500 break-all select-all">
+                      {shot.filename ? <span className="text-slate-400 mr-2">{shot.filename}</span> : null}
+                      <span className="text-rose-400">{String(shot.old_hash || "none").slice(0, 16)}</span>
+                      <ChevronRight className="inline w-3 h-3 mx-1 text-slate-500" />
+                      <span className="text-emerald-400">{String(shot.new_hash || "none").slice(0, 16)}</span>
+                    </div>
                   </div>
                 ))}
               </div>

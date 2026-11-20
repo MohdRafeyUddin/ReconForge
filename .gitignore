@@ -7,6 +7,10 @@ venv/
 backend/.venv/
 backend/venv/
 .env
+backend/.env
+*.tmp
+tmp*
+backend/tmp*
 
 # Node
 node_modules/
@@ -25,6 +29,10 @@ logs/
 *.log
 resume.cfg
 backend/storage/
+backend/storage/js/
+backend/storage/runs/
+backend/storage/screenshots/
+backend/storage/*.key
 storage/
 
 # Security/private
@@ -48,3 +56,6 @@ mongodb-data/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Claude local settings
+.claude/settings.local.json

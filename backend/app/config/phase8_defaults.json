@@ -1,0 +1,39 @@
+{
+  "js_analysis": {
+    "enabled": true,
+    "max_files_fast": 25,
+    "max_files_deep": 100,
+    "max_file_kb": 500,
+    "timeout_seconds": 15,
+    "sourcemaps_deep_only": true,
+    "sourcemap_max_files": 10
+  },
+  "secrets_scan": {
+    "enabled": true,
+    "max_files": 500,
+    "timeout_seconds": 180
+  },
+  "cloud_enum": {
+    "enabled": false,
+    "max_keywords": 10,
+    "timeout_seconds": 180
+  },
+  "oast": {
+    "enabled": false,
+    "server": "",
+    "token": "",
+    "startup_timeout_seconds": 20
+  },
+  "nuclei_options": {
+    "auto_scan": false,
+    "update_templates": false,
+    "custom_templates_dir": ""
+  },
+  "tech_routing": {
+    "enabled": true,
+    "max_hosts_per_tech": 25
+  },
+  "exports": {
+    "max_urls": 50000
+  }
+}
